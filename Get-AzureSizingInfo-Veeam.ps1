@@ -1,939 +1,652 @@
-#requires -Version 7.0
-#requires -Modules Az.Accounts, Az.Aks, Az.Compute, Az.Network, Az.Storage, Az.Sql, Az.SqlVirtualMachine, Az.ResourceGraph, Az.Monitor, Az.Resources, Az.RecoveryServices, Az.CosmosDB, Az.CostManagement
 <#
 .SYNOPSIS
-  Azure inventory & metrics tailored for Veeam sizing (VBA, VBR NAS/Agents, Kasten K10).
+  Presales discovery for sizing Veeam Backup for Azure.
 
 .DESCRIPTION
-  Collects VM & disk footprints (+ NIC/vNET/subnet & public IPs), Storage Accounts (Blob/File metrics),
-  optional per-container stats, AKS & node pools, Azure Files shares, optional Azure SQL (DB/MI) and Cosmos DB
-  outlines/metrics, and Azure Backup vaults, policies & protected items. Optional monthly cost insights.
-  Outputs CSVs plus a summary, planners, and a manifest—zipped.
-
-  v1.3.6 defaults to showing **ALL tag keys** encountered (global discovery ∪ per-object tags), so Tag:* columns
-  appear in CSVs even when tags vary by object.
-
-.PARAMETER Source
-  All | Current | Subscriptions | SubscriptionIds | ManagementGroups
+  Inventories Azure VMs (IPs, tags, disks, VM size), Azure SQL (DB + MI),
+  Azure Files, Azure Blob (optional size calc), and Azure Backup (vaults/policies).
+  Optionally fetches Azure Backup retail pricing and estimates protected-instance tier per VM.
 
 .PARAMETER Subscriptions
-  One or more subscription display names (when -Source Subscriptions)
+  One or more subscription IDs or names. Default = all accessible.
 
-.PARAMETER SubscriptionIds
-  One or more subscription IDs (when -Source SubscriptionIds)
+.PARAMETER TenantId
+  Optional tenant to login to. If omitted, uses current/default.
 
-.PARAMETER ManagementGroups
-  One or more Azure Management Group names (when -Source ManagementGroups)
+.PARAMETER Region
+  Optional Azure region filter (e.g., "westus2"). Case-insensitive equals match.
 
-.PARAMETER Scope
-  Compute, Storage, Databases, Kubernetes, Backup, Cosmos, Identity  (default: all)
+.PARAMETER TagFilter
+  Optional hashtable of tag filters, e.g. @{ "Environment"="Prod"; "Owner"="IT" }.
+  VM results will include only VMs matching ALL provided tag pairs.
 
-.PARAMETER DeepContainers
-  Traverse each blob container to compute hot/cool/archive/unknown bytes & counts.
+.PARAMETER CalculateBlobSizes
+  When set, enumerates blobs to sum container sizes (can be slow on large accounts).
 
-.PARAMETER DeepBackup
-  Enumerate Azure Backup policies and protected items per vault & workload type.
+.PARAMETER IncludePricing
+  When set, queries the Azure Retail Prices API for Azure Backup protected instance tiers
+  per VM’s region and emits an estimated monthly cost based on provisioned disk totals:
+    - Tier S: ≤ 50 GB
+    - Tier M: 50–500 GB
+    - Tier L: > 500 GB
+  Also attempts to fetch Backup Storage LRS/GRS $/GB for each region.
 
-.PARAMETER DeepCosmos
-  Pull Cosmos DB account-level metrics (DocumentCount, DataUsage, PhysicalPartitionSizeInfo, PhysicalPartitionCount, IndexUsage).
-
-.PARAMETER CostInsights
-  Include monthly cost insights for -CostServices over -CostMonths (max 12).
-
-.PARAMETER CostMonths
-  Cost lookback window in months (max 12, default 12).
-
-.PARAMETER CostServices
-  ServiceName filters for cost (default: "Backup"). Provide one or more service names.
-
-.PARAMETER Parallel
-  Degree of parallelism for per-subscription processing (default: 6)
-
-.PARAMETER Anonymize
-  Anonymize identifiers (resource names, ids, RGs, subscription names, tenant, etc.) using salted SHA256.
-
-.PARAMETER AnonymizeSalt
-  Salt for anonymization. If omitted, a random in-memory salt is used (non-repeatable across runs).
-
-.PARAMETER ChangeRatePercent
-  Estimated daily change rate (%) for repo sizing heuristic (default: 3)
-
-.PARAMETER RetentionDays
-  Daily restore points retained (default: 30)
-
-.PARAMETER CompressionRatio
-  Effective compression+dedupe ratio for repo sizing heuristic (default: 0.6)
-
-.PARAMETER PlannerTag
-  Tag key to generate a tag-grouped planner (e.g., Environment, App, BU). Default: 'Environment'
+.PARAMETER OutputPath
+  Folder to write CSVs. Will be created if not present.
 
 .NOTES
-  Author: Michael Wisniewski
-  Version: 1.3.6 (2025-10-27)
-  – Fixes subscription/subnet variable collision
-  – Shows ALL tag keys by default (global ∪ per-object)
-  – Keeps subnet + public IP details for VMs
+  Requires Az modules:
+    Az.Accounts, Az.Resources, Az.Compute, Az.Network, Az.Sql, Az.Storage, Az.RecoveryServices, Az.Monitor
 #>
 
 [CmdletBinding()]
 param(
-  [ValidateSet('All','Current','Subscriptions','SubscriptionIds','ManagementGroups')]
-  [string]$Source = 'All',
-
-  [string[]]$Subscriptions,
-  [string[]]$SubscriptionIds,
-  [string[]]$ManagementGroups,
-
-  [ValidateSet('Compute','Storage','Databases','Kubernetes','Backup','Cosmos','Identity')]
-  [string[]]$Scope = @('Compute','Storage','Databases','Kubernetes','Backup','Cosmos','Identity'),
-
-  [switch]$DeepContainers,
-  [switch]$DeepBackup,
-  [switch]$DeepCosmos,
-
-  [switch]$CostInsights,
-  [ValidateRange(1,12)][int]$CostMonths = 12,
-  [string[]]$CostServices = @('Backup'),
-
-  [int]$Parallel = 6,
-
-  [switch]$Anonymize,
-  [string]$AnonymizeSalt,
-
-  [double]$ChangeRatePercent = 3,
-  [int]$RetentionDays = 30,
-  [double]$CompressionRatio = 0.6,
-
-  [string]$PlannerTag = 'Environment'
+  [string[]] $Subscriptions,
+  [string]   $TenantId,
+  [string]   $Region,
+  [hashtable]$TagFilter,
+  [switch]   $CalculateBlobSizes,
+  [switch]   $IncludePricing,
+  [string]   $OutputPath = ".\vb_azure_discovery"
 )
 
-# ---------------- init & helpers ----------------
-$ErrorActionPreference = 'Stop'
-$start    = Get-Date
-$runStamp = $start.ToString('yyyy-MM-dd_HHmmss')
-$outDir   = Join-Path -Path "." -ChildPath "out"
-if (!(Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
+#region Helpers
 
-$logFile  = Join-Path $outDir "veeam_run_$runStamp.log.jsonl"
-function Write-Log {
-  param([string]$Level='INFO',[string]$Message,[hashtable]$Data)
-  $obj = [ordered]@{
-    ts     = (Get-Date).ToString('o')
-    level  = $Level
-    msg    = $Message
-    data   = $Data
-  } | ConvertTo-Json -Depth 6
-  Add-Content -Path $logFile -Value $obj
-  if($Level -in 'WARN','ERROR'){ Write-Host "[$Level] $Message" -ForegroundColor Yellow } else { Write-Host $Message }
+function Get-PublicIpFromId {
+  param([Parameter(Mandatory=$true)][string]$ResourceId)
+  try {
+    $r = Get-AzResource -ResourceId $ResourceId -ExpandProperties -ErrorAction Stop
+    # Many PIPs expose .properties.ipAddress when allocated; may be $null if dynamic + deallocated
+    return $r.Properties.ipAddress
+  } catch {
+    Write-Warning "PIP lookup failed for $ResourceId ($($_.Exception.Message))"
+    return $null
+  }
 }
 
-# CSV helper (normalizes columns across rows)
-function Save-Csv {
-  param([Parameter(Mandatory)][array]$Data,[Parameter(Mandatory)][string]$Path,[switch]$NoTypeInfo)
-  if($Data -and $Data.Count -gt 0){
-    $headers = New-Object System.Collections.Generic.HashSet[string]
-    foreach($r in $Data){ foreach($n in $r.PSObject.Properties.Name){ [void]$headers.Add($n) } }
-    $norm = foreach($r in $Data){ $o=[ordered]@{}; foreach($h in $headers){ $o[$h]=$r.$h }; [pscustomobject]$o }
-    if($NoTypeInfo){ $norm | Export-Csv -Path $Path -NoTypeInformation } else { $norm | Export-Csv -Path $Path }
-    Write-Log -Message "Wrote $($Data.Count) rows -> $Path"
-    return $true
-  } else { Write-Log -Level 'WARN' -Message "No rows to write for $Path"; return $false }
+function Get-ResourceById {
+  param([Parameter(Mandatory=$true)][string]$ResourceId)
+  try { return Get-AzResource -ResourceId $ResourceId -ExpandProperties -ErrorAction Stop }
+  catch {
+    Write-Verbose "Generic resource lookup failed for $ResourceId ($($_.Exception.Message))"
+    return $null
+  }
 }
 
-# culture guard for numeric formatting
-$origCulture = [System.Globalization.CultureInfo]::CurrentCulture
-[Threading.Thread]::CurrentThread.CurrentCulture  = 'en-US'
-[Threading.Thread]::CurrentThread.CurrentUICulture= 'en-US'
-
-# anonymization (salted SHA256 -> 10 chars)
-$script:Anonymize = [bool]$Anonymize
-$anonSalt = if($Anonymize){ if($AnonymizeSalt){ $AnonymizeSalt } else { [guid]::NewGuid().Guid } } else { '' }
-$sha256   = [System.Security.Cryptography.SHA256]::Create()
-function Anon {
-  param([object]$Value)
-  if(-not $script:Anonymize){ return $Value }
-  if($null -eq $Value){ return $null }
-  $s = "$($Value.ToString())|$($anonSalt)"
-  $bytes = [Text.Encoding]::UTF8.GetBytes($s)
-  $hash  = $sha256.ComputeHash($bytes)
-  $hex   = -join ($hash | ForEach-Object { $_.ToString("x2") })
-  return "anon-$($hex.Substring(0,10))"
+function Ensure-Connected {
+  try {
+    if (-not (Get-AzContext)) {
+      if ($PSBoundParameters.ContainsKey('TenantId')) {
+        Connect-AzAccount -Tenant $TenantId | Out-Null
+      } else {
+        Connect-AzAccount | Out-Null
+      }
+    }
+  } catch {
+    throw "Failed to authenticate to Azure: $($_.Exception.Message)"
+  }
 }
-
-# ---------------- subscription resolution ----------------
-try { $ctx = Get-AzContext } catch { }
-if(-not $ctx){ Connect-AzAccount | Out-Null; $ctx = Get-AzContext }
 
 function Resolve-Subscriptions {
-  switch($Source){
-    'Current'           { return ,(Get-AzSubscription -SubscriptionId $ctx.Subscription.Id) }
-    'Subscriptions'     { return $Subscriptions     | ForEach-Object { Get-AzSubscription -SubscriptionName $_ } }
-    'SubscriptionIds'   { return $SubscriptionIds   | ForEach-Object { Get-AzSubscription -SubscriptionId  $_ } }
-    'ManagementGroups'  {
-      $all = @()
-      foreach($mg in $ManagementGroups){
-        $names = (Search-AzGraph -Query "resourcecontainers | where type =~ 'microsoft.resources/subscriptions'" -ManagementGroup $mg).name
-        $all  += $names | ForEach-Object { Get-AzSubscription -SubscriptionName $_ }
-      }
-      return $all
+  $all = Get-AzSubscription
+  if ($Subscriptions -and $Subscriptions.Count -gt 0) {
+    $resolved = @()
+    foreach ($s in $Subscriptions) {
+      $hit = $all | Where-Object { $_.Id -eq $s -or $_.Name -eq $s }
+      if (-not $hit) { Write-Warning "Subscription '$s' not found or not accessible."; continue }
+      $resolved += $hit
     }
-    Default             { return Get-AzSubscription }
+    return $resolved
   }
+  return $all
 }
-$subs = @(Resolve-Subscriptions)
-if(-not $subs){ throw "No subscriptions resolved with -Source $Source" }
-Write-Log -Message "Resolved subscriptions" -Data @{ count = $subs.Count; source = $Source }
 
-$scopes = $Scope
+function Matches-Region($resourceRegion) {
+  if (-not $Region) { return $true }
+  # Normalize both (Azure regions are lowercase in ARM)
+  return ($resourceRegion -ieq $Region)
+}
 
-# ---------------- per-subscription work (parallel) ----------------
-$allRows = $subs | ForEach-Object -Parallel {
-  param($using:scopes,$using:DeepContainers,$using:DeepBackup,$using:DeepCosmos,
-        $using:CostInsights,$using:CostMonths,$using:CostServices,
-        $using:ChangeRatePercent,$using:RetentionDays,$using:CompressionRatio,
-        $using:Anonymize,$using:anonSalt,$using:PlannerTag)
-
-  # local helpers in runspace
-  $sha256 = [System.Security.Cryptography.SHA256]::Create()
-  function Anon {
-    param([object]$Value)
-    if(-not $using:Anonymize){ return $Value }
-    if($null -eq $Value){ return $null }
-    $s = "$($Value.ToString())|$($using:anonSalt)"
-    $bytes = [Text.Encoding]::UTF8.GetBytes($s)
-    $hash  = $sha256.ComputeHash($bytes)
-    $hex   = -join ($hash | ForEach-Object { $_.ToString("x2") })
-    return "anon-$($hex.Substring(0,10))"
+function Matches-Tags($tags) {
+  if (-not $TagFilter -or $TagFilter.Keys.Count -eq 0) { return $true }
+  if (-not $tags) { return $false }
+  foreach ($k in $TagFilter.Keys) {
+    if (-not $tags.ContainsKey($k)) { return $false }
+    if ($TagFilter[$k] -ne $null -and ($tags[$k] -ne $TagFilter[$k])) { return $false }
   }
+  return $true
+}
 
-  $metricDefCache = @{}
-  function Get-MetricLastMax {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$ResourceId,[Parameter(Mandatory)][string]$MetricName)
-    try {
-      if (-not $metricDefCache.ContainsKey($ResourceId)) {
-        try { $defs = Get-AzMetricDefinition -ResourceId $ResourceId -ErrorAction Stop }
-        catch { return 0 }
-        $metricDefCache[$ResourceId] = $defs
-      } else {
-        $defs = $metricDefCache[$ResourceId]
-      }
-      if (-not $defs){ return 0 }
-      $def = $defs | Where-Object { $_.Name.Value -eq $MetricName -or $_.Name.Value -ieq $MetricName } | Select-Object -First 1
-      if (-not $def) { $def = $defs | Where-Object { $_.Name.Value -like "*$MetricName*" } | Select-Object -First 1 }
-      if (-not $def) { return 0 }
-      $ns = $def.MetricNamespaceName; if(-not $ns){ $ns = $def.Namespace }
-      $args = @{ ResourceId=$ResourceId; MetricName=$def.Name.Value; AggregationType='Maximum'; StartTime=(Get-Date).AddDays(-1); ErrorAction='Stop'; WarningAction='SilentlyContinue' }
-      if ($ns) { $args.MetricNamespace = $ns }
-      $m = Get-AzMetric @args
-      if (-not $m -or -not $m.Data -or -not $m.Data.Maximum) { return 0 }
-      [double](($m.Data.Maximum | Select-Object -Last 1) ?? 0)
-    } catch { 0 }
-  }
+function New-Output {
+  if (-not (Test-Path $OutputPath)) { New-Item -ItemType Directory -Path $OutputPath | Out-Null }
+}
 
-  function Merge-Tags { param([hashtable[]]$TagSets) $m=@{}; foreach($t in $TagSets){ if($t){ foreach($k in $t.Keys){ $m[$k]=$t[$k] } } } $m }
+function Flatten-Tags($tags) {
+  if (-not $tags) { return "" }
+  ($tags.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ';'
+}
 
-  function Add-TagColumns {
-    param(
-      [hashtable]$h,
-      [hashtable]$tags,
-      [string[]]$globalKeys,
-      [string]$Prefix = 'Tag: '
-    )
-    # Always include ALL keys = (global discovery ∪ object keys)
-    $objKeys = @(); if($tags){ $objKeys = @($tags.Keys | Where-Object { $_ }) }
-    $useKeys = @($globalKeys + $objKeys | Sort-Object -Unique)
-    foreach($k in $useKeys){ $h["$Prefix$k"] = ( $tags -and $tags.ContainsKey($k) ) ? $tags[$k] : '-' }
-    # Good to keep a raw JSON too for validation/debugging:
-    if($tags){ $h["TagsJson"] = ($tags | ConvertTo-Json -Depth 4 -Compress) } else { $h["TagsJson"] = $null }
-  }
+#endregion Helpers
 
-  $out = @()
+#region VM Inventory
+function Get-VM-Inventory {
+  $results = New-Object System.Collections.Generic.List[object]
+  $nicsCache = @{}
+  $pipsCache = @{}
 
-  # lock subscription identity BEFORE any other lookups
-  $azSubObj       = $_
-  Set-AzContext -SubscriptionId $azSubObj.SubscriptionId | Out-Null
-  $azSubName      = $azSubObj.Name
-  $azSubId        = $azSubObj.SubscriptionId
-  $azTenantName   = (Get-AzTenant -TenantId $azSubObj.TenantId).DisplayName
+  foreach ($sub in $script:Subs) {
+    Write-Host "Processing VMs in subscription: $($sub.Name) [$($sub.Id)]" -ForegroundColor Cyan
+    Set-AzContext -SubscriptionId $sub.Id | Out-Null
 
-  # -------- tag key discovery (global) --------
-  $globalTagKeys = @()
-  try{
-    $q = @"
-resources
-| where isnotempty(tags)
-| mv-expand k = bag_keys(tags)
-| summarize by tostring(k)
-"@
-    $rg = Search-AzGraph -Query $q -First 100000 -Subscription $azSubId
-    $globalTagKeys = @($rg.k | Sort-Object -Unique | Where-Object { $_ })
-  } catch { $globalTagKeys = @() }
+    $vms = Get-AzVM -Status -ErrorAction SilentlyContinue
+    foreach ($vm in $vms) {
+      if (-not (Matches-Region $vm.Location)) { continue }
+      if (-not (Matches-Tags $vm.Tags)) { continue }
 
-  # ==================== Compute (VMs + NIC/VNET/SUBNET/PIP) ====================
-  if('Compute' -in $using:scopes){
-    try{
-      $vms = Get-AzVM -Status -ErrorAction SilentlyContinue
-      $sqlVms = @(); try{ $sqlVms = Get-AzSqlVM -ErrorAction SilentlyContinue } catch {}
-      $sqlNames = @($sqlVms | ForEach-Object Name)
+      # NICs, Private/Public IPs (direct, via LB, via NATGW)
+      $nicIds = @()
+      $privateIps = @()
+      $publicIpsDirect = @()
+      $publicIpsLB = @()
+      $publicIpsNAT = @()
 
-      foreach($vm in $vms){
-        $rgName = $vm.ResourceGroupName
-        $rgObj  = $null; try{ $rgObj = Get-AzResourceGroup -Name $rgName -ErrorAction SilentlyContinue } catch {}
-        $rgTags = ($rgObj?.Tags)
+      foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
+        $nicId = $nicRef.Id
+        $nicIds += $nicId
 
-        $vmTags = $vm.Tags
-        if(-not $vmTags -or $vmTags.Count -eq 0){
-          try{ $res = Get-AzResource -ResourceId $vm.Id -ErrorAction Stop; $vmTags = $res.Tags } catch {}
+        if (-not $nicsCache.ContainsKey($nicId)) {
+          try { $nicsCache[$nicId] = Get-AzNetworkInterface -ResourceId $nicId -ErrorAction Stop }
+          catch { Write-Warning "[$($vm.Name)] No access to NIC $nicId ($($_.Exception.Message))"; continue }
         }
+        $nic = $nicsCache[$nicId]
+        if (-not $nic) { continue }
 
-        # NICs
-        $nicRefs = @($vm.NetworkProfile.NetworkInterfaces)
-        $primaryNicRef = $nicRefs | Where-Object { $_.Primary } | Select-Object -First 1
-        if(-not $primaryNicRef){ $primaryNicRef = $nicRefs | Select-Object -First 1 }
+        foreach ($ipc in $nic.IpConfigurations) {
+          if ($ipc.PrivateIpAddress) { $privateIps += $ipc.PrivateIpAddress }
 
-        $nicObjs = @()
-        foreach($ref in $nicRefs){ try{ $nicObjs += Get-AzNetworkInterface -ResourceId $ref.Id } catch { } }
-        $primaryNic = $null
-        if($primaryNicRef){
-          $primaryNic = $nicObjs | Where-Object { $_.Id -eq $primaryNicRef.Id } | Select-Object -First 1
-          if(-not $primaryNic){ $primaryNic = $nicObjs | Select-Object -First 1 }
-        }
-        $nicTags = $primaryNic?.Tags
-
-        # Primary IP config & subnet/vnet
-        $primaryCfg = $null
-        if($primaryNic){ $primaryCfg = @($primaryNic.IpConfigurations) | Where-Object { $_.Primary } | Select-Object -First 1 }
-        if(-not $primaryCfg -and $primaryNic){ $primaryCfg = @($primaryNic.IpConfigurations) | Select-Object -First 1 }
-
-        $privateIP = $primaryCfg.PrivateIpAddress
-        $subnetId  = $primaryCfg.Subnet.Id
-
-        $vnetName=$null; $subnetName=$null; $subnetPrefix=$null; $subnetNsg=$null; $vnetTags=$null; $subnetTags=$null
-        if($subnetId){
-          $parts = $subnetId -split '/'
-          $vnetRg     = $parts[$parts.IndexOf('resourceGroups')+1]
-          $vnetName   = $parts[$parts.IndexOf('virtualNetworks')+1]
-          $subnetName = $parts[$parts.IndexOf('subnets')+1]
-          try{
-            $vnet = Get-AzVirtualNetwork -ResourceGroupName $vnetRg -Name $vnetName -ErrorAction Stop
-            $vnetTags = $vnet.Tags
-            $snCfg  = Get-AzVirtualNetworkSubnetConfig -Name $subnetName -VirtualNetwork $vnet
-            $subnetPrefix = ($snCfg.AddressPrefix | Select-Object -First 1)
-            if($snCfg.NetworkSecurityGroup){ $subnetNsg = $snCfg.NetworkSecurityGroup.Id.Split('/')[-1] }
-            try{ if($snCfg.Tags){ $subnetTags = $snCfg.Tags } } catch {}
-          } catch { }
-        }
-
-        # Public IP
-        $hasPip = 'No'; $publicIP = $null; $publicIPName=$null; $pipDns=$null
-        if($primaryCfg -and $primaryCfg.PublicIpAddress -and $primaryCfg.PublicIpAddress.Id){
-          try{
-            $pip = Get-AzPublicIpAddress -ResourceId $primaryCfg.PublicIpAddress.Id
-            if($pip){ $hasPip='Yes'; $publicIP=$pip.IpAddress; $publicIPName=$pip.Name; $pipDns=$pip.DnsSettings.Fqdn }
-          } catch { }
-        }
-
-        # NIC summary
-        $nicSummary = @()
-        foreach($n in $nicObjs){
-          foreach($cfg in $n.IpConfigurations){
-            $snId = $cfg.Subnet.Id; $vn=$null; $sn=$null
-            if($snId){ $p=$snId -split '/'; $vn=$p[$p.IndexOf('virtualNetworks')+1]; $sn=$p[$p.IndexOf('subnets')+1] }
-            $pipFlag = if($cfg.PublicIpAddress -and $cfg.PublicIpAddress.Id){ 'pip' } else { 'no-pip' }
-            $nicSummary += ("$($n.Name): $vn/$sn [$pipFlag]")
+          # ---- Direct Public IP on NIC ----
+          if ($ipc.PublicIpAddress -and $ipc.PublicIpAddress.Id) {
+            $pipId = $ipc.PublicIpAddress.Id
+            if (-not $pipsCache.ContainsKey($pipId)) { $pipsCache[$pipId] = Get-PublicIpFromId -ResourceId $pipId }
+            if ($pipsCache[$pipId]) { $publicIpsDirect += $pipsCache[$pipId] }
           }
-        }
-        $nicList = ($nicSummary -join '; ')
 
-        # Disk details
-        $diskCount = 0; $diskGiB = 0
-        $osDisk = $vm.StorageProfile.OsDisk
-        if($osDisk){ $diskCount++; if($osDisk.DiskSizeGB){ $diskGiB += [int]$osDisk.DiskSizeGB } }
-        $osSku = if($osDisk -and $osDisk.ManagedDisk){ $osDisk.ManagedDisk.StorageAccountType } else { 'Unmanaged' }
-        $ephemeral = $false
-        try{ if($osDisk -and $osDisk.DiffDiskSettings -and $osDisk.DiffDiskSettings.Option -eq 'Local'){ $ephemeral = $true } } catch { }
-        $dataSkus = @()
-        foreach($d in @($vm.StorageProfile.DataDisks)){
-          if($d){ $diskCount++; if($d.DiskSizeGB){ $diskGiB += [int]$d.DiskSizeGB }; $dataSkus += ( if($d.ManagedDisk){ $d.ManagedDisk.StorageAccountType } else { 'Unmanaged' } ) }
-        }
-        $dataSkuList = ($dataSkus | Where-Object { $_ } | Sort-Object -Unique) -join '; '
-
-        # Merge tags (VM + RG + NIC + VNet + Subnet)
-        $mergedTags = Merge-Tags @($vmTags,$rgTags,$nicTags,$vnetTags,$subnetTags)
-
-        $h = [ordered]@{
-          _kind         = 'compute'
-          Scope         = 'VBA or VBR Agent'
-          Subscription  = Anon $azSubName
-          SubscriptionId= Anon $azSubId
-          Tenant        = Anon $azTenantName
-          Region        = $vm.Location
-          ResourceGroup = Anon $vm.ResourceGroupName
-          VM            = Anon $vm.Name
-          VMId          = Anon $vm.VmId
-          Size          = $vm.HardwareProfile.VmSize
-          PowerState    = ($vm.Statuses | Where-Object { $_.Code -like 'PowerState*' }).DisplayStatus
-          DiskCount     = $diskCount
-          DiskGiB       = $diskGiB
-          DiskTiB       = [math]::Round($diskGiB/1024,4)
-          OSDiskSku     = $osSku
-          DataDiskSkus  = $dataSkuList
-          EphemeralOS   = if($ephemeral){ 'Yes' } else { 'No' }
-          HasSqlInVM    = ($sqlNames -contains $vm.Name) ? 'Yes' : 'No'
-          OS            = $vm.StorageProfile.OsDisk.OsType
-          PrimaryNIC    = if($primaryNic){ $primaryNic.Name } else { $null }
-          PrimaryNICNSG = if($primaryNic -and $primaryNic.NetworkSecurityGroup){ $primaryNic.NetworkSecurityGroup.Id.Split('/')[-1] } else { $null }
-          PrimaryVNet   = $vnetName
-          PrimarySubnet = $subnetName
-          PrimarySubnetPrefix = $subnetPrefix
-          PrimarySubnetNSG    = $subnetNsg
-          PrimaryPrivateIP    = $privateIP
-          PrimaryHasPublicIP  = $hasPip
-          PrimaryPublicIPName = $publicIPName
-          PrimaryPublicIP     = $publicIP
-          PrimaryPublicFQDN   = $pipDns
-          NICs          = $nicList
-        }
-        Add-TagColumns -h $h -tags $mergedTags -globalKeys $globalTagKeys
-        $out += [pscustomobject]$h
-      }
-    } catch { }
-  }
-
-  # ==================== Storage Accounts / Blobs / Files ====================
-  if('Storage' -in $using:scopes){
-    try{
-      $sas = Get-AzStorageAccount -ErrorAction SilentlyContinue
-      foreach($sa in $sas){
-        $rid     = "/subscriptions/$($azSubId)/resourceGroups/$($sa.ResourceGroupName)/providers/Microsoft.Storage/storageAccounts/$($sa.StorageAccountName)"
-        $blobSvc = "$rid/blobServices/default"
-        $fileSvc = "$rid/fileServices/default"
-
-        $UsedCapacityBytes          = [int64](Get-MetricLastMax -ResourceId $rid     -MetricName 'UsedCapacity')
-        $UsedBlobCapacityBytes      = [int64](Get-MetricLastMax -ResourceId $blobSvc -MetricName 'BlobCapacity')
-        $BlobContainerCount         = [int64](Get-MetricLastMax -ResourceId $blobSvc -MetricName 'ContainerCount')
-        $BlobCount                  = [int64](Get-MetricLastMax -ResourceId $blobSvc -MetricName 'BlobCount')
-        $UsedFileShareCapacityBytes = [int64](Get-MetricLastMax -ResourceId $fileSvc -MetricName 'FileCapacity')
-        $FileShareCount             = [int64](Get-MetricLastMax -ResourceId $fileSvc -MetricName 'FileShareCount')
-        $FileCount                  = [int64](Get-MetricLastMax -ResourceId $fileSvc -MetricName 'FileCount')
-
-        $row = [ordered]@{
-          _kind           = 'storage'
-          Scope           = 'VBA Repository Candidate'
-          Subscription    = Anon $azSubName
-          SubscriptionId  = Anon $azSubId
-          Tenant          = Anon $azTenantName
-          StorageAccount  = Anon $sa.StorageAccountName
-          Kind            = $sa.Kind
-          HNS_ADLSGen2    = [bool]$sa.EnableHierarchicalNamespace
-          Sku             = $sa.Sku.Name
-          AccessTier      = $sa.AccessTier
-          Region          = $sa.PrimaryLocation
-          ResourceGroup   = Anon $sa.ResourceGroupName
-          BlobBytes       = $UsedBlobCapacityBytes
-          BlobContainers  = $BlobContainerCount
-          BlobCount       = $BlobCount
-          FileBytes       = $UsedFileShareCapacityBytes
-          FileShareCount  = $FileShareCount
-          FileCount       = $FileCount
-          AccountBytes    = $UsedCapacityBytes
-        }
-        Add-TagColumns -h $row -tags $sa.Tags -globalKeys $globalTagKeys
-        $out += [pscustomobject]$row
-
-        if($using:DeepContainers){
-          try{
-            $ctx = (Get-AzStorageAccount -Name $sa.StorageAccountName -ResourceGroupName $sa.ResourceGroupName).Context
-            $containers = Get-AzStorageContainer -Context $ctx
-            foreach($c in $containers){
-              $hot=$cool=$arch=$unk=$all=0; $hotC=$coolC=$archC=$totC=0
-              $blobs = Get-AzStorageBlob -Container $c.Name -Context $ctx -ErrorAction SilentlyContinue
-              foreach($b in $blobs){
-                if($b.SnapshotTime){ continue }
-                $totC++; $all += $b.Length
-                switch($b.AccessTier){
-                  'Hot'     { $hotC++;  $hot  += $b.Length }
-                  'Cool'    { $coolC++; $cool += $b.Length }
-                  'Archive' { $archC++; $arch += $b.Length }
-                  default   { $unk += $b.Length }
-                }
+          # ---- Public IPs via Load Balancer frontends ----
+          foreach ($pool in ($ipc.LoadBalancerBackendAddressPools | Where-Object { $_.Id })) {
+            try {
+              $poolRes = Get-ResourceById -ResourceId $pool.Id
+              $lbId = $null
+              if ($poolRes -and $poolRes.Properties.loadBalancerBackendAddressPoolPropertiesFormat.loadBalancer.id) {
+                $lbId = $poolRes.Properties.loadBalancerBackendAddressPoolPropertiesFormat.loadBalancer.id
+              } else {
+                $lbId = ($pool.Id -split '/backendAddressPools/')[0] # fallback: trim to LB id
               }
-              $hc = [ordered]@{
-                _kind          = 'containers'
-                Scope          = 'VBA Repo (per-container)'
-                Subscription   = Anon $azSubName
-                SubscriptionId = Anon $azSubId
-                Tenant         = Anon $azTenantName
-                StorageAccount = Anon $sa.StorageAccountName
-                Container      = Anon $c.Name
-                Region         = $sa.PrimaryLocation
-                Bytes_Hot      = $hot
-                Bytes_Cool     = $cool
-                Bytes_Archive  = $arch
-                Bytes_Unknown  = $unk
-                Bytes_Total    = $all
-                Count_Hot      = $hotC
-                Count_Cool     = $coolC
-                Count_Archive  = $archC
-                Count_Total    = $totC
-              }
-              Add-TagColumns -h $hc -tags $sa.Tags -globalKeys $globalTagKeys
-              $out += [pscustomobject]$hc
-            }
-          } catch { }
-        }
-
-        # Azure Files shares (mgmt plane)
-        try{
-          $shares = Get-AzRmStorageShare -ResourceGroupName $sa.ResourceGroupName -StorageAccountName $sa.StorageAccountName -ErrorAction SilentlyContinue
-          foreach($sh in $shares){
-            $shUsage = Get-AzRmStorageShare -ResourceGroupName $sa.ResourceGroupName -StorageAccountName $sa.StorageAccountName -Name $sh.Name -GetShareUsage -ErrorAction SilentlyContinue
-            $fr = [ordered]@{
-              _kind          = 'files'
-              Scope          = 'VBR NAS (Azure Files)'
-              Subscription   = Anon $azSubName
-              SubscriptionId = Anon $azSubId
-              Tenant         = Anon $azTenantName
-              StorageAccount = Anon $sa.StorageAccountName
-              Share          = Anon $sh.Name
-              Region         = $sa.PrimaryLocation
-              QuotaGiB       = $shUsage.QuotaGiB
-              UsedBytes      = [int64]($shUsage.ShareUsageBytes ?? 0)
-            }
-            Add-TagColumns -h $fr -tags $sa.Tags -globalKeys $globalTagKeys
-            $out += [pscustomobject]$fr
-          }
-        } catch { }
-      }
-    } catch { }
-  }
-
-  # ==================== Databases (Azure SQL DB + MI) ====================
-  if('Databases' -in $using:scopes){
-    try{
-      $servers = Get-AzSqlServer -ErrorAction SilentlyContinue
-      foreach($sv in $servers){
-        $dbs = @(); try{ $dbs = Get-AzSqlDatabase -ServerName $sv.ServerName -ResourceGroupName $sv.ResourceGroupName } catch {}
-        foreach($db in $dbs){
-          if($db.SkuName -eq 'System'){ continue }
-          $allocated = Get-AzMetric -ResourceId $db.ResourceId -MetricName "allocated_data_storage" -AggregationType Maximum -StartTime (Get-Date).AddDays(-1) -WarningAction SilentlyContinue
-          $used      = Get-AzMetric -ResourceId $db.ResourceId -MetricName "storage"                -AggregationType Maximum -StartTime (Get-Date).AddDays(-1) -WarningAction SilentlyContinue
-          $allocLast = ($allocated.Data.Maximum | Select-Object -Last 1)
-          $usedLast  = ($used.Data.Maximum      | Select-Object -Last 1)
-
-          $row = [ordered]@{
-            _kind         = 'sql'
-            Scope         = 'Azure-native'
-            Kind          = 'AzureSQLDatabase'
-            Subscription  = Anon $azSubName
-            SubscriptionId= Anon $azSubId
-            Tenant        = Anon $azTenantName
-            Server        = Anon $db.ServerName
-            Database      = Anon $db.DatabaseName
-            Region        = $db.Location
-            MaxSizeBytes  = [long]$db.MaxSizeBytes
-            Allocated_Bytes= [int64]($allocLast ?? 0)
-            Utilized_Bytes = [int64]($usedLast  ?? 0)
-          }
-          Add-TagColumns -h $row -tags $db.Tags -globalKeys $globalTagKeys
-          $out += [pscustomobject]$row
-        }
-      }
-
-      $mis = Get-AzSqlInstance -ErrorAction SilentlyContinue
-      foreach($mi in $mis){
-        $miUsed = Get-AzMetric -ResourceId $mi.Id -MetricName "storage_space_used_mb" -AggregationType Maximum -StartTime (Get-Date).AddDays(-1) -WarningAction SilentlyContinue
-        $miUsedLast = [double](($miUsed.Data.Maximum | Select-Object -Last 1) ?? 0)
-
-        $row = [ordered]@{
-          _kind         = 'sql'
-          Scope         = 'Azure-native'
-          Kind          = 'ManagedInstance'
-          Subscription  = Anon $azSubName
-          SubscriptionId= Anon $azSubId
-          Tenant        = Anon $azTenantName
-          Server        = Anon $mi.ManagedInstanceName
-          Database      = ''
-          Region        = $mi.Location
-          MaxSizeBytes  = [long]$mi.StorageSizeInGB * 1GB
-          storage_space_used_mb = $miUsedLast
-        }
-        Add-TagColumns -h $row -tags $mi.Tags -globalKeys $globalTagKeys
-        $out += [pscustomobject]$row
-      }
-    } catch { }
-  }
-
-  # ==================== AKS (Kasten K10 scope) ====================
-  if('Kubernetes' -in $using:scopes){
-    try{
-      $clusters = Get-AzAksCluster -ErrorAction SilentlyContinue
-      foreach($c in $clusters){
-        $pools = @(); try{ $pools = Get-AzAksNodePool -ResourceGroupName $c.ResourceGroupName -ClusterName $c.Name } catch {}
-        $row = [ordered]@{
-          _kind         = 'aks'
-          Scope         = 'Kasten K10'
-          Subscription  = Anon $azSubName
-          SubscriptionId= Anon $azSubId
-          Tenant        = Anon $azTenantName
-          Cluster       = Anon $c.Name
-          ResourceGroup = Anon $c.ResourceGroupName
-          Location      = $c.Location
-          Kubernetes    = $c.KubernetesVersion
-          NodePools     = ($pools | ForEach-Object Name) -join '; '
-          NodeSizes     = ($pools | ForEach-Object VmSize) -join '; '
-          NodeCount     = ($pools | Measure-Object -Property Count -Sum).Sum
-        }
-        Add-TagColumns -h $row -tags $c.Tags -globalKeys $globalTagKeys
-        $out += [pscustomobject]$row
-      }
-    } catch { }
-  }
-
-  # ==================== Cosmos DB ====================
-  if('Cosmos' -in $using:scopes){
-    try{
-      $rgs = Get-AzResourceGroup -ErrorAction SilentlyContinue
-      foreach($rg in $rgs){
-        $accts = Get-AzCosmosDBAccount -ResourceGroupName $rg.ResourceGroupName -ErrorAction SilentlyContinue
-        foreach($a in $accts){
-          $row = [ordered]@{
-            _kind         = 'cosmos'
-            Scope         = 'Azure-native / K10'
-            Subscription  = Anon $azSubName
-            SubscriptionId= Anon $azSubId
-            Tenant        = Anon $azTenantName
-            Account       = Anon $a.Name
-            Region        = $a.Location
-            Kind          = $a.Kind
-            BackupType    = $a.BackupPolicy.BackupType
-            BackupTier    = $a.BackupPolicy.Tier
-          }
-          Add-TagColumns -h $row -tags $a.Tags -globalKeys $globalTagKeys
-          $out += [pscustomobject]$row
-
-          if($using:DeepCosmos){
-            $names = @('DocumentCount','DataUsage','PhysicalPartitionSizeInfo','PhysicalPartitionCount','IndexUsage')
-            $vals = @{}
-            foreach($n in $names){
-              try{ $vals[$n] = [double](Get-MetricLastMax -ResourceId $a.Id -MetricName $n) } catch { $vals[$n] = 0 }
-            }
-            $mrow = [ordered]@{
-              _kind         = 'cosmosMetrics'
-              Subscription  = Anon $azSubName
-              SubscriptionId= Anon $azSubId
-              Tenant        = Anon $azTenantName
-              Account       = Anon $a.Name
-              Region        = $a.Location
-              DocumentCount = $vals['DocumentCount']
-              DataUsageBytes= $vals['DataUsage']
-              PhysicalPartitionSizeInfoBytes = $vals['PhysicalPartitionSizeInfo']
-              PhysicalPartitionCount         = $vals['PhysicalPartitionCount']
-              IndexUsageBytes                = $vals['IndexUsage']
-            }
-            Add-TagColumns -h $mrow -tags $a.Tags -globalKeys $globalTagKeys
-            $out += [pscustomobject]$mrow
-          }
-        }
-      }
-    } catch { }
-  }
-
-  # ==================== Recovery Services Vaults & Backup ====================
-  if('Backup' -in $using:scopes){
-    try{
-      $vaults = Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue
-      foreach($v in $vaults){
-        $row = [ordered]@{
-          _kind         = 'rsv'
-          Scope         = 'Azure Backup (mapping)'
-          Subscription  = Anon $azSubName
-          SubscriptionId= Anon $azSubId
-          Tenant        = Anon $azTenantName
-          Vault         = Anon $v.Name
-          Region        = $v.Location
-          ResourceGroup = Anon $v.ResourceGroupName
-        }
-        Add-TagColumns -h $row -tags $v.Tags -globalKeys $globalTagKeys
-        $out += [pscustomobject]$row
-
-        if($using:DeepBackup){
-          try{
-            Set-AzRecoveryServicesVaultContext -Vault $v | Out-Null
-            $workloads = @('AzureVM','MSSQL','AzureSQLDatabase','AzureFiles')
-            foreach($wl in $workloads){
-              $pols = @(); try{ $pols = Get-AzRecoveryServicesBackupProtectionPolicy -WorkloadType $wl -ErrorAction SilentlyContinue } catch {}
-              foreach($p in $pols){
-                $pr = [ordered]@{
-                  _kind         = 'backupPolicy'
-                  Subscription  = Anon $azSubName
-                  SubscriptionId= Anon $azSubId
-                  Tenant        = Anon $azTenantName
-                  Vault         = Anon $v.Name
-                  Region        = $v.Location
-                  WorkloadType  = $wl
-                  PolicyName    = $p.Name
-                  ScheduleType  = $p.SchedulePolicy.ScheduleRunFrequency
-                  RetentionInfo = ($p.RetentionPolicy | ConvertTo-Json -Depth 4)
-                }
-                $out += [pscustomobject]$pr
-
-                $items = @(); try{ $items = Get-AzRecoveryServicesBackupItem -Policy $p -ErrorAction SilentlyContinue } catch {}
-                foreach($it in $items){
-                  $ir = [ordered]@{
-                    _kind               = 'backupItem'
-                    Subscription        = Anon $azSubName
-                    SubscriptionId      = Anon $azSubId
-                    Tenant              = Anon $azTenantName
-                    Vault               = Anon $v.Name
-                    Region              = $v.Location
-                    WorkloadType        = $wl
-                    PolicyName          = $p.Name
-                    ProtectedItemType   = $it.WorkloadType
-                    BackupManagementType= $it.BackupManagementType
-                    ContainerName       = Anon $it.ContainerName
-                    SourceResourceId    = Anon $it.SourceResourceId
-                    FriendlyName        = Anon $it.FriendlyName
+              $lbRes = Get-ResourceById -ResourceId $lbId
+              if ($lbRes -and $lbRes.Properties.frontendIPConfigurations) {
+                foreach ($fe in $lbRes.Properties.frontendIPConfigurations) {
+                  $fePipId = $fe.properties.publicIPAddress.id
+                  if ($fePipId) {
+                    if (-not $pipsCache.ContainsKey($fePipId)) { $pipsCache[$fePipId] = Get-PublicIpFromId -ResourceId $fePipId }
+                    if ($pipsCache[$fePipId]) { $publicIpsLB += $pipsCache[$fePipId] }
                   }
-                  $out += [pscustomobject]$ir
+                }
+              }
+            } catch {
+              Write-Verbose "[$($vm.Name)] Unable to resolve LB frontends for backend pool $($pool.Id): $($_.Exception.Message)"
+            }
+          }
+
+          # ---- Public IPs via NAT Gateway on the subnet ----
+          try {
+            $subnetId = $ipc.Subnet.Id
+            if ($subnetId) {
+              $subnet = Get-ResourceById -ResourceId $subnetId
+              $natAssoc = $subnet.Properties.natGateway
+              if ($natAssoc -and $natAssoc.id) {
+                $natRes = Get-ResourceById -ResourceId $natAssoc.id
+                if ($natRes) {
+                  $pubRefs = @()
+                  if ($natRes.Properties.publicIpAddresses) { $pubRefs += $natRes.Properties.publicIpAddresses }
+                  if ($natRes.Properties.publicIpPrefixes)  { $pubRefs += $natRes.Properties.publicIpPrefixes } # prefixes have no single ip
+                  foreach ($pub in $pubRefs) {
+                    $refId = $pub.id
+                    if ($refId) {
+                      if (-not $pipsCache.ContainsKey($refId)) { $pipsCache[$refId] = Get-PublicIpFromId -ResourceId $refId }
+                      if ($pipsCache[$refId]) { $publicIpsNAT += $pipsCache[$refId] } # only actual PIPs resolve to ipAddress
+                    }
+                  }
                 }
               }
             }
-          } catch { }
+          } catch {
+            Write-Verbose "[$($vm.Name)] NAT Gateway lookup failed: $($_.Exception.Message)"
+          }
         }
       }
-    } catch { }
+
+      # Combined set (dedup)
+      $publicIpsAll = @($publicIpsDirect + $publicIpsLB + $publicIpsNAT | Select-Object -Unique)
+
+      # Disks
+      $osDiskGB = [int]($vm.StorageProfile.OsDisk.DiskSizeGB)
+      $dataDisks = @()
+      $dataSizeGB = 0
+      foreach ($d in $vm.StorageProfile.DataDisks) {
+        $size = [int]$d.DiskSizeGB
+        $dataSizeGB += $size
+        $dataDisks += ("LUN{0}:{1}GB:{2}" -f $d.Lun, $size, ($d.ManagedDisk.StorageAccountType))
+      }
+      $totalProvGB = ($osDiskGB + $dataSizeGB)
+
+      $results.Add([pscustomobject]@{
+        SubscriptionName     = $sub.Name
+        SubscriptionId       = $sub.Id
+        ResourceGroup        = $vm.ResourceGroupName
+        VmName               = $vm.Name
+        VmId                 = $vm.Id
+        Location             = $vm.Location
+        Zone                 = ($vm.Zones -join ',')
+        PowerState           = ($vm.PowerState -replace 'PowerState/')
+        OsType               = $vm.StorageProfile.OsDisk.OsType
+        VmSize               = $vm.HardwareProfile.VmSize
+        PrivateIPs           = ($privateIps -join ',')
+        DirectPublicIPs      = ($publicIpsDirect -join ',')
+        LbPublicIPs          = ($publicIpsLB     -join ',')
+        NatGatewayPublicIPs  = ($publicIpsNAT    -join ',')
+        PublicIPs            = ($publicIpsAll    -join ',')
+        NicIds               = ($nicIds -join ',')
+        Tags                 = (Flatten-Tags $vm.Tags)
+
+        OsDiskType           = $vm.StorageProfile.OsDisk.ManagedDisk.StorageAccountType
+        OsDiskSizeGB         = $osDiskGB
+        DataDiskCount        = $vm.StorageProfile.DataDisks.Count
+        DataDiskSummary      = ($dataDisks -join ';')
+        DataDiskTotalGB      = $dataSizeGB
+        TotalProvisionedGB   = $totalProvGB
+      })
+    }
   }
 
-  # ==================== Cost Insights ====================
-  if($using:CostInsights){
-    try{
-      $dims   = New-AzCostManagementQueryComparisonExpressionObject -Name 'ServiceName' -Value ($using:CostServices -join ',')
-      $filter = New-AzCostManagementQueryFilterObject -Dimensions $dims
-      $aggregation = @{
-        totalCostUSD = @{ name = "CostUSD";        function = "Sum" }
-        preTaxCost   = @{ name = "PreTaxCostUSD";  function = "Sum" }
+  $results
+}
+#endregion
+
+#region SQL Inventory
+function Get-Sql-Inventory {
+  $dbs = New-Object System.Collections.Generic.List[object]
+  $mis = New-Object System.Collections.Generic.List[object]
+
+  foreach ($sub in $script:Subs) {
+    Write-Host "Processing Azure SQL in subscription: $($sub.Name)" -ForegroundColor Cyan
+    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+
+    # Single DBs
+    $servers = Get-AzSqlServer -ErrorAction SilentlyContinue
+    foreach ($srv in $servers) {
+      if (-not (Matches-Region $srv.Location)) { continue }
+      $databases = Get-AzSqlDatabase -ServerName $srv.ServerName -ResourceGroupName $srv.ResourceGroupName -ErrorAction SilentlyContinue | Where-Object { $_.DatabaseName -ne "master" }
+      foreach ($db in $databases) {
+        $dbs.Add([pscustomobject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId   = $sub.Id
+          ResourceGroup    = $srv.ResourceGroupName
+          ServerName       = $srv.ServerName
+          DatabaseName     = $db.DatabaseName
+          Location         = $db.Location
+          Edition          = $db.Edition
+          ServiceObjective = $db.CurrentServiceObjectiveName
+          MaxSizeGB        = [math]::Round($db.MaxSizeBytes/1GB,2)
+          ZoneRedundant    = $db.ZoneRedundant
+          BackupStorageRedundancy = $db.BackupStorageRedundancy
+        })
       }
-      $from = (Get-Date).AddMonths(-1 * ($using:CostMonths - 1))
-      $to   = Get-Date
+    }
 
-      $raw = Invoke-AzCostManagementQuery -Type Usage `
-                                          -Scope "subscriptions/$($azSubId)" `
-                                          -DatasetGranularity 'Monthly' `
-                                          -DatasetFilter $filter `
-                                          -Timeframe Custom `
-                                          -TimePeriodFrom $from `
-                                          -TimePeriodTo   $to `
-                                          -DatasetAggregation $aggregation 6> $null
-      $parsed = $raw | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    # Managed Instances
+    $managed = Get-AzSqlInstance -ErrorAction SilentlyContinue
+    foreach ($mi in $managed) {
+      if (-not (Matches-Region $mi.Location)) { continue }
+      $mis.Add([pscustomobject]@{
+        SubscriptionName = $sub.Name
+        SubscriptionId   = $sub.Id
+        ResourceGroup    = $mi.ResourceGroupName
+        ManagedInstance  = $mi.Name
+        Location         = $mi.Location
+        VCores           = $mi.VCores
+        StorageSizeGB    = $mi.StorageSizeInGB
+        LicenseType      = $mi.LicenseType
+        HaEnabled        = $mi.AutomaticHa
+        Collation        = $mi.Collation
+        SubnetId         = $mi.SubnetId
+      })
+    }
+  }
 
-      $colIndex = @{}
-      for($i=0; $i -lt $parsed.Columns.Count; $i++){ $colIndex[$parsed.Columns[$i].Name] = $i }
-      foreach($row in $parsed.Row){
-        $dateCol = @('UsageDate','BillingMonth','Date') | Where-Object { $colIndex.ContainsKey($_) } | Select-Object -First 1
-        $cr = [pscustomobject]@{
-          _kind         = 'cost'
-          SubscriptionId= Anon $azSubId
-          Subscription  = Anon $azSubName
-          Tenant        = Anon $azTenantName
-          BillingMonth  = [datetime]$row[$colIndex[$dateCol]]
-          PreTaxCostUSD = [math]::Round([double]$row[$colIndex['PreTaxCostUSD']],2)
-          CostUSD       = [math]::Round([double]$row[$colIndex['CostUSD']],2)
-          ServicesFilter= ($using:CostServices -join ';')
+  return @{
+    Databases = $dbs
+    ManagedInstances = $mis
+  }
+}
+#endregion
+
+#region Storage: Files and Blob
+function Try-Get-ShareUsageBytes {
+  param($share, $rg, $acctName)
+  # Prefer new Az.Storage cmdlet (if available): Get-AzRmStorageShare -Expand "stats"
+  try {
+    if (Get-Command Get-AzRmStorageShare -ErrorAction SilentlyContinue) {
+      $s = Get-AzRmStorageShare -ResourceGroupName $rg -StorageAccountName $acctName -Name $share.Name -Expand "stats" -ErrorAction Stop
+      if ($s.ShareUsageBytes -ne $null) { return [int64]$s.ShareUsageBytes }
+      if ($s.UsageInBytes     -ne $null) { return [int64]$s.UsageInBytes }
+    }
+  } catch {}
+  return $null
+}
+
+function Get-Storage-Inventory {
+  $files = New-Object System.Collections.Generic.List[object]
+  $blobs = New-Object System.Collections.Generic.List[object]
+
+  foreach ($sub in $script:Subs) {
+    Write-Host "Processing Storage (Files/Blob) in subscription: $($sub.Name)" -ForegroundColor Cyan
+    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+
+    $accts = Get-AzStorageAccount -ErrorAction SilentlyContinue
+    foreach ($acct in $accts) {
+      if (-not (Matches-Region $acct.Location)) { continue }
+      $ctx = $acct.Context
+
+      # Azure Files
+      try {
+        $shares = Get-AzStorageShare -Context $ctx -ErrorAction SilentlyContinue
+        foreach ($sh in $shares) {
+          $usageBytes = Try-Get-ShareUsageBytes -share $sh -rg $acct.ResourceGroupName -acctName $acct.StorageAccountName
+          $files.Add([pscustomobject]@{
+            SubscriptionName = $sub.Name
+            SubscriptionId   = $sub.Id
+            ResourceGroup    = $acct.ResourceGroupName
+            StorageAccount   = $acct.StorageAccountName
+            Location         = $acct.Location
+            SkuName          = $acct.Sku.Name
+            Kind             = $acct.Kind
+            ShareName        = $sh.Name
+            QuotaGiB         = $sh.Quota
+            SnapshotCount    = $sh.SnapshotCount
+            UsageBytes       = $usageBytes
+            UsageGiB         = ($(if ($usageBytes){ [math]::Round($usageBytes/1GB,2) } else { $null }))
+          })
         }
-        $out += $cr
-      }
-    } catch { }
-  }
+      } catch {}
 
-  # emit
-  $out
-} -ThrottleLimit $Parallel
-
-# ---------------- split by kind ----------------
-$computeRows         = @($allRows | Where-Object { $_._kind -eq 'compute' })
-$storageRows         = @($allRows | Where-Object { $_._kind -eq 'storage' })
-$containerRows       = @($allRows | Where-Object { $_._kind -eq 'containers' })
-$filesRows           = @($allRows | Where-Object { $_._kind -eq 'files' })
-$sqlRows             = @($allRows | Where-Object { $_._kind -eq 'sql' })
-$aksRows             = @($allRows | Where-Object { $_._kind -eq 'aks' })
-$cosmosRows          = @($allRows | Where-Object { $_._kind -eq 'cosmos' })
-$cosmosMetricRows    = @($allRows | Where-Object { $_._kind -eq 'cosmosMetrics' })
-$rsvRows             = @($allRows | Where-Object { $_._kind -eq 'rsv' })
-$backupPolicyRows    = @($allRows | Where-Object { $_._kind -eq 'backupPolicy' })
-$backupItemRows      = @($allRows | Where-Object { $_._kind -eq 'backupItem' })
-$costRows            = @($allRows | Where-Object { $_._kind -eq 'cost' })
-
-# ---------------- exports ----------------
-$files = @()
-
-$F_Compute       = Join-Path $outDir "veeam_compute_$runStamp.csv"
-$F_Storage       = Join-Path $outDir "veeam_storage_accounts_$runStamp.csv"
-$F_Containers    = Join-Path $outDir "veeam_blob_containers_$runStamp.csv"
-$F_Files         = Join-Path $outDir "veeam_azure_files_$runStamp.csv"
-$F_SQL           = Join-Path $outDir "veeam_sql_outline_$runStamp.csv"
-$F_AKS           = Join-Path $outDir "veeam_aks_$runStamp.csv"
-$F_Cosmos        = Join-Path $outDir "veeam_cosmos_$runStamp.csv"
-$F_CosmosMetrics = Join-Path $outDir "veeam_cosmos_metrics_$runStamp.csv"
-$F_RSV           = Join-Path $outDir "veeam_rsv_$runStamp.csv"
-$F_BkpPolicies   = Join-Path $outDir "veeam_backup_policies_$runStamp.csv"
-$F_BkpItems      = Join-Path $outDir "veeam_backup_items_$runStamp.csv"
-$F_Costs         = Join-Path $outDir "veeam_costs_$runStamp.csv"
-$F_Summary       = Join-Path $outDir "veeam_summary_$runStamp.csv"
-$F_Plan          = Join-Path $outDir "veeam_planner_$runStamp.csv"
-$F_PlanByTag     = Join-Path $outDir "veeam_planner_by_tag_$runStamp.csv"
-$F_Manifest      = Join-Path $outDir "manifest_$runStamp.json"
-
-if($computeRows.Count)         { if(Save-Csv -Data $computeRows         -Path $F_Compute       -NoTypeInfo){ $files += $F_Compute } }
-if($storageRows.Count)         { if(Save-Csv -Data $storageRows         -Path $F_Storage       -NoTypeInfo){ $files += $F_Storage } }
-if($containerRows.Count)       { if(Save-Csv -Data $containerRows       -Path $F_Containers    -NoTypeInfo){ $files += $F_Containers } }
-if($filesRows.Count)           { if(Save-Csv -Data $filesRows           -Path $F_Files         -NoTypeInfo){ $files += $F_Files } }
-if($sqlRows.Count)             { if(Save-Csv -Data $sqlRows             -Path $F_SQL           -NoTypeInfo){ $files += $F_SQL } }
-if($aksRows.Count)             { if(Save-Csv -Data $aksRows             -Path $F_AKS           -NoTypeInfo){ $files += $F_AKS } }
-if($cosmosRows.Count)          { if(Save-Csv -Data $cosmosRows          -Path $F_Cosmos        -NoTypeInfo){ $files += $F_Cosmos } }
-if($cosmosMetricRows.Count)    { if(Save-Csv -Data $cosmosMetricRows    -Path $F_CosmosMetrics -NoTypeInfo){ $files += $F_CosmosMetrics } }
-if($rsvRows.Count)             { if(Save-Csv -Data $rsvRows             -Path $F_RSV           -NoTypeInfo){ $files += $F_RSV } }
-if($backupPolicyRows.Count)    { if(Save-Csv -Data $backupPolicyRows    -Path $F_BkpPolicies   -NoTypeInfo){ $files += $F_BkpPolicies } }
-if($backupItemRows.Count)      { if(Save-Csv -Data $backupItemRows      -Path $F_BkpItems      -NoTypeInfo){ $files += $F_BkpItems } }
-if($costRows.Count)            { if(Save-Csv -Data $costRows            -Path $F_Costs         -NoTypeInfo){ $files += $F_Costs } }
-
-# ---------------- summary ----------------
-$summary = @()
-if($computeRows.Count){
-  $tiB = (@($computeRows | ForEach-Object { [double]$_.DiskTiB }) | Measure-Object -Sum).Sum
-  $summary += [pscustomobject]@{ Resource='IaaS VMs'; Count=$computeRows.Count; TotalTiB=[math]::Round($tiB,3) }
-}
-if($storageRows.Count){
-  $blobTiB = ((@($storageRows | ForEach-Object BlobBytes) | Measure-Object -Sum).Sum) / 1TB
-  $fileTiB = ((@($storageRows | ForEach-Object FileBytes) | Measure-Object -Sum).Sum) / 1TB
-  $summary += [pscustomobject]@{ Resource='Storage Accounts (Blob)'; Count=$storageRows.Count; TotalTiB=[math]::Round($blobTiB,3) }
-  $summary += [pscustomobject]@{ Resource='Storage Accounts (File)'; Count=$storageRows.Count; TotalTiB=[math]::Round($fileTiB,3) }
-}
-if($filesRows.Count){
-  $nasTiB = ((@($filesRows | ForEach-Object UsedBytes) | Measure-Object -Sum).Sum) / 1TB
-  $summary += [pscustomobject]@{ Resource='Azure Files Shares'; Count=$filesRows.Count; TotalTiB=[math]::Round($nasTiB,3) }
-}
-if($aksRows.Count)    { $summary += [pscustomobject]@{ Resource='AKS Clusters'; Count=$aksRows.Count; TotalTiB=$null } }
-if($sqlRows.Count)    { $summary += [pscustomobject]@{ Resource='Azure SQL (DB/MI)'; Count=$sqlRows.Count; TotalTiB=[math]::Round(((@($sqlRows | ForEach-Object MaxSizeBytes) | Measure-Object -Sum).Sum)/1TB,3) } }
-if($cosmosRows.Count) { $summary += [pscustomobject]@{ Resource='Cosmos DB Accounts'; Count=$cosmosRows.Count; TotalTiB=$null } }
-if($rsvRows.Count)    { $summary += [pscustomobject]@{ Resource='Recovery Services Vaults'; Count=$rsvRows.Count; TotalTiB=$null } }
-if($backupItemRows.Count){ $summary += [pscustomobject]@{ Resource='Azure Backup Items'; Count=$backupItemRows.Count; TotalTiB=$null } }
-if($costRows.Count){ $summary += [pscustomobject]@{ Resource="Costs (months=$CostMonths, services=$($CostServices -join ';'))"; Count=$costRows.Count; TotalTiB=$null } }
-
-if($summary.Count){ if(Save-Csv -Data $summary -Path $F_Summary -NoTypeInfo){ $files += $F_Summary } }
-
-# ---------------- simple sizing planner (region-level) ----------------
-$planner = @()
-if($computeRows.Count){
-  $byRegion = $computeRows | Group-Object Region
-  foreach($g in $byRegion){
-    $sizeGiB = (@($g.Group | ForEach-Object DiskGiB) | Measure-Object -Sum).Sum
-    $fullGiB = $sizeGiB * $CompressionRatio
-    $incGiB  = $sizeGiB * ($ChangeRatePercent/100.0) * $RetentionDays * $CompressionRatio
-    $planner += [pscustomobject]@{
-      Area            = 'VBA (VM backup)'
-      Region          = $g.Name
-      ProtectedGiB    = [math]::Round($sizeGiB,0)
-      EstimatedRepoGiB= [math]::Round($fullGiB + $incGiB,0)
-      Assumptions     = "Change=$ChangeRatePercent%, Retention=$RetentionDays d, Ratio=$CompressionRatio"
+      # Azure Blob
+      try {
+        $containers = Get-AzStorageContainer -Context $ctx -ErrorAction SilentlyContinue
+        foreach ($c in $containers) {
+          $sizeBytes = $null
+          if ($CalculateBlobSizes.IsPresent) {
+            # Summation can be slow — do it only if requested.
+            $sizeBytes = 0
+            $token = $null
+            do {
+              $page = Get-AzStorageBlob -Container $c.Name -Context $ctx -MaxCount 5000 -ContinuationToken $token -ErrorAction SilentlyContinue
+              foreach ($b in $page) { $sizeBytes += [int64]($b.Length) }
+              $token = $page.ContinuationToken
+            } while ($token)
+          }
+          $blobs.Add([pscustomobject]@{
+            SubscriptionName = $sub.Name
+            SubscriptionId   = $sub.Id
+            ResourceGroup    = $acct.ResourceGroupName
+            StorageAccount   = $acct.StorageAccountName
+            Location         = $acct.Location
+            SkuName          = $acct.Sku.Name
+            Kind             = $acct.Kind
+            Container        = $c.Name
+            PublicAccess     = $c.PublicAccess
+            LastModified     = $c.CloudBlobContainer.Properties.LastModified.UtcDateTime
+            EstimatedBytes   = $sizeBytes
+            EstimatedGiB     = ($(if ($sizeBytes){ [math]::Round($sizeBytes/1GB,2) } else { $null }))
+          })
+        }
+      } catch {}
     }
   }
-}
-if($filesRows.Count){
-  $byRegion = $filesRows | Group-Object Region
-  foreach($g in $byRegion){
-    $usedGiB = ((@($g.Group | ForEach-Object UsedBytes) | Measure-Object -Sum).Sum) / 1GB
-    $fullGiB = $usedGiB * $CompressionRatio
-    $incGiB  = $usedGiB * ($ChangeRatePercent/100.0) * $RetentionDays * $CompressionRatio
-    $planner += [pscustomobject]@{
-      Area            = 'VBR NAS (Azure Files)'
-      Region          = $g.Name
-      ProtectedGiB    = [math]::Round($usedGiB,0)
-      EstimatedRepoGiB= [math]::Round($fullGiB + $incGiB,0)
-      Assumptions     = "Change=$ChangeRatePercent%, Retention=$RetentionDays d, Ratio=$CompressionRatio"
-    }
+
+  return @{
+    Files = $files
+    Blobs = $blobs
   }
 }
-if($planner.Count){ if(Save-Csv -Data $planner -Path $F_Plan -NoTypeInfo){ $files += $F_Plan } }
+#endregion
 
-# ---------------- tag-grouped planner (by $PlannerTag) ----------------
-$plannerByTag = @()
-if($PlannerTag){
-  if($computeRows.Count){
-    $computeByTagRegion = $computeRows | ForEach-Object {
-      $tagVal = $_."Tag: $PlannerTag"; if(-not $tagVal){ $tagVal = '-' }
-      [pscustomobject]@{ Tag=$tagVal; Region=$_.Region; DiskGiB=[double]$_.DiskGiB }
-    } | Group-Object Tag,Region
+#region Azure Backup (Vaults/Policies/Counts)
+function Get-AzureBackup-Inventory {
+  $vaultsOut   = New-Object System.Collections.Generic.List[object]
+  $policiesOut = New-Object System.Collections.Generic.List[object]
 
-    foreach($g in $computeByTagRegion){
-      $parts = $g.Name -split ','
-      $tagName = ($parts[0] -replace '^Tag=','').Trim()
-      $region  = ($parts[1] -replace '^Region=','').Trim()
-      $sizeGiB = ($g.Group | Measure-Object DiskGiB -Sum).Sum
-      $fullGiB = $sizeGiB * $CompressionRatio
-      $incGiB  = $sizeGiB * ($ChangeRatePercent/100.0) * $RetentionDays * $CompressionRatio
-      $plannerByTag += [pscustomobject]@{
-        Area            = 'VBA (VM backup)'
-        Tag             = $tagName
-        Region          = $region
-        ProtectedGiB    = [math]::Round($sizeGiB,0)
-        EstimatedRepoGiB= [math]::Round($fullGiB + $incGiB,0)
-        Assumptions     = "Change=$ChangeRatePercent%, Retention=$RetentionDays d, Ratio=$CompressionRatio"
+  foreach ($sub in $script:Subs) {
+    Write-Host "Processing Azure Backup in subscription: $($sub.Name)" -ForegroundColor Cyan
+    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+
+    $vaults = Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue
+    foreach ($v in $vaults) {
+      if (-not (Matches-Region $v.Location)) { continue }
+
+      # select vault
+      Set-AzRecoveryServicesVaultContext -Vault $v | Out-Null
+
+      # Count protected items by workload type (VMs, SQL, Files if any)
+      $items = Get-AzRecoveryServicesBackupItem -ErrorAction SilentlyContinue
+      $vmCount   = ($items | Where-Object { $_.WorkloadType -eq "AzureVM" }).Count
+      $sqlCount  = ($items | Where-Object { $_.WorkloadType -like "SQL*" }).Count
+      $afsCount  = ($items | Where-Object { $_.WorkloadType -like "*AzureFileShare*" }).Count
+
+      $vaultsOut.Add([pscustomobject]@{
+        SubscriptionName = $sub.Name
+        SubscriptionId   = $sub.Id
+        ResourceGroup    = $v.ResourceGroupName
+        VaultName        = $v.Name
+        Location         = $v.Location
+        Type             = $v.Type
+        Sku              = $v.Sku
+        SoftDeleteState  = $v.Properties.SoftDeleteFeatureState
+        Immutability     = $v.Properties.ImmutabilityState
+        MonitoringEnabled= $v.Properties.MonitoringSettings.AzureMonitorAlertSettings.State
+        ProtectedVMs     = $vmCount
+        ProtectedSQL     = $sqlCount
+        ProtectedFileShares = $afsCount
+      })
+
+      # Policies
+      $pols = Get-AzRecoveryServicesBackupProtectionPolicy -ErrorAction SilentlyContinue
+      foreach ($p in $pols) {
+        # Extract basics; schedule/retention vary by workload type
+        $ret = $null; $sched = $null
+        try { $ret = ($p.RetentionPolicy | ConvertTo-Json -Depth 5 -Compress) } catch {}
+        try { $sched = ($p.SchedulePolicy  | ConvertTo-Json -Depth 5 -Compress) } catch {}
+
+        $policiesOut.Add([pscustomobject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId   = $sub.Id
+          ResourceGroup    = $v.ResourceGroupName
+          VaultName        = $v.Name
+          PolicyName       = $p.Name
+          WorkloadType     = $p.WorkloadType
+          BackupManagement = $p.BackupManagementType
+          RetentionPolicy  = $ret
+          SchedulePolicy   = $sched
+        })
       }
     }
   }
-  if($filesRows.Count){
-    $filesByTagRegion = $filesRows | ForEach-Object {
-      $tagVal = $_."Tag: $PlannerTag"; if(-not $tagVal){ $tagVal = '-' }
-      [pscustomobject]@{ Tag=$tagVal; Region=$_.Region; UsedGiB=([double]$_.UsedBytes/1GB) }
-    } | Group-Object Tag,Region
 
-    foreach($g in $filesByTagRegion){
-      $parts = $g.Name -split ','
-      $tagName = ($parts[0] -replace '^Tag=','').Trim()
-      $region  = ($parts[1] -replace '^Region=','').Trim()
-      $usedGiB = ($g.Group | Measure-Object UsedGiB -Sum).Sum
-      $fullGiB = $usedGiB * $CompressionRatio
-      $incGiB  = $usedGiB * ($ChangeRatePercent/100.0) * $RetentionDays * $CompressionRatio
-      $plannerByTag += [pscustomobject]@{
-        Area            = 'VBR NAS (Azure Files)'
-        Tag             = $tagName
-        Region          = $region
-        ProtectedGiB    = [math]::Round($usedGiB,0)
-        EstimatedRepoGiB= [math]::Round($fullGiB + $incGiB,0)
-        Assumptions     = "Change=$ChangeRatePercent%, Retention=$RetentionDays d, Ratio=$CompressionRatio"
-      }
-    }
+  return @{
+    Vaults   = $vaultsOut
+    Policies = $policiesOut
   }
 }
-if($plannerByTag.Count){ if(Save-Csv -Data $plannerByTag -Path $F_PlanByTag -NoTypeInfo){ $files += $F_PlanByTag } }
+#endregion
 
-# ---------------- manifest & archive ----------------
-$manifest = [ordered]@{
-  generatedAt = (Get-Date).ToString('o')
-  version     = '1.3.6'
-  source      = $Source
-  scopes      = $Scope
-  deep        = @{ containers = [bool]$DeepContainers; backup = [bool]$DeepBackup; cosmos = [bool]$DeepCosmos }
-  cost        = @{ enabled = [bool]$CostInsights; months = $CostMonths; services = $CostServices }
-  planner     = @{ byTagKey = $PlannerTag }
-  files       = $files
-  log         = (Split-Path $logFile -Leaf)
+#region Pricing (Protected Instances + Backup Storage)
+function Invoke-PricesApi {
+  param(
+    [Parameter(Mandatory=$true)][string]$Filter
+  )
+  $base = "https://prices.azure.com/api/retail/prices"
+  $results = @()
+  $next = "$base`?`$filter=$([uri]::EscapeDataString($Filter))"
+  while ($next) {
+    $resp = Invoke-RestMethod -Method Get -Uri $next -UseBasicParsing
+    if ($resp.Items) { $results += $resp.Items }
+    $next = $resp.NextPageLink
+  }
+  return $results
 }
-$manifest | ConvertTo-Json -Depth 6 | Out-File -FilePath $F_Manifest -Encoding utf8
-$files += $F_Manifest
 
-$zipPath = Join-Path $outDir ("veeam_azure_inventory_" + $runStamp + ".zip")
-$existing = $files | Where-Object { Test-Path $_ }
-if($existing){ Compress-Archive -Path $existing -DestinationPath $zipPath -Force }
+function Get-BackupProtectedInstancePrices {
+  param([string]$ArmRegionName)
+  # serviceName eq 'Backup' AND armRegionName eq 'westus2' AND contains(productName,'Protected')
+  $f = "serviceName eq 'Backup' and armRegionName eq '$ArmRegionName' and contains(productName,'Protected')"
+  $items = Invoke-PricesApi -Filter $f
+  # Return only monthly meters
+  $items | Where-Object { $_.unitOfMeasure -like '*Month*' -and $_.type -eq "Consumption" }
+}
 
-Write-Log -Message "Artifacts ready" -Data @{ zip = (Split-Path $zipPath -Leaf); count = $files.Count }
+function Get-BackupStoragePrices {
+  param([string]$ArmRegionName)
+  # Azure Backup Storage sometimes appears as productName contains 'Backup Storage'
+  $f = "serviceName eq 'Backup' and armRegionName eq '$ArmRegionName' and contains(productName,'Backup Storage')"
+  $items = Invoke-PricesApi -Filter $f
+  $items | Where-Object { $_.unitOfMeasure -match 'GB' -and $_.type -eq "Consumption" }
+}
 
-# restore culture
-[Threading.Thread]::CurrentThread.CurrentCulture   = $origCulture
-[Threading.Thread]::CurrentThread.CurrentUICulture = $origCulture
+function Map-Size-To-Tier {
+  param([int]$TotalProvGB)
+  if ($TotalProvGB -le 50) { return "S (≤50GB)" }
+  elseif ($TotalProvGB -le 500) { return "M (50–500GB)" }
+  else { return "L (>500GB)" }
+}
 
-Write-Host
-Write-Host "Results packaged at: $zipPath" -ForegroundColor Green
-Write-Host "Please send the archive to your Veeam representative." -ForegroundColor Cyan
+function Find-Price-For-Tier {
+  param(
+    [array]$PriceItems,
+    [string]$TierLabel
+  )
+  # Heuristics: look in productName/meterName for 50GB / 500GB keywords
+  $needle = switch -Wildcard ($TierLabel) {
+    "*≤50GB*"   { "50 GB" }
+    "*50–500GB*" { "500 GB" }
+    "*>500GB*"   { "> 500" }
+    default { $null }
+  }
+  if (-not $needle) { return $null }
+
+  # Try exact matches first on meterName, then productName
+  $exact = $PriceItems | Where-Object {
+    ($_.meterName -match [regex]::Escape($needle)) -or
+    ($_.productName -match [regex]::Escape($needle))
+  } | Select-Object -First 1
+
+  if ($exact) { return [decimal]$exact.unitPrice }
+
+  # Fall back: first monthly item
+  $fallback = $PriceItems | Select-Object -First 1
+  if ($fallback) { return [decimal]$fallback.unitPrice }
+
+  return $null
+}
+
+function Estimate-AzureBackupPricing {
+  param([array]$VmInventory)
+
+  $estimate = New-Object System.Collections.Generic.List[object]
+  # Cache prices per region
+  $cache = @{}
+
+  foreach ($vm in $VmInventory) {
+    $armRegion = $vm.Location.ToLower()
+    if (-not $cache.ContainsKey($armRegion)) {
+      try {
+        $pi = Get-BackupProtectedInstancePrices -ArmRegionName $armRegion
+        $bs = Get-BackupStoragePrices         -ArmRegionName $armRegion
+        $cache[$armRegion] = @{ PI=$pi; BS=$bs }
+      } catch {
+        $cache[$armRegion] = @{ PI=@(); BS=@() }
+      }
+    }
+    $bag = $cache[$armRegion]
+    $tier = Map-Size-To-Tier -TotalProvGB $vm.TotalProvisionedGB
+    $piPrice = Find-Price-For-Tier -PriceItems $bag.PI -TierLabel $tier
+
+    # Storage price (unknown redundancy from AKV policy here; emit both if found)
+    $lrs = ($bag.BS | Where-Object { $_.meterName -match 'LRS' } | Select-Object -First 1)
+    $grs = ($bag.BS | Where-Object { $_.meterName -match 'GRS' } | Select-Object -First 1)
+
+    $estimate.Add([pscustomobject]@{
+      SubscriptionName   = $vm.SubscriptionName
+      SubscriptionId     = $vm.SubscriptionId
+      ResourceGroup      = $vm.ResourceGroup
+      VmName             = $vm.VmName
+      Location           = $armRegion
+      VmSize             = $vm.VmSize
+      TotalProvisionedGB = $vm.TotalProvisionedGB
+      ProtectedTier      = $tier
+      Est_PI_MonthlyUSD  = $piPrice
+      BackupStorage_LRS_USDperGB = ($(if($lrs){ [decimal]$lrs.unitPrice } else { $null }))
+      BackupStorage_GRS_USDperGB = ($(if($grs){ [decimal]$grs.unitPrice } else { $null }))
+      Note               = "PI price = indicative list; actual bills depend on policy, churn, compression, retention."
+    })
+  }
+  return $estimate
+}
+#endregion
+
+#region Main
+try {
+  New-Output
+  Ensure-Connected
+  $script:Subs = Resolve-Subscriptions
+
+  # INVENTORY
+  $vmInv   = Get-VM-Inventory
+  $sqlInv  = Get-Sql-Inventory
+  $stInv   = Get-Storage-Inventory
+  $abInv   = Get-AzureBackup-Inventory
+
+  # EXPORT
+  $vmCsv     = Join-Path $OutputPath "azure_vms.csv"
+  $sqlDbCsv  = Join-Path $OutputPath "azure_sql_databases.csv"
+  $sqlMiCsv  = Join-Path $OutputPath "azure_sql_managed_instances.csv"
+  $filesCsv  = Join-Path $OutputPath "azure_files.csv"
+  $blobCsv   = Join-Path $OutputPath "azure_blob.csv"
+  $vaultsCsv = Join-Path $OutputPath "azure_backup_vaults.csv"
+  $polCsv    = Join-Path $OutputPath "azure_backup_policies.csv"
+
+  $vmInv                        | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $vmCsv
+  $sqlInv.Databases             | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $sqlDbCsv
+  $sqlInv.ManagedInstances      | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $sqlMiCsv
+  $stInv.Files                  | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $filesCsv
+  $stInv.Blobs                  | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $blobCsv
+  $abInv.Vaults                 | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $vaultsCsv
+  $abInv.Policies               | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $polCsv
+
+  Write-Host "`nWrote CSVs to: $OutputPath" -ForegroundColor Green
+
+  if ($IncludePricing.IsPresent) {
+    Write-Host "Calculating indicative Azure Backup pricing via Retail Prices API..." -ForegroundColor Yellow
+    $pricing = Estimate-AzureBackupPricing -VmInventory $vmInv
+    $priceCsv = Join-Path $OutputPath "azure_backup_pricing_estimate.csv"
+    $pricing | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $priceCsv
+    Write-Host "Wrote pricing estimate: $priceCsv" -ForegroundColor Green
+  }
+
+  # Simple console summary
+  $vmCount = ($vmInv | Measure-Object).Count
+  $bySub = $vmInv | Group-Object SubscriptionName | Select-Object Name, @{n='VMs';e={$_.Count}}
+  Write-Host "`nVMs discovered: $vmCount" -ForegroundColor Cyan
+  $bySub | Format-Table -AutoSize | Out-String | Write-Host
+
+} catch {
+  Write-Error $_.Exception.Message
+}
+#endregion
