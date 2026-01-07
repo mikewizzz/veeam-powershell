@@ -1,0 +1,44 @@
+# Veeam M365 Sizing Tool - Git Ignore
+
+# Output folders
+VeeamM365SizingOutput/
+veeam_m365_sizing_*/
+
+# Generated reports
+*.html
+*.csv
+*.json
+*.txt
+*.zip
+
+# Exclude sample/template outputs (if you want to commit examples)
+# !sample-output/
+
+# PowerShell
+*.ps1xml
+
+# Logs
+*.log
+
+# Secrets and credentials
+*secret*
+*credential*
+*.pfx
+*.pem
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Backup files
+*.bak
+*.backup
+*~
