@@ -71,6 +71,11 @@
 .PARAMETER MaxConcurrentTasks
   Maximum concurrent data transfer tasks during evacuation. Default: 4.
 
+.PARAMETER MonitorProgress
+  Actively monitor evacuation progress after starting the operation.
+  Displays real-time status updates and progress percentages for all active evacuation sessions.
+  Without this flag, the script provides instructions for manual monitoring.
+
 .PARAMETER OutputPath
   Custom output folder for reports and logs.
 
@@ -89,6 +94,10 @@
 .EXAMPLE
   .\Start-AzureBlobToVaultMigration.ps1 -TargetVaultName "VeeamVault-01" -SkipGatewayDeploy -ExecuteEvacuate
   # Execute migration using an existing gateway (skip deployment)
+
+.EXAMPLE
+  .\Start-AzureBlobToVaultMigration.ps1 -TargetVaultName "VeeamVault-01" -ExecuteEvacuate -MonitorProgress
+  # Execute migration and actively monitor evacuation progress with real-time status updates
 
 .NOTES
   Author: Veeam Sales Engineering
@@ -144,6 +153,9 @@ param(
   [Parameter(Mandatory=$false)]
   [ValidateRange(1, 16)]
   [int]$MaxConcurrentTasks = 4,
+
+  [Parameter(Mandatory=$false)]
+  [switch]$MonitorProgress,
 
   # Output
   [Parameter(Mandatory=$false)]
@@ -945,7 +957,9 @@ function Start-EvacuateOperation {
     [Parameter(Mandatory=$true)]
     [array]$BlobExtents,
     [Parameter(Mandatory=$true)]
-    [string]$TargetRepoName
+    [string]$TargetRepoName,
+    [Parameter(Mandatory=$false)]
+    [switch]$MonitorProgress
   )
 
   Write-Log "Preparing evacuate operation..." -Level "INFO"
@@ -955,6 +969,8 @@ function Start-EvacuateOperation {
     Write-Log "Target repository '$TargetRepoName' not found" -Level "ERROR"
     throw "Target repository not found"
   }
+
+  $evacuationSessions = @()
 
   foreach ($extent in $BlobExtents) {
     if (-not $extent.SOBRId) { continue }
@@ -971,10 +987,89 @@ function Start-EvacuateOperation {
       # Start the data evacuation
       Start-VBRRepositoryEvacuate -Repository $sobr -ErrorAction Stop
 
-      Write-Log "Evacuation started for $($extent.SOBRName). Monitor progress in VBR Console." -Level "SUCCESS"
+      Write-Log "Evacuation started for $($extent.SOBRName)." -Level "SUCCESS"
+      
+      # Track the evacuation session
+      $evacuationSessions += @{
+        SOBRName = $extent.SOBRName
+        StartTime = Get-Date
+      }
     } catch {
       Write-Log "Evacuation failed for $($extent.SOBRName): $($_.Exception.Message)" -Level "ERROR"
     }
+  }
+
+  # Provide monitoring guidance
+  Write-Host ""
+  Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+  Write-Host "  Evacuation Monitoring" -ForegroundColor Cyan
+  Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+  Write-Host ""
+  Write-Host "  Monitor evacuation progress using one of these methods:" -ForegroundColor White
+  Write-Host ""
+  Write-Host "  1. VBR Console:" -ForegroundColor Yellow
+  Write-Host "     Navigate to: Backup Infrastructure > Scale-out Backup Repository" -ForegroundColor White
+  Write-Host "     Right-click the SOBR > View > Capacity Tier" -ForegroundColor White
+  Write-Host ""
+  Write-Host "  2. PowerShell (in this session):" -ForegroundColor Yellow
+  Write-Host "     Get-VBRRepositoryEvacuationSession | Select-Object Id, State, Progress, StartTime, EndTime" -ForegroundColor Cyan
+  Write-Host ""
+  Write-Host "  3. View detailed task information:" -ForegroundColor Yellow
+  Write-Host "     `$session = Get-VBRRepositoryEvacuationSession | Where-Object { `$_.State -eq 'Working' }" -ForegroundColor Cyan
+  Write-Host "     `$session.Tasks | Select-Object Name, State, Progress" -ForegroundColor Cyan
+  Write-Host ""
+  Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+
+  # If MonitorProgress switch is provided, actively monitor the evacuation
+  if ($MonitorProgress -and $evacuationSessions.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  Monitoring evacuation progress (press Ctrl+C to stop monitoring)..." -ForegroundColor Yellow
+    Write-Host ""
+    
+    $checkCount = 0
+    do {
+      Start-Sleep -Seconds 30
+      $checkCount++
+      
+      try {
+        $activeSessions = Get-VBRRepositoryEvacuationSession | Where-Object { $_.State -eq 'Working' }
+        
+        if ($activeSessions) {
+          Write-Host "  [Check #$checkCount - $(Get-Date -Format 'HH:mm:ss')]" -ForegroundColor Gray
+          foreach ($session in $activeSessions) {
+            $progressPercent = if ($session.Progress) { $session.Progress } else { 0 }
+            Write-Host "    Session: $($session.Id) | State: $($session.State) | Progress: $progressPercent%" -ForegroundColor Cyan
+            
+            # Show task details if available
+            if ($session.Tasks) {
+              foreach ($task in $session.Tasks) {
+                $taskProgress = if ($task.Progress) { $task.Progress } else { 0 }
+                Write-Host "      └─ Task: $($task.Name) | State: $($task.State) | Progress: $taskProgress%" -ForegroundColor Gray
+              }
+            }
+          }
+          Write-Host ""
+        } else {
+          Write-Host "  [Check #$checkCount - $(Get-Date -Format 'HH:mm:ss')] No active evacuation sessions detected." -ForegroundColor Green
+          break
+        }
+      } catch {
+        Write-Log "Error checking evacuation status: $($_.Exception.Message)" -Level "WARNING"
+        Write-Log "Continuing to monitor..." -Level "INFO"
+      }
+      
+      # Safety limit: stop monitoring after 2 hours of checks (240 checks at 30s intervals)
+      if ($checkCount -ge 240) {
+        Write-Host ""
+        Write-Host "  Monitoring stopped after 2 hours. Evacuation continues in the background." -ForegroundColor Yellow
+        Write-Host "  Use the PowerShell commands above to check status manually." -ForegroundColor Yellow
+        break
+      }
+    } while ($activeSessions)
+    
+    Write-Host ""
+    Write-Host "  Evacuation monitoring complete." -ForegroundColor Green
+    Write-Host ""
   }
 }
 
@@ -1588,7 +1683,7 @@ try {
         if ($userChoice -ne "skip") {
           Write-Host ""
           Write-Host "  Starting data evacuation..." -ForegroundColor Cyan
-          Start-EvacuateOperation -BlobExtents $blobExtents -TargetRepoName $TargetVaultName
+          Start-EvacuateOperation -BlobExtents $blobExtents -TargetRepoName $TargetVaultName -MonitorProgress:$MonitorProgress
         } else {
           Write-Host ""
           Write-Host "  Evacuation skipped. You can re-run this script later with -SkipGatewayDeploy -ExecuteEvacuate after the gateway is fully registered." -ForegroundColor Yellow
@@ -1596,7 +1691,7 @@ try {
       } else {
         Write-Host ""
         Write-Host "  Starting data evacuation..." -ForegroundColor Cyan
-        Start-EvacuateOperation -BlobExtents $blobExtents -TargetRepoName $TargetVaultName
+        Start-EvacuateOperation -BlobExtents $blobExtents -TargetRepoName $TargetVaultName -MonitorProgress:$MonitorProgress
       }
     }
   }

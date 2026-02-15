@@ -47,6 +47,13 @@ This generates a comprehensive report showing:
   -TargetVaultName "VeeamVault-01" `
   -SkipGatewayDeploy `
   -ExecuteEvacuate
+
+# Optional: Execute evacuation with real-time progress monitoring
+.\Start-AzureBlobToVaultMigration.ps1 `
+  -TargetVaultName "VeeamVault-01" `
+  -SkipGatewayDeploy `
+  -ExecuteEvacuate `
+  -MonitorProgress
 ```
 
 ## Prerequisites
@@ -104,6 +111,7 @@ Install-Module Az.Accounts, Az.Compute, Az.Network, Az.Storage -Scope CurrentUse
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `MaxConcurrentTasks` | 4 | Concurrent data transfer tasks (1-16) |
+| `MonitorProgress` | false | Actively monitor evacuation progress with real-time status updates |
 | `OutputPath` | Auto-generated | Custom output folder for reports |
 
 ## Migration Workflow
@@ -184,6 +192,22 @@ $cred = Get-Credential -Message "VBR admin credentials"
   -MaxConcurrentTasks 8
 ```
 
+### Execute Migration with Real-Time Progress Monitoring
+
+```powershell
+.\Start-AzureBlobToVaultMigration.ps1 `
+  -TargetVaultName "VeeamVault-01" `
+  -SkipGatewayDeploy `
+  -ExecuteEvacuate `
+  -MonitorProgress
+```
+
+This will display real-time status updates every 30 seconds, showing:
+- Active evacuation session IDs and states
+- Progress percentages for each session
+- Detailed task-level progress information
+- Automatic completion detection
+
 ## Troubleshooting
 
 ### VBR PowerShell Snap-in Not Found
@@ -224,7 +248,7 @@ $cred = Get-Credential -Message "VBR admin credentials"
 1. **Always run assessment first** - Use `-AssessOnly` before any migration
 2. **Match gateway region** - Deploy the gateway in the same Azure region as your Blob storage
 3. **Schedule during low-activity windows** - Evacuation uses bandwidth; run during off-hours
-4. **Monitor in VBR Console** - Track evacuation progress under Backup Infrastructure > SOBR
+4. **Monitor evacuation progress** - Use `-MonitorProgress` for real-time status updates, or monitor in VBR Console under Backup Infrastructure > SOBR
 5. **Keep backups running** - Evacuation runs alongside normal backup operations
 6. **Validate before cleanup** - Verify all data is accessible from Vault before deleting Blob storage
 
