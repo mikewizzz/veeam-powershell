@@ -393,14 +393,14 @@ function Get-DomainDetail {
     $staleUsers = Invoke-ADQuery -Description "Stale users" -Server $dc -DefaultValue 0 -Query {
       param($Server, $Credential)
       $p = @{}; if ($Server) { $p['Server'] = $Server }; if ($Credential) { $p['Credential'] = $Credential }
-      $cutoff = (Get-Date).AddDays(-$using:StaleUserDays)
+      $cutoff = $staleCutoff
       (Get-ADUser -Filter { Enabled -eq $true -and LastLogonDate -lt $cutoff } -Property LastLogonDate @p | Measure-Object).Count
     }
 
     $staleComputers = Invoke-ADQuery -Description "Stale computers" -Server $dc -DefaultValue 0 -Query {
       param($Server, $Credential)
       $p = @{}; if ($Server) { $p['Server'] = $Server }; if ($Credential) { $p['Credential'] = $Credential }
-      $cutoff = (Get-Date).AddDays(-$using:StaleComputerDays)
+      $cutoff = $staleCompCutoff
       (Get-ADComputer -Filter { Enabled -eq $true -and LastLogonDate -lt $cutoff } -Property LastLogonDate @p | Measure-Object).Count
     }
 
