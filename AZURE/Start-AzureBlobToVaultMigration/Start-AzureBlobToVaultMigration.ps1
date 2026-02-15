@@ -707,7 +707,7 @@ function Get-MigrationEstimate {
   # Estimate transfer time based on concurrent tasks and throughput
   $effectiveThroughputGBps = $ESTIMATED_THROUGHPUT_GBPS * $MaxConcurrentTasks
   $transferHours = if ($effectiveThroughputGBps -gt 0) {
-    ($totalGB * 8) / ($effectiveThroughputGBps * 3600) # Convert GB to Gb, then to hours
+    $totalGB / ($effectiveThroughputGBps * 3600) # Convert throughput to GB/s and then to hours
   } else { 0 }
 
   # Veeam Vault monthly cost
