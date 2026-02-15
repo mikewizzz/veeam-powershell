@@ -135,9 +135,29 @@ param(
   [string]$IsolatedNetworkPrefix = "10.99",
 
   [ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')]
+  [ValidateScript({
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($_, [ref]$ip)) {
+      throw "ProxyApplianceIp must be a valid IPv4 address."
+    }
+    if ($ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+      throw "ProxyApplianceIp must be a valid IPv4 address."
+    }
+    $true
+  })]
   [string]$ProxyApplianceIp,
 
   [ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')]
+  [ValidateScript({
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($_, [ref]$ip)) {
+      throw "ProxyApplianceNetmask must be a valid IPv4 address."
+    }
+    if ($ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+      throw "ProxyApplianceNetmask must be a valid IPv4 address."
+    }
+    $true
+  })]
   [string]$ProxyApplianceNetmask = "255.255.255.0",
 
   # Application group options
@@ -267,14 +287,14 @@ function Select-FromList {
   }
 
   while ($true) {
-    $input = Read-Host "  Selection"
+    $selection = Read-Host "  Selection"
 
-    if ($AllowMultiple -and $input -eq 'all') {
+    if ($AllowMultiple -and $selection -eq 'all') {
       return $Items
     }
 
     if ($AllowMultiple) {
-      $indices = $input -split ',' | ForEach-Object {
+      $indices = $selection -split ',' | ForEach-Object {
         $num = $_.Trim() -as [int]
         if ($num -ge 1 -and $num -le $Items.Count) { $num - 1 }
       }
@@ -283,7 +303,7 @@ function Select-FromList {
       }
     }
     else {
-      $num = $input.Trim() -as [int]
+      $num = $selection.Trim() -as [int]
       if ($num -ge 1 -and $num -le $Items.Count) {
         return $Items[$num - 1]
       }
@@ -600,7 +620,12 @@ function Get-EligibleBackupJobs {
   }
 
   $jobList = foreach ($job in $allJobs) {
-    $restorePoints = Get-VBRRestorePoint -Backup (Get-VBRBackup -Name $job.Name -ErrorAction SilentlyContinue) -ErrorAction SilentlyContinue
+    $backup = Get-VBRBackup -Name $job.Name -ErrorAction SilentlyContinue
+    if ($backup) {
+      $restorePoints = Get-VBRRestorePoint -Backup $backup -ErrorAction SilentlyContinue
+    } else {
+      $restorePoints = $null
+    }
     $rpCount = if ($restorePoints) { $restorePoints.Count } else { 0 }
     $vmCount = ($job.GetObjectsInJob()).Count
     $lastRun = if ($job.LatestRunLocal) { $job.LatestRunLocal.ToString("yyyy-MM-dd HH:mm") } else { "Never" }
@@ -709,8 +734,8 @@ function Build-NetworkMapping {
 function Get-NetworksForVMs {
   <#
   .SYNOPSIS
-    Discovers which production networks the selected VMs use.
-    Returns unique networks that need isolation mapping.
+    Returns networks available on the host for isolation mapping.
+    In Auto mode, returns only the first network to avoid excessive mappings.
   #>
   param(
     [object[]]$VMs,
@@ -743,6 +768,13 @@ function Get-NetworksForVMs {
         EntityObj = $null
         Detail    = "Default (manual configuration may be needed)"
       })
+  }
+
+  # In Auto mode, return only the first network to avoid creating excessive mappings
+  # In interactive mode, the caller will let the user select from the full list
+  if ($script:Auto) {
+    Write-Log "Auto mode: selecting first network for isolation mapping" -Level INFO
+    return @($allNetworks[0])
   }
 
   return $allNetworks
@@ -928,42 +960,6 @@ function New-SureBackupAppGroup {
   Write-Log "Creating Application Group: $GroupName" -Level INFO
 
   try {
-    # Build VM startup options with ordering
-    $startupOrder = 1
-    $vmOptions = foreach ($vm in $VMs) {
-      $testOptions = @()
-
-      foreach ($test in $Tests) {
-        switch ($test) {
-          "Heartbeat" {
-            $testOpt = New-VBRSureBackupTestOption -Heartbeat -ErrorAction SilentlyContinue
-            if ($testOpt) { $testOptions += $testOpt }
-          }
-          "Ping" {
-            $testOpt = New-VBRSureBackupTestOption -Ping -ErrorAction SilentlyContinue
-            if ($testOpt) { $testOptions += $testOpt }
-          }
-          "Script" {
-            Write-Log "Script-based tests require manual configuration for VM '$($vm.Name)'" -Level WARNING
-          }
-        }
-      }
-
-      # Set startup delay: DCs get no delay, others get 30s between each
-      $delay = if ($vm.IsDC) { 0 } else { 30 * ($startupOrder - 1) }
-
-      $vmStartupParams = @{
-        RestorePoint = $vm.Name
-        StartupOrder = $startupOrder
-        StartupDelay = $delay
-        TestOptions  = $testOptions
-        Timeout      = $Timeout
-      }
-
-      $startupOrder++
-      $vmStartupParams
-    }
-
     # Get the backup object
     $backup = Get-VBRBackup -Name $BackupJob.Name -ErrorAction Stop
 
@@ -976,7 +972,7 @@ function New-SureBackupAppGroup {
       if ($restorePoint) {
         $vmConfig = New-VBRSureBackupVM `
           -RestorePoint $restorePoint `
-          -StartupOrder ($VMs.IndexOf($vm) + 1) `
+          -StartupOrder ([array]::IndexOf($VMs, $vm) + 1) `
           -ErrorAction SilentlyContinue
 
         if ($vmConfig) {
@@ -1636,7 +1632,8 @@ try {
     Write-Log "Selected datastore: $($selectedDatastore.Name) ($($selectedDatastore.FreeGB) GB free)" -Level INFO
   }
   else {
-    # Hyper-V: use volume or default path
+    # Hyper-V: Select volume for validation/reporting only
+    # Note: Add-VBRHvVirtualLab uses default Hyper-V paths and doesn't accept volume parameter
     $volumes = Get-HyperVVolumes -ServerObj $selectedHost.ServerObj
 
     if ($volumes -and $volumes.Count -gt 0) {
@@ -1644,10 +1641,13 @@ try {
         $selectedDatastore = $volumes | Select-Object -First 1
       }
       else {
-        $selectedDatastore = Select-FromList -Title "Select a volume for the Virtual Lab:" `
+        Write-Host ""
+        Write-Host "  Note: Volume selection is for validation/reporting only." -ForegroundColor DarkGray
+        Write-Host "  Hyper-V Virtual Lab will use default host paths." -ForegroundColor DarkGray
+        $selectedDatastore = Select-FromList -Title "Select a volume to check free space:" `
           -Items $volumes -DisplayProperty "Name" -DetailProperty "Detail"
       }
-      Write-Log "Selected volume: $($selectedDatastore.Name)" -Level INFO
+      Write-Log "Selected volume for validation: $($selectedDatastore.Name)" -Level INFO
     }
     else {
       Write-Log "No volumes discovered - Virtual Lab will use default Hyper-V path" -Level WARNING

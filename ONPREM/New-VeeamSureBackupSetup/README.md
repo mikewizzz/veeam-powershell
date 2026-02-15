@@ -84,13 +84,15 @@ The tool auto-detects your platform from VBR's managed infrastructure. If both a
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `-Auto` | switch | `false` | Skip all prompts. Uses defaults or provided values. |
-| `-WhatIf` | switch | `false` | Preview mode. Shows configuration without creating anything. |
+| `-WhatIf` (common) | switch | `false` | PowerShell common parameter. Preview mode: shows what would be created without making changes. |
+
+> **Note:** `-WhatIf` is provided by PowerShell as a common parameter via `CmdletBinding(SupportsShouldProcess = $true)`. It is not declared in the script's `param()` block, but can still be used as shown in the examples.
 
 ### Output
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `-OutputPath` | string | `./SureBackupSetup_[timestamp]` | Folder for the HTML report. |
+| `-OutputPath` | string | `$PSScriptRoot\SureBackupSetup_[timestamp]` | Folder for the HTML report. |
 | `-GenerateHTML` | switch | `true` | Generate a professional HTML summary report. |
 
 ## How It Works
