@@ -96,7 +96,7 @@
 
 .EXAMPLE
   .\Start-AzureBlobToVaultMigration.ps1 -AssessOnly -VeeamVaultPricePerTB 15.00
-  # Assessment with custom Veeam Vault pricing (e.g., if pricing changes)
+  # Assessment with custom Veeam Vault pricing of $15.00 per TB/month
 
 .NOTES
   Author: Veeam Sales Engineering
