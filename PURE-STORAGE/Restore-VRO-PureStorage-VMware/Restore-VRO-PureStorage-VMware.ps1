@@ -213,11 +213,12 @@ $script:StartTime = Get-Date
 $script:LogEntries = New-Object System.Collections.Generic.List[object]
 $script:RecoveryActions = New-Object System.Collections.Generic.List[object]
 $script:RecoveredVMs = New-Object System.Collections.Generic.List[object]
-$script:TotalSteps = 10
+$script:TotalSteps = 11
 $script:CurrentStep = 0
 $script:FlashArray = $null
 $script:VIConnection = $null
 $script:ClonedVolumeName = $null
+$script:ClonedVolumeNames = @()
 $script:MountedDatastore = $null
 $script:RecoverySucceeded = $false
 
@@ -281,6 +282,22 @@ function Add-RecoveryAction {
     Detail    = $Detail
   }
   $script:RecoveryActions.Add($entry)
+}
+
+#endregion
+
+# =============================
+# HTML Encoding Helper
+# =============================
+#region HtmlEncoding
+
+# Load System.Web for HTML encoding
+Add-Type -AssemblyName System.Web
+
+function ConvertTo-HtmlSafe {
+  param([string]$Text)
+  if ([string]::IsNullOrEmpty($Text)) { return "" }
+  return [System.Web.HttpUtility]::HtmlEncode($Text)
 }
 
 #endregion
@@ -570,6 +587,7 @@ function New-SnapshotClone {
     $baseVolName = ($volSnap.Name -split "\.")[-1]
     $cloneName = "veeam-recovery-$baseVolName-$timestamp"
     $script:ClonedVolumeName = $cloneName
+    $script:ClonedVolumeNames += $cloneName
 
     if ($PSCmdlet.ShouldProcess($cloneName, "Create volume clone from $($volSnap.Name)")) {
       try {
@@ -650,7 +668,6 @@ function Resolve-HostGroup {
         if ($fcWWNs -contains $normalizedPureWWN) {
           if ($ph.HostGroup.Name) {
             Write-Log "Auto-detected Host Group: $($ph.HostGroup.Name) (via FC WWN match on host '$($ph.Name)')" -Level "SUCCESS"
-            if ($Protocol -eq "Auto") { $script:DetectedProtocol = "FC" }
             return $ph.HostGroup.Name
           }
           # Host found but not in a group - use host directly
@@ -666,7 +683,6 @@ function Resolve-HostGroup {
         if ($iscsiIQNs -contains $pureIQN) {
           if ($ph.HostGroup.Name) {
             Write-Log "Auto-detected Host Group: $($ph.HostGroup.Name) (via iSCSI IQN match on host '$($ph.Name)')" -Level "SUCCESS"
-            if ($Protocol -eq "Auto") { $script:DetectedProtocol = "iSCSI" }
             return $ph.HostGroup.Name
           }
           Write-Log "ESXi host matches Pure host '$($ph.Name)' but has no Host Group" -Level "WARNING"
@@ -1209,8 +1225,15 @@ function Invoke-RecoveryCleanup {
   # Unmount datastore
   if ($script:MountedDatastore) {
     try {
-      Remove-Datastore -Datastore $script:MountedDatastore -VMHost (Get-VMHost) -Confirm:$false -ErrorAction SilentlyContinue
-      Write-Log "Removed datastore: $($script:MountedDatastore.Name)" -Level "INFO"
+      # Scope removal to only hosts that have this datastore mounted
+      $datastoreHosts = Get-VMHost -Datastore $script:MountedDatastore -ErrorAction SilentlyContinue
+      if ($datastoreHosts) {
+        Remove-Datastore -Datastore $script:MountedDatastore -VMHost $datastoreHosts -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Log "Removed datastore: $($script:MountedDatastore.Name)" -Level "INFO"
+      }
+      else {
+        Write-Log "Datastore '$($script:MountedDatastore.Name)' is not mounted on any hosts; skipping removal" -Level "INFO"
+      }
     }
     catch {
       Write-Log "Could not remove datastore: $($_.Exception.Message)" -Level "WARNING"
@@ -1218,11 +1241,49 @@ function Invoke-RecoveryCleanup {
   }
 
   # Disconnect and destroy cloned volumes
-  if ($script:ClonedVolumeName -and $script:FlashArray) {
+  if ($script:ClonedVolumeNames -and $script:ClonedVolumeNames.Count -gt 0 -and $script:FlashArray) {
+    foreach ($volumeName in $script:ClonedVolumeNames) {
+      try {
+        # Remove host or host group connections for the cloned volume
+        Get-Pfa2Connection -VolumeName $volumeName -ErrorAction SilentlyContinue |
+          ForEach-Object {
+            if ($_.HostGroup -and $_.HostGroup.Name) {
+              Remove-Pfa2Connection -VolumeName $volumeName -HostGroupName $_.HostGroup.Name -ErrorAction SilentlyContinue
+            }
+            elseif ($_.Host -and $_.Host.Name) {
+              Remove-Pfa2Connection -VolumeName $volumeName -HostName $_.Host.Name -ErrorAction SilentlyContinue
+            }
+            else {
+              Write-Log "Skipping connection cleanup for volume '$volumeName' - no host or host group information on connection object." -Level "WARNING"
+            }
+          }
+
+        # Destroy volume
+        Remove-Pfa2Volume -Name $volumeName -ErrorAction SilentlyContinue
+        Remove-Pfa2Volume -Name $volumeName -Eradicate -ErrorAction SilentlyContinue
+        Write-Log "Destroyed cloned volume: $volumeName" -Level "INFO"
+      }
+      catch {
+        Write-Log "Could not clean up volume '$volumeName': $($_.Exception.Message)" -Level "WARNING"
+      }
+    }
+  }
+  # Fallback to legacy single volume cleanup for backward compatibility
+  elseif ($script:ClonedVolumeName -and $script:FlashArray) {
     try {
-      # Remove host connection
+      # Remove host or host group connections
       Get-Pfa2Connection -VolumeName $script:ClonedVolumeName -ErrorAction SilentlyContinue |
-        ForEach-Object { Remove-Pfa2Connection -VolumeName $script:ClonedVolumeName -HostGroupName $_.HostGroup.Name -ErrorAction SilentlyContinue }
+        ForEach-Object {
+          if ($_.HostGroup -and $_.HostGroup.Name) {
+            Remove-Pfa2Connection -VolumeName $script:ClonedVolumeName -HostGroupName $_.HostGroup.Name -ErrorAction SilentlyContinue
+          }
+          elseif ($_.Host -and $_.Host.Name) {
+            Remove-Pfa2Connection -VolumeName $script:ClonedVolumeName -HostName $_.Host.Name -ErrorAction SilentlyContinue
+          }
+          else {
+            Write-Log "Skipping connection cleanup for volume '$($script:ClonedVolumeName)' - no host or host group information on connection object." -Level "WARNING"
+          }
+        }
 
       # Destroy volume
       Remove-Pfa2Volume -Name $script:ClonedVolumeName -ErrorAction SilentlyContinue
@@ -1271,13 +1332,13 @@ function New-RecoveryReport {
     }
     $vmRows += @"
     <tr style="background:$rowColor;">
-      <td style="padding:8px 12px;">$($vm.Name)</td>
-      <td style="padding:8px 12px;">$($vm.OriginalName)</td>
-      <td style="padding:8px 12px;">$($vm.NumCPU)</td>
-      <td style="padding:8px 12px;">$($vm.MemoryGB) GB</td>
-      <td style="padding:8px 12px;">$($vm.DiskCount)</td>
-      <td style="padding:8px 12px;">$($vm.NetworkAdapters)</td>
-      <td style="padding:8px 12px;">$($vm.PowerState)</td>
+      <td style="padding:8px 12px;">$(ConvertTo-HtmlSafe $vm.Name)</td>
+      <td style="padding:8px 12px;">$(ConvertTo-HtmlSafe $vm.OriginalName)</td>
+      <td style="padding:8px 12px;">$(ConvertTo-HtmlSafe $vm.NumCPU)</td>
+      <td style="padding:8px 12px;">$(ConvertTo-HtmlSafe $vm.MemoryGB) GB</td>
+      <td style="padding:8px 12px;">$(ConvertTo-HtmlSafe $vm.DiskCount)</td>
+      <td style="padding:8px 12px;">$(ConvertTo-HtmlSafe $vm.NetworkAdapters)</td>
+      <td style="padding:8px 12px;">$(ConvertTo-HtmlSafe $vm.PowerState)</td>
       <td style="padding:8px 12px;">$statusBadge</td>
     </tr>
 "@
@@ -1294,11 +1355,11 @@ function New-RecoveryReport {
     }
     $actionRows += @"
     <tr>
-      <td style="padding:6px 12px;font-size:13px;">$($action.Timestamp)</td>
-      <td style="padding:6px 12px;font-size:13px;">$($action.Action)</td>
-      <td style="padding:6px 12px;font-size:13px;">$($action.Target)</td>
-      <td style="padding:6px 12px;font-size:13px;color:$actionStatusColor;font-weight:600;">$($action.Status)</td>
-      <td style="padding:6px 12px;font-size:13px;">$($action.Detail)</td>
+      <td style="padding:6px 12px;font-size:13px;">$(ConvertTo-HtmlSafe $action.Timestamp)</td>
+      <td style="padding:6px 12px;font-size:13px;">$(ConvertTo-HtmlSafe $action.Action)</td>
+      <td style="padding:6px 12px;font-size:13px;">$(ConvertTo-HtmlSafe $action.Target)</td>
+      <td style="padding:6px 12px;font-size:13px;color:$actionStatusColor;font-weight:600;">$(ConvertTo-HtmlSafe $action.Status)</td>
+      <td style="padding:6px 12px;font-size:13px;">$(ConvertTo-HtmlSafe $action.Detail)</td>
     </tr>
 "@
   }
@@ -1359,11 +1420,11 @@ function New-RecoveryReport {
     <div class="summary-grid">
       <div class="summary-card">
         <div class="label">FlashArray</div>
-        <div class="value">$FlashArrayEndpoint</div>
+        <div class="value">$(ConvertTo-HtmlSafe $FlashArrayEndpoint)</div>
       </div>
       <div class="summary-card">
         <div class="label">vCenter</div>
-        <div class="value">$VCenterServer</div>
+        <div class="value">$(ConvertTo-HtmlSafe $VCenterServer)</div>
       </div>
       <div class="summary-card">
         <div class="label">VMs Recovered</div>
@@ -1549,7 +1610,19 @@ function Invoke-PureStorageRecovery {
 
     # Step 9: Mount datastore and register VMs
     Mount-RecoveredDatastore -VMHost $targetHost -ClonedVolumes $clonedVolumes
-    Register-RecoveredVMs -VMHost $targetHost -Datastore $script:MountedDatastore
+    
+    # Only proceed with VM registration if datastore was actually mounted
+    # (In WhatIf mode, datastore mounting is skipped)
+    if ($script:MountedDatastore) {
+      Register-RecoveredVMs -VMHost $targetHost -Datastore $script:MountedDatastore
+    }
+    elseif ($WhatIfPreference) {
+      Write-Log "[WhatIf] Skipping VM registration - no datastore mounted in preview mode" -Level "INFO"
+      Add-RecoveryAction -Action "Register VMs" -Target "N/A" -Status "Skipped" -Detail "WhatIf mode - datastore not mounted"
+    }
+    else {
+      Write-Log "No datastore was mounted - skipping VM registration" -Level "WARNING"
+    }
 
     # Mark success
     $script:RecoverySucceeded = $true

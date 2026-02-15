@@ -158,13 +158,14 @@ $vcCred = Import-Clixml "C:\secure\vcenter-cred.xml"
 | `VMNamePrefix` | String | `REC-` | Prefix added to recovered VM names |
 | `VMNames` | String[] | (all VMs) | Filter to specific VM names |
 | `PowerOnVMs` | Switch | false | Power on VMs after registration |
+| `AnswerSourceVM` | Bool | true | Answer "I Copied It" for VM UUID conflicts to avoid conflicts with source VMs |
 
 ### Storage Options
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `HostGroupName` | String | auto-detect | Pure Storage Host Group for volume presentation |
-| `Protocol` | String | `Auto` | Storage protocol: `FC`, `iSCSI`, or `Auto` |
+| `Protocol` | String | `Auto` | Storage protocol hint (`FC`, `iSCSI`, or `Auto`). Currently informational; the script auto-detects the protocol and does not change behavior based on this value. |
 
 ### Behavior
 
