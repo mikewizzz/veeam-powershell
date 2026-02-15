@@ -26,6 +26,10 @@ veeam-powershell/
 │   │   └── README.md
 │   └── Start-VRO-Azure-Recovery/
 │       └── Start-VROAzureRecovery.ps1    # Stub/placeholder
+├── VBR/
+│   └── Get-VeeamDiagram/
+│       ├── Get-VeeamDiagram.ps1            # VBR v13 REST API diagram generator (production)
+│       └── README.md
 ├── AWS/
 │   ├── Find-CleanEC2-RestorePoint/
 │   │   └── Find-CleanEC2-RestorePoint.ps1  # Stub/placeholder
@@ -34,7 +38,7 @@ veeam-powershell/
 └── CLAUDE.md
 ```
 
-**Three production scripts** (M365 sizing, Azure sizing, Vault pricing). AWS and Azure Recovery scripts are stubs for future development.
+**Four production scripts** (M365 sizing, Azure sizing, Vault pricing, VBR diagram generator). AWS and Azure Recovery scripts are stubs for future development.
 
 ## Architecture
 
@@ -146,6 +150,7 @@ do {
 | Get-VeeamM365Sizing.ps1 | Microsoft.Graph.Authentication, Microsoft.Graph.Reports, Microsoft.Graph.Identity.DirectoryManagement |
 | Get-VeeamAzureSizing.ps1 | Az.Accounts, Az.Resources, Az.Compute, Az.Network, Az.Sql, Az.Storage, Az.RecoveryServices |
 | Get-VeeamVaultPricing.ps1 | None (uses REST API directly) |
+| Get-VeeamDiagram.ps1 | None (uses Invoke-RestMethod directly against VBR v13 REST API) |
 
 PowerShell 7.x recommended; 5.1 supported.
 
