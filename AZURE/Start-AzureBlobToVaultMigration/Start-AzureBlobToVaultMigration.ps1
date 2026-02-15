@@ -863,8 +863,23 @@ function Deploy-GatewayServer {
   }
 
   # Get subnet reference
-  $vnet = Get-AzVirtualNetwork -Name $VNetName -ResourceGroupName $ResourceGroup
+  try {
+    $vnet = Get-AzVirtualNetwork -Name $VNetName -ResourceGroupName $ResourceGroup -ErrorAction Stop
+  } catch {
+    Write-Log "Failed to retrieve virtual network '$VNetName' in resource group '$ResourceGroup': $($_.Exception.Message)" -Level "ERROR"
+    throw
+  }
+
+  if (-not $vnet) {
+    Write-Log "Virtual network '$VNetName' in resource group '$ResourceGroup' was not found." -Level "ERROR"
+    throw "Virtual network '$VNetName' in resource group '$ResourceGroup' was not found."
+  }
+
   $subnet = $vnet.Subnets | Where-Object { $_.Name -eq $SubnetName }
+  if (-not $subnet) {
+    Write-Log "Subnet '$SubnetName' was not found in virtual network '$VNetName' (resource group '$ResourceGroup')." -Level "ERROR"
+    throw "Subnet '$SubnetName' was not found in virtual network '$VNetName' (resource group '$ResourceGroup')."
+  }
 
   # Create NIC
   Write-Log "Creating network interface..." -Level "INFO"
