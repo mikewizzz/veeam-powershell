@@ -229,7 +229,7 @@ SE needs to quickly stand up a DR environment for a customer demo.
 
 ## Important Notes
 
-- **Idempotent** - Running Deploy multiple times won't duplicate resources (checks for existing)
+- **Idempotent (with exceptions)** - Deploy checks for and reuses existing resources where possible and avoids duplicating the landing zone. However, some resources (such as the storage account, which uses a date-based suffix in its name) may be recreated when you rerun Deploy on a different day.
 - **No VMs created** - This tool creates infrastructure scaffolding only; VRO handles VM recovery
 - **NSG defaults are permissive** - Tighten RDP/SSH source IPs after deployment
 - **VPN/ExpressRoute not included** - Network connectivity must be configured separately

@@ -289,18 +289,30 @@ function Get-AzureStoragePricing {
     $filter = "serviceName eq 'Storage' and priceType eq 'Consumption' and armRegionName eq '$TargetRegion'"
     $apiUrl = "https://prices.azure.com/api/retail/prices?`$filter=$filter"
 
-    $response = Invoke-RestMethod -Uri $apiUrl -Method Get -ErrorAction Stop
+    $lrsHot = $null
+    $managedDisk = $null
+    $nextLink = $apiUrl
 
-    $lrsHot = $response.Items | Where-Object {
-      $_.productName -like "*Block Blob*" -and
-      $_.skuName -like "*LRS*" -and
-      $_.meterName -like "*Hot*Data Stored*"
-    } | Select-Object -First 1
+    while ($nextLink -and (-not $lrsHot -or -not $managedDisk)) {
+      $response = Invoke-RestMethod -Uri $nextLink -Method Get -ErrorAction Stop
 
-    $managedDisk = $response.Items | Where-Object {
-      $_.productName -like "*Managed Disks*" -and
-      $_.meterName -like "*P30*"
-    } | Select-Object -First 1
+      if (-not $lrsHot) {
+        $lrsHot = $response.Items | Where-Object {
+          $_.productName -like "*Block Blob*" -and
+          $_.skuName -like "*LRS*" -and
+          $_.meterName -like "*Hot*Data Stored*"
+        } | Select-Object -First 1
+      }
+
+      if (-not $managedDisk) {
+        $managedDisk = $response.Items | Where-Object {
+          $_.productName -like "*Managed Disks*" -and
+          $_.meterName -like "*P30*"
+        } | Select-Object -First 1
+      }
+
+      $nextLink = $response.NextPageLink
+    }
 
     return @{
       BlobHotPerGBMonth = if ($lrsHot) { $lrsHot.retailPrice } else { 0.0184 }
@@ -342,6 +354,9 @@ function Build-BillOfMaterials {
   )
 
   Write-ProgressStep -Activity "Building Bill of Materials" -Status "Calculating component requirements..."
+
+  # Query management VM pricing for accurate BOM cost estimation
+  $mgmtVMPricing = Get-AzureVMPricing -VMSize "Standard_D2s_v5" -TargetRegion $TargetRegion
 
   $dataGB = $DataTB * 1024
   $recoverySubnetCapacity = Get-SubnetCapacity -CIDR $RecoverySubnetCIDR
@@ -426,7 +441,7 @@ function Build-BillOfMaterials {
       Specification = "StorageV2, LRS, Hot tier, $stagingStorageGB GB"
       Quantity = 1
       EstMonthlyUSD = [math]::Round($stagingStorageGB * 0.0184, 2)
-      Notes = "Staging area for Veeam restores and VRO data"
+      Notes = "Staging area for Veeam restores and VRO data. Deployed storage account name will append an MMdd date suffix to this base name."
     },
     [PSCustomObject]@{
       Category = "Compute (DR Active)"
@@ -452,7 +467,7 @@ function Build-BillOfMaterials {
       ResourceName = "$Prefix-vro-*"
       Specification = "Standard_D2s_v5 ($mgmtVMCount VMs)"
       Quantity = $mgmtVMCount
-      EstMonthlyUSD = [math]::Round($mgmtVMCount * 0.096 * 730, 2)
+      EstMonthlyUSD = [math]::Round($mgmtVMCount * $mgmtVMPricing.LinuxHourly * 730, 2)
       Notes = "Always-on management VMs for VRO orchestration"
     }
   )
@@ -471,8 +486,9 @@ function Calculate-CostEstimate {
 
   Write-ProgressStep -Activity "Calculating Cost Estimates" -Status "Querying Azure pricing APIs..."
 
-  # Get real-time pricing
+  # Get real-time pricing for target workload VMs and management VMs
   $vmPricing = Get-AzureVMPricing -VMSize $VMSize -TargetRegion $TargetRegion
+  $mgmtVMPricing = Get-AzureVMPricing -VMSize "Standard_D2s_v5" -TargetRegion $TargetRegion
   $storagePricing = Get-AzureStoragePricing -TargetRegion $TargetRegion
 
   $dataGB = $DataTB * 1024
@@ -480,8 +496,8 @@ function Calculate-CostEstimate {
   $managedDiskCount = [math]::Ceiling($dataGB / 1024)
   $mgmtVMCount = if ($VMs -le 50) { 2 } elseif ($VMs -le 200) { 3 } else { 4 }
 
-  # Always-on costs (monthly)
-  $mgmtVMCostMonthly = [math]::Round($mgmtVMCount * $vmPricing.LinuxHourly * 730, 2)
+  # Always-on costs (monthly) - use management VM pricing
+  $mgmtVMCostMonthly = [math]::Round($mgmtVMCount * $mgmtVMPricing.LinuxHourly * 730, 2)
   $storageCostMonthly = [math]::Round($stagingStorageGB * $storagePricing.BlobHotPerGBMonth, 2)
   $alwaysOnMonthly = $mgmtVMCostMonthly + $storageCostMonthly
 
@@ -676,7 +692,8 @@ function Deploy-LandingZone {
     $rg = New-AzResourceGroup -Name $rgName -Location $TargetRegion -Tag $tags -ErrorAction Stop
     Write-Log "Created resource group: $rgName" -Level "SUCCESS"
   }
-  $deployedResources += [PSCustomObject]@{ Type = "Resource Group"; Name = $rgName; Status = "Created"; ResourceId = $rg.ResourceId }
+  $rgStatus = if ($existingRG) { "Existing" } else { "Created" }
+  $deployedResources += [PSCustomObject]@{ Type = "Resource Group"; Name = $rgName; Status = $rgStatus; ResourceId = $rg.ResourceId }
 
   # 2. NSG - Recovery Subnet
   Write-ProgressStep -Activity "Creating NSG (Recovery)" -Status "$nsgRecoveryName..."
@@ -710,7 +727,8 @@ function Deploy-LandingZone {
 
     Write-Log "Created NSG: $nsgRecoveryName (RDP/SSH restricted to VNet, HTTPS)" -Level "SUCCESS"
   }
-  $deployedResources += [PSCustomObject]@{ Type = "NSG"; Name = $nsgRecoveryName; Status = "Created"; ResourceId = $nsgRecovery.Id }
+  $nsgRecoveryStatus = if ($existingNSG1) { "Existing" } else { "Created" }
+  $deployedResources += [PSCustomObject]@{ Type = "NSG"; Name = $nsgRecoveryName; Status = $nsgRecoveryStatus; ResourceId = $nsgRecovery.Id }
 
   # 3. NSG - Management Subnet
   Write-ProgressStep -Activity "Creating NSG (Management)" -Status "$nsgMgmtName..."
@@ -738,15 +756,52 @@ function Deploy-LandingZone {
 
     Write-Log "Created NSG: $nsgMgmtName (HTTPS + Veeam ports 9392-9401)" -Level "SUCCESS"
   }
-  $deployedResources += [PSCustomObject]@{ Type = "NSG"; Name = $nsgMgmtName; Status = "Created"; ResourceId = $nsgMgmt.Id }
+  $nsgMgmtStatus = if ($existingNSG2) { "Existing" } else { "Created" }
+  $deployedResources += [PSCustomObject]@{ Type = "NSG"; Name = $nsgMgmtName; Status = $nsgMgmtStatus; ResourceId = $nsgMgmt.Id }
 
   # 4. Virtual Network with Subnets
   Write-ProgressStep -Activity "Creating Virtual Network" -Status "$vnetName with subnets..."
 
   $existingVNet = Get-AzVirtualNetwork -ResourceGroupName $rgName -Name $vnetName -ErrorAction SilentlyContinue
   if ($existingVNet) {
-    Write-Log "VNet '$vnetName' already exists" -Level "WARNING"
-    $vnet = $existingVNet
+    Write-Log "VNet '$vnetName' already exists, validating configuration..." -Level "WARNING"
+
+    # Validate that the existing VNet has the expected address space
+    if ($VNetAddressSpace -and -not ($existingVNet.AddressSpace.AddressPrefixes -contains $VNetAddressSpace)) {
+      throw "Existing VNet '$vnetName' has address space '$($existingVNet.AddressSpace.AddressPrefixes -join ",")' which does not contain required address space '$VNetAddressSpace'."
+    }
+
+    # Ensure management subnet exists and is associated with the correct NSG
+    $mgmtSubnet = $existingVNet.Subnets | Where-Object { $_.Name -eq $mgmtSubnetName }
+    if (-not $mgmtSubnet) {
+      Write-Log "Management subnet '$mgmtSubnetName' not found in existing VNet. Creating it..." -Level "WARNING"
+      Add-AzVirtualNetworkSubnetConfig -Name $mgmtSubnetName `
+        -AddressPrefix $ManagementSubnetCIDR -NetworkSecurityGroupId $nsgMgmt.Id `
+        -VirtualNetwork $existingVNet | Out-Null
+    } else {
+      if (-not $mgmtSubnet.NetworkSecurityGroup -or $mgmtSubnet.NetworkSecurityGroup.Id -ne $nsgMgmt.Id) {
+        Write-Log "Updating NSG association for management subnet '$mgmtSubnetName'." -Level "WARNING"
+        $mgmtSubnet.NetworkSecurityGroup = $nsgMgmt
+      }
+    }
+
+    # Ensure recovery subnet exists and is associated with the correct NSG
+    $recoverySubnet = $existingVNet.Subnets | Where-Object { $_.Name -eq $recoverySubnetName }
+    if (-not $recoverySubnet) {
+      Write-Log "Recovery subnet '$recoverySubnetName' not found in existing VNet. Creating it..." -Level "WARNING"
+      Add-AzVirtualNetworkSubnetConfig -Name $recoverySubnetName `
+        -AddressPrefix $RecoverySubnetCIDR -NetworkSecurityGroupId $nsgRecovery.Id `
+        -VirtualNetwork $existingVNet | Out-Null
+    } else {
+      if (-not $recoverySubnet.NetworkSecurityGroup -or $recoverySubnet.NetworkSecurityGroup.Id -ne $nsgRecovery.Id) {
+        Write-Log "Updating NSG association for recovery subnet '$recoverySubnetName'." -Level "WARNING"
+        $recoverySubnet.NetworkSecurityGroup = $nsgRecovery
+      }
+    }
+
+    # Persist any subnet/NSG changes back to Azure
+    $vnet = Set-AzVirtualNetwork -VirtualNetwork $existingVNet -Tag $tags -ErrorAction Stop
+    Write-Log "Validated/updated existing VNet: $vnetName ($VNetAddressSpace) with required subnets and NSGs" -Level "SUCCESS"
   } else {
     $mgmtSubnetConfig = New-AzVirtualNetworkSubnetConfig -Name $mgmtSubnetName `
       -AddressPrefix $ManagementSubnetCIDR -NetworkSecurityGroupId $nsgMgmt.Id
@@ -761,7 +816,8 @@ function Deploy-LandingZone {
 
     Write-Log "Created VNet: $vnetName ($VNetAddressSpace) with 2 subnets" -Level "SUCCESS"
   }
-  $deployedResources += [PSCustomObject]@{ Type = "Virtual Network"; Name = $vnetName; Status = "Created"; ResourceId = $vnet.Id }
+  $vnetStatus = if ($existingVNet) { "Existing" } else { "Created" }
+  $deployedResources += [PSCustomObject]@{ Type = "Virtual Network"; Name = $vnetName; Status = $vnetStatus; ResourceId = $vnet.Id }
 
   # 5. Storage Account
   Write-ProgressStep -Activity "Creating Storage Account" -Status "$saName..."
@@ -779,25 +835,30 @@ function Deploy-LandingZone {
 
     Write-Log "Created storage account: $saName (StorageV2, LRS, Hot, TLS 1.2)" -Level "SUCCESS"
   }
-  $deployedResources += [PSCustomObject]@{ Type = "Storage Account"; Name = $saName; Status = "Created"; ResourceId = $sa.Id }
+  $saStatus = if ($existingSA) { "Existing" } else { "Created" }
+  $deployedResources += [PSCustomObject]@{ Type = "Storage Account"; Name = $saName; Status = $saStatus; ResourceId = $sa.Id }
 
   # 6. VRO Service Principal Role Assignment (optional)
   if ($VROServicePrincipalId) {
     Write-ProgressStep -Activity "Configuring VRO Access" -Status "Assigning Contributor role..."
 
     try {
-      $existingAssignment = Get-AzRoleAssignment -ObjectId $VROServicePrincipalId `
-        -ResourceGroupName $rgName -RoleDefinitionName "Contributor" -ErrorAction SilentlyContinue
+      # Get-AzRoleAssignment doesn't directly support ApplicationId filter, so we check by scope
+      $existingAssignment = Get-AzRoleAssignment -Scope $rg.ResourceId `
+        -RoleDefinitionName "Contributor" -ErrorAction SilentlyContinue | 
+        Where-Object { $_.ObjectType -eq 'ServicePrincipal' -and $_.DisplayName -match $VROServicePrincipalId }
 
       if ($existingAssignment) {
         Write-Log "VRO service principal already has Contributor on $rgName" -Level "WARNING"
+        $roleStatus = "Existing"
       } else {
         New-AzRoleAssignment -ApplicationId $VROServicePrincipalId `
           -ResourceGroupName $rgName -RoleDefinitionName "Contributor" -ErrorAction Stop | Out-Null
 
         Write-Log "Granted Contributor role to VRO SP ($VROServicePrincipalId) on $rgName" -Level "SUCCESS"
+        $roleStatus = "Created"
       }
-      $deployedResources += [PSCustomObject]@{ Type = "Role Assignment"; Name = "Contributor -> $VROServicePrincipalId"; Status = "Created"; ResourceId = $rgName }
+      $deployedResources += [PSCustomObject]@{ Type = "Role Assignment"; Name = "Contributor -> $VROServicePrincipalId"; Status = $roleStatus; ResourceId = $rgName }
     } catch {
       Write-Log "Failed to assign VRO role: $($_.Exception.Message)" -Level "WARNING"
       Write-Log "You can configure VRO access manually after deployment" -Level "INFO"
@@ -831,8 +892,17 @@ function Generate-HTMLReport {
 
   # Build BOM table rows
   $bomRows = $BOM | ForEach-Object {
-    $costDisplay = if ($_.EstMonthlyUSD -gt 0) { "`$$([math]::Round($_.EstMonthlyUSD, 2))/mo" } else { "Free" }
-    $costClass = if ($_.EstMonthlyUSD -gt 0) { "cost-value" } else { "cost-free" }
+    # Distinguish between truly free resources and DR-active pay-per-use resources
+    if ($_.EstMonthlyUSD -gt 0) {
+      $costDisplay = "`$$([math]::Round($_.EstMonthlyUSD, 2))/mo"
+      $costClass = "cost-value"
+    } elseif ($_.Category -like "*DR Active*") {
+      $costDisplay = "DR event"
+      $costClass = "cost-free"
+    } else {
+      $costDisplay = "Free"
+      $costClass = "cost-free"
+    }
     @"
         <tr>
           <td><span class="category-badge">$($_.Category)</span></td>
@@ -1410,16 +1480,21 @@ try {
   }
 
   # Generate HTML Report
-  $stepNum = if ($Deploy) { $script:TotalSteps - 1 } else { 4 }
-  Write-Host "[$stepNum/$script:TotalSteps] " -NoNewline -ForegroundColor Cyan
-  Write-Host "Generating professional HTML report..." -ForegroundColor White
+  # Honor -GenerateHTML switch: default to generating HTML unless explicitly disabled
+  $shouldGenerateHtml = if ($PSBoundParameters.ContainsKey('GenerateHTML')) { [bool]$GenerateHTML } else { $true }
 
-  $htmlPath = Generate-HTMLReport -BOM $bom -CostEstimate $costEstimate `
-    -DeployedResources $deployedResources -WasDeployed $Deploy.IsPresent
+  if ($shouldGenerateHtml) {
+    $stepNum = if ($Deploy) { $script:TotalSteps - 1 } else { 4 }
+    Write-Host "[$stepNum/$script:TotalSteps] " -NoNewline -ForegroundColor Cyan
+    Write-Host "Generating professional HTML report..." -ForegroundColor White
 
-  Write-Host "         " -NoNewline
-  Write-Host "+" -NoNewline -ForegroundColor Green
-  Write-Host " Created: Veeam-DR-LandingZone-Report.html`n" -ForegroundColor Gray
+    $htmlPath = Generate-HTMLReport -BOM $bom -CostEstimate $costEstimate `
+      -DeployedResources $deployedResources -WasDeployed $Deploy.IsPresent
+
+    Write-Host "         " -NoNewline
+    Write-Host "+" -NoNewline -ForegroundColor Green
+    Write-Host " Created: Veeam-DR-LandingZone-Report.html`n" -ForegroundColor Gray
+  }
 
   # Export log
   $logPath = Join-Path $OutputPath "execution_log.csv"
