@@ -25,7 +25,7 @@ veeam-powershell/
 │   │   ├── Get-VeeamVaultPricing.ps1     # Vault vs Azure Blob cost comparison (980+ lines, production)
 │   │   └── README.md
 │   ├── Test-VeeamVaultBackup/
-│   │   ├── Test-VeeamVaultBackup.ps1     # Automated backup verification / SureBackup for Azure (800+ lines, production)
+│   │   ├── Test-VeeamVaultBackup.ps1     # Automated backup verification / SureBackup for Azure (1500+ lines, production)
 │   │   └── README.md
 │   └── Start-VRO-Azure-Recovery/
 │       └── Start-VROAzureRecovery.ps1    # Stub/placeholder
