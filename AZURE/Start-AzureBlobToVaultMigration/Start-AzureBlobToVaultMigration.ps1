@@ -210,8 +210,17 @@ function Write-Log {
   }
 
   $script:LogEntries.Add($entry)
-  $entry | Export-Csv -Path $LogFile -Append -NoTypeInformation
 
+  if (-not $script:LogFileInitialized) {
+    if (Test-Path -LiteralPath $LogFile) {
+      Remove-Item -LiteralPath $LogFile -Force
+    }
+    $entry | Export-Csv -Path $LogFile -NoTypeInformation
+    $script:LogFileInitialized = $true
+  }
+  else {
+    $entry | Export-Csv -Path $LogFile -Append -NoTypeInformation
+  }
   $color = switch ($Level) {
     "ERROR"   { "Red" }
     "WARNING" { "Yellow" }
