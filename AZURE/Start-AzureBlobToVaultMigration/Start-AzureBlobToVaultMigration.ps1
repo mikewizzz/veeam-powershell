@@ -1535,7 +1535,17 @@ try {
         Write-Host ""
         Write-Host "  NEXT STEPS:" -ForegroundColor Yellow
         Write-Host "    1. Add the gateway ($($gateway.PrivateIp)) as a managed Linux server in VBR" -ForegroundColor White
-        Write-Host "    2. Re-run this script with -SkipGatewayDeploy -ExecuteEvacuate" -ForegroundColor White
+        Write-Host "    2. Once registration is complete, you can immediately continue with data evacuation." -ForegroundColor White
+        Write-Host ""
+        $userChoice = Read-Host "  Press Enter to start data evacuation after the gateway is registered in VBR, or type 'skip' to exit and run later"
+        if ($userChoice -ne "skip") {
+          Write-Host ""
+          Write-Host "  Starting data evacuation..." -ForegroundColor Cyan
+          Start-EvacuateOperation -BlobExtents $blobExtents -TargetRepoName $TargetVaultName
+        } else {
+          Write-Host ""
+          Write-Host "  Evacuation skipped. You can re-run this script later with -SkipGatewayDeploy -ExecuteEvacuate after the gateway is fully registered." -ForegroundColor Yellow
+        }
       } else {
         Write-Host ""
         Write-Host "  Starting data evacuation..." -ForegroundColor Cyan
