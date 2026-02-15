@@ -143,7 +143,22 @@ $script:StartTime = Get-Date
 $script:LogEntries = New-Object System.Collections.Generic.List[object]
 $script:Findings = New-Object System.Collections.Generic.List[object]
 $script:Subs = @()
-$script:TotalSteps = 12
+
+# Base number of mandatory progress steps
+$script:BaseSteps = 12
+$script:TotalSteps = $script:BaseSteps
+
+# Adjust total steps for optional phases
+if ($IncludeSnapshots) {
+  $script:TotalSteps++
+}
+if ($GenerateHTML) {
+  $script:TotalSteps++
+}
+if ($ZipOutput) {
+  $script:TotalSteps++
+}
+
 $script:CurrentStep = 0
 
 # Health score weights (must sum to 1.0)
@@ -493,7 +508,9 @@ function Get-ProtectionCoverage {
       try {
         $shares = Get-AzStorageShare -Context $acct.Context -ErrorAction SilentlyContinue
         $totalFileShares += @($shares).Count
-      } catch {}
+      } catch {
+        Write-Log "Failed to enumerate file shares in storage account '$($acct.StorageAccountName)' (subscription: $($sub.Name)): $($_.Exception.Message)" -Level "WARNING"
+      }
     }
 
     # Protected items from Recovery Services Vaults
@@ -520,20 +537,23 @@ function Get-ProtectionCoverage {
     }
 
     # Track unprotected VMs
-    $protectedVMIds = @()
+    $protectedVMIdSet = @{}
     foreach ($v in $vaults) {
       if (-not (Matches-Region $v.Location)) { continue }
       Set-AzRecoveryServicesVaultContext -Vault $v | Out-Null
       try {
         $items = Get-AzRecoveryServicesBackupItem -BackupManagementType AzureIaasVM -WorkloadType AzureVM -ErrorAction SilentlyContinue
         foreach ($item in $items) {
-          if ($item.VirtualMachineId) { $protectedVMIds += $item.VirtualMachineId.ToLower() }
+          if ($item.VirtualMachineId) {
+            $vmId = $item.VirtualMachineId.ToLower()
+            $protectedVMIdSet[$vmId] = $true
+          }
         }
       } catch {}
     }
 
     foreach ($vm in $filteredVMs) {
-      if ($vm.Id.ToLower() -notin $protectedVMIds) {
+      if (-not $protectedVMIdSet.ContainsKey($vm.Id.ToLower())) {
         $unprotectedVMsList.Add([PSCustomObject]@{
           SubscriptionName = $sub.Name
           ResourceGroup = $vm.ResourceGroupName
@@ -829,11 +849,18 @@ function Get-SecurityPosture {
       }
 
       # Cross-region restore
-      $crr = try { $v.Properties.RestoreSettings.CrossSubscriptionRestoreSettings.CrossSubscriptionRestoreState } catch { $null }
-      if (-not $crr) {
+      $crr = try { $v.Properties.CrossRegionRestore } catch { $null }
+      if ($crr -ieq "Enabled" -or $crr -eq $true) {
+        Add-Finding -Category "Security & Compliance" -Status "Healthy" `
+          -Check "Cross-Region Restore" `
+          -Detail "Cross-region restore enabled on vault '$($v.Name)'" `
+          -Resource $v.Name
+      } else {
+        # Either disabled, unknown, or not present
         Add-Finding -Category "Security & Compliance" -Status "Warning" `
           -Check "Cross-Region Restore" `
-          -Detail "Cross-region restore not verified for vault '$($v.Name)'" `
+          -Detail ("Cross-region restore is {0} for vault '{1}'" -f `
+                   ($(if ($null -ne $crr) { $crr } else { "not configured/verified" })), $v.Name) `
           -Recommendation "Consider enabling cross-region restore for disaster recovery scenarios" `
           -Resource $v.Name
       }
@@ -1156,7 +1183,12 @@ function Get-NetworkHealth {
       $httpsOutbound = $rules | Where-Object {
         $_.Direction -eq "Outbound" -and
         $_.Access -eq "Allow" -and
-        ($_.DestinationPortRange -eq "443" -or $_.DestinationPortRange -eq "*")
+        (
+          $_.DestinationPortRange -eq "443" -or
+          ($_.DestinationPortRanges -and ($_.DestinationPortRanges -contains "443")) -or
+          $_.DestinationPortRange -eq "*" -or
+          ($_.DestinationPortRanges -and ($_.DestinationPortRanges -contains "*"))
+        )
       }
 
       if ($httpsOutbound) {
@@ -1305,6 +1337,13 @@ function Calculate-HealthScore {
 
 #region HTML Report
 
+function Encode-Html {
+  param([string]$Text)
+  if ([string]::IsNullOrEmpty($Text)) { return $Text }
+  # Use System.Net.WebUtility for cross-platform PowerShell 7+ compatibility
+  return [System.Net.WebUtility]::HtmlEncode($Text)
+}
+
 function Generate-HTMLReport {
   param(
     [Parameter(Mandatory=$true)]$HealthScore,
@@ -1323,20 +1362,27 @@ function Generate-HTMLReport {
   $findingsRows = ($script:Findings | ForEach-Object {
     $statusColor = Get-HealthColor -Status $_.Status
     $statusIcon = switch ($_.Status) { "Healthy" { "&#10004;" } "Warning" { "&#9888;" } "Critical" { "&#10006;" } default { "&#8226;" } }
-    "<tr><td><span style='color:$statusColor;font-weight:600;'>$statusIcon $($_.Status)</span></td><td>$($_.Category)</td><td>$($_.Check)</td><td>$($_.Detail)</td><td>$(if($_.Recommendation){$_.Recommendation}else{'—'})</td></tr>"
+    $encodedStatus = Encode-Html -Text $_.Status
+    $encodedCategory = Encode-Html -Text $_.Category
+    $encodedCheck = Encode-Html -Text $_.Check
+    $encodedDetail = Encode-Html -Text $_.Detail
+    $encodedRecommendation = if($_.Recommendation){ Encode-Html -Text $_.Recommendation }else{'—'}
+    "<tr><td><span style='color:$statusColor;font-weight:600;'>$statusIcon $encodedStatus</span></td><td>$encodedCategory</td><td>$encodedCheck</td><td>$encodedDetail</td><td>$encodedRecommendation</td></tr>"
   }) -join "`n"
 
   # Build category score cards
   $categoryCards = ($HealthScore.CategoryScores.GetEnumerator() | Sort-Object { $script:CategoryWeights[$_.Key] } -Descending | ForEach-Object {
     $catGrade = Get-ScoreGrade -Score $_.Value
     $weight = [math]::Round($script:CategoryWeights[$_.Key] * 100)
-    "<div class='kpi-card' style='border-top-color:$($catGrade.Color);'><div class='kpi-label'>$($_.Key)</div><div class='kpi-value' style='color:$($catGrade.Color);'>$($_.Value)</div><div class='kpi-subtext'>$($catGrade.Grade) (Weight: ${weight}%)</div></div>"
+    $encodedKey = Encode-Html -Text $_.Key
+    "<div class='kpi-card' style='border-top-color:$($catGrade.Color);'><div class='kpi-label'>$encodedKey</div><div class='kpi-value' style='color:$($catGrade.Color);'>$($_.Value)</div><div class='kpi-subtext'>$($catGrade.Grade) (Weight: ${weight}%)</div></div>"
   }) -join "`n"
 
   # Build coverage rows
   $coverageRows = ($Coverage.Summary | ForEach-Object {
     $pctColor = if ($_.CoveragePercent -ge 90) { "#00B336" } elseif ($_.CoveragePercent -ge 50) { "#FF8C00" } else { "#D13438" }
-    "<tr><td><strong>$($_.ResourceType)</strong></td><td>$($_.TotalResources)</td><td>$($_.ProtectedResources)</td><td>$($_.UnprotectedResources)</td><td style='color:$pctColor;font-weight:600;'>$($_.CoveragePercent)%</td></tr>"
+    $encodedResourceType = Encode-Html -Text $_.ResourceType
+    "<tr><td><strong>$encodedResourceType</strong></td><td>$($_.TotalResources)</td><td>$($_.ProtectedResources)</td><td>$($_.UnprotectedResources)</td><td style='color:$pctColor;font-weight:600;'>$($_.CoveragePercent)%</td></tr>"
   }) -join "`n"
 
   # Build unprotected VMs rows
@@ -1344,7 +1390,12 @@ function Generate-HTMLReport {
   if ($Coverage.UnprotectedVMs.Count -gt 0) {
     $maxShow = [math]::Min($Coverage.UnprotectedVMs.Count, 25)
     $unprotectedRows = ($Coverage.UnprotectedVMs | Select-Object -First $maxShow | ForEach-Object {
-      "<tr><td>$($_.SubscriptionName)</td><td>$($_.ResourceGroup)</td><td>$($_.VmName)</td><td>$($_.Location)</td><td>$($_.VmSize)</td></tr>"
+      $encodedSubName = Encode-Html -Text $_.SubscriptionName
+      $encodedRG = Encode-Html -Text $_.ResourceGroup
+      $encodedVmName = Encode-Html -Text $_.VmName
+      $encodedLocation = Encode-Html -Text $_.Location
+      $encodedVmSize = Encode-Html -Text $_.VmSize
+      "<tr><td>$encodedSubName</td><td>$encodedRG</td><td>$encodedVmName</td><td>$encodedLocation</td><td>$encodedVmSize</td></tr>"
     }) -join "`n"
     if ($Coverage.UnprotectedVMs.Count -gt $maxShow) {
       $unprotectedRows += "<tr><td colspan='5' style='font-style:italic;color:var(--ms-gray-90);'>... and $($Coverage.UnprotectedVMs.Count - $maxShow) more (see CSV export for full list)</td></tr>"
@@ -1356,7 +1407,11 @@ function Generate-HTMLReport {
   $warningCount = @($script:Findings | Where-Object { $_.Status -eq "Warning" }).Count
   $criticalCount = @($script:Findings | Where-Object { $_.Status -eq "Critical" }).Count
 
-  $subList = ($script:Subs | ForEach-Object { "<li>$($_.Name) <span style='color:var(--ms-gray-90);'>[$($_.Id)]</span></li>" }) -join "`n"
+  $subList = ($script:Subs | ForEach-Object { 
+    $encodedName = Encode-Html -Text $_.Name
+    $encodedId = Encode-Html -Text $_.Id
+    "<li>$encodedName <span style='color:var(--ms-gray-90);'>[$encodedId]</span></li>" 
+  }) -join "`n"
 
   $html = @"
 <!DOCTYPE html>

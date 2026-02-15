@@ -75,7 +75,7 @@ Professional health check tool for Veeam Backup for Azure (VBA) deployments. Ana
 | `Subscriptions` | string[] | All | Subscription IDs or names to scan |
 | `TenantId` | string | Current | Azure AD tenant ID |
 | `Region` | string | All | Filter by Azure region |
-| `ApplianceNamePattern` | string | `veeam\|vba\|vbazure` | Regex to identify VBA appliance VMs |
+| `ApplianceNamePattern` | string | `veeam|vba|vbazure` | Regex to identify VBA appliance VMs |
 | `RPOThresholdHours` | int | 24 | Max hours since last successful backup |
 | `SnapshotAgeWarningDays` | int | 30 | Warn on snapshots older than N days |
 | `SnapshotAgeCriticalDays` | int | 90 | Critical alert for snapshots older than N days |
