@@ -504,10 +504,10 @@ function Get-AzureBlobRepositories {
     if ($totalFailures -gt 0) {
       $failureDetail = @(
         "Data collection incomplete:",
-        "$($script:AzureDetailsFailureCount) Azure detail failure(s),",
-        "$($script:BackupCountFailureCount) backup count failure(s),",
+        "$($script:AzureDetailsFailureCount) Azure detail failure(s)",
+        "$($script:BackupCountFailureCount) backup count failure(s)",
         "$($script:StorageSizeFailureCount) storage size failure(s)"
-      ) -join " "
+      ) -join ", "
       Add-CheckResult -Category "Discovery" -Check "Data Collection Status" -Status "WARNING" `
         -Detail $failureDetail `
         -Remediation "Check debug logs for details. Some metrics may be incomplete but discovery can proceed."
