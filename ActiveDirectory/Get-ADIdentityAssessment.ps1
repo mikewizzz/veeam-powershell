@@ -49,9 +49,6 @@ param(
   [Parameter(ParameterSetName='Manual')]
   [string[]]$ForestNames,                         # Explicit forest FQDNs to assess
 
-  [Parameter(ParameterSetName='Auto')]
-  [switch]$AutoDiscover,                           # Auto-detect from current domain (default)
-
   # ===== Run Level =====
   [switch]$Full,                                   # Include stale analysis, password policies, deeper metrics
   [switch]$IncludePrivilegedAudit,                 # Enumerate privileged group membership details
