@@ -218,6 +218,25 @@ function Write-ProgressStep {
   Write-Log "STEP $($script:CurrentStep)/$($script:TotalSteps): $Activity" -Level "INFO"
 }
 
+function ConvertTo-HtmlSafe {
+  <#
+  .SYNOPSIS
+    HTML-encodes strings to prevent XSS injection in reports.
+  #>
+  param([string]$Text)
+  
+  if ([string]::IsNullOrEmpty($Text)) { return "" }
+  
+  # Use System.Net.WebUtility for cross-platform PowerShell 7+ compatibility
+  if ($PSVersionTable.PSVersion.Major -ge 7) {
+    return [System.Net.WebUtility]::HtmlEncode($Text)
+  } else {
+    # PowerShell 5.1: use System.Web.HttpUtility
+    Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
+    return [System.Web.HttpUtility]::HtmlEncode($Text)
+  }
+}
+
 #endregion
 
 #region VBR REST API Functions
@@ -244,8 +263,21 @@ function Connect-VBRServer {
   do {
     try {
       # VBR uses a self-signed certificate by default
-      $tokenResponse = Invoke-RestMethod -Uri $loginUrl -Method Post -Body $body `
-        -ContentType "application/x-www-form-urlencoded" -SkipCertificateCheck -ErrorAction Stop
+      if ($PSVersionTable.PSVersion.Major -ge 7) {
+        # PowerShell 7+ supports -SkipCertificateCheck
+        $tokenResponse = Invoke-RestMethod -Uri $loginUrl -Method Post -Body $body `
+          -ContentType "application/x-www-form-urlencoded" -SkipCertificateCheck -ErrorAction Stop
+      } else {
+        # Windows PowerShell 5.1 and earlier: temporarily relax cert validation
+        $origCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+        try {
+          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+          $tokenResponse = Invoke-RestMethod -Uri $loginUrl -Method Post -Body $body `
+            -ContentType "application/x-www-form-urlencoded" -ErrorAction Stop
+        } finally {
+          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $origCallback
+        }
+      }
 
       $script:VBRToken = $tokenResponse.access_token
       Write-Log "Authenticated to VBR server $VBRServer" -Level "SUCCESS"
@@ -282,12 +314,16 @@ function Invoke-VBRApi {
   }
 
   $invokeParams = @{
-    Uri                  = $uri
-    Method               = $Method
-    Headers              = $headers
-    ContentType          = "application/json"
-    SkipCertificateCheck = $true
-    ErrorAction          = "Stop"
+    Uri         = $uri
+    Method      = $Method
+    Headers     = $headers
+    ContentType = "application/json"
+    ErrorAction = "Stop"
+  }
+
+  # Add -SkipCertificateCheck only on PowerShell 7+
+  if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $invokeParams.SkipCertificateCheck = $true
   }
 
   if ($Body) {
@@ -297,7 +333,18 @@ function Invoke-VBRApi {
   $attempt = 0
   do {
     try {
-      return Invoke-RestMethod @invokeParams
+      if ($PSVersionTable.PSVersion.Major -ge 7) {
+        return Invoke-RestMethod @invokeParams
+      } else {
+        # Windows PowerShell 5.1: use ServicePointManager callback
+        $origCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+        try {
+          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+          return Invoke-RestMethod @invokeParams
+        } finally {
+          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $origCallback
+        }
+      }
     } catch {
       $attempt++
       if ($attempt -gt $MaxRetries) {
@@ -641,9 +688,38 @@ function New-FallbackTestVM {
     -ResourceGroupName $TestEnvironment.ResourceGroup `
     -Location $TestRegion -SubnetId $TestEnvironment.Subnet.Id -Force
 
+  # Generate high-entropy random password
+  $adminUsername = "veeamtest"
+  $adminPasswordPlain = -join (1..32 | ForEach-Object {
+    $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{}'
+    $bytes = New-Object 'System.Byte[]' 4
+    if (-not $script:RandomNumberGenerator) {
+      $script:RandomNumberGenerator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    }
+    $script:RandomNumberGenerator.GetBytes($bytes)
+    $index = [BitConverter]::ToUInt32($bytes, 0) % $chars.Length
+    $chars[$index]
+  })
+  $adminSecurePassword = ConvertTo-SecureString $adminPasswordPlain -AsPlainText -Force
+  $adminCredential = New-Object PSCredential($adminUsername, $adminSecurePassword)
+
+  # Windows computer names (NetBIOS) are limited to 15 characters and a restricted character set.
+  # Derive a safe computer name from the Azure VM name without changing the Azure resource name.
+  $computerName = $VmName -replace '[^a-zA-Z0-9-]', '-'
+  if ([string]::IsNullOrWhiteSpace($computerName)) {
+    $computerName = "fallbackvm"
+  }
+  if ($computerName.Length -gt 15) {
+    $computerName = $computerName.Substring(0, 15)
+  }
+  $computerName = $computerName.TrimEnd('-')
+  if ([string]::IsNullOrWhiteSpace($computerName)) {
+    $computerName = "fallbackvm"
+  }
+
   $vmConfig = New-AzVMConfig -VMName $VmName -VMSize $TestVmSize
-  $vmConfig = Set-AzVMOperatingSystem -VM $vmConfig -Windows -ComputerName $VmName `
-    -Credential (New-Object PSCredential("veeamtest", (ConvertTo-SecureString "V33am!Test$(Get-Random -Max 9999)" -AsPlainText -Force))) `
+  $vmConfig = Set-AzVMOperatingSystem -VM $vmConfig -Windows -ComputerName $computerName `
+    -Credential $adminCredential `
     -ProvisionVMAgent -EnableAutoUpdate
   $vmConfig = Set-AzVMSourceImage -VM $vmConfig -PublisherName "MicrosoftWindowsServer" `
     -Offer "WindowsServer" -Skus "2022-datacenter-smalldisk" -Version "latest"
@@ -837,9 +913,9 @@ function Test-VMVerification {
       $result.HeartbeatVerified = $true
       Write-Log "  PASS: Heartbeat verification - VM agent is Ready" -Level "SUCCESS"
     } else {
+      $result.HeartbeatVerified = $false
       Write-Log "  WARN: Heartbeat verification - VM agent status: $agentStatus" -Level "WARNING"
-      # Not a hard failure; agent may still be initializing
-      $result.HeartbeatVerified = $true
+      # Not a hard failure; agent may still be initializing, but heartbeat is not verified
     }
   } catch {
     Write-Log "  WARN: Heartbeat check inconclusive - $($_.Exception.Message)" -Level "WARNING"
@@ -880,9 +956,9 @@ foreach (`$port in @($($VerificationPorts -join ','))) {
         $result.PortsVerified = $true
         Write-Log "  PASS: Port verification - $listeningCount/$($VerificationPorts.Count) ports listening" -Level "SUCCESS"
       } else {
+        $result.PortsVerified = $false
         Write-Log "  WARN: Port verification - no monitored ports are listening (services may need time)" -Level "WARNING"
         # Ports not listening isn't necessarily a failure for a freshly restored VM
-        $result.PortsVerified = $true
       }
     } catch {
       Write-Log "  WARN: Port verification via Run Command failed - $($_.Exception.Message)" -Level "WARNING"
@@ -1017,17 +1093,22 @@ function Generate-HTMLReport {
     $scriptIcon    = if ($_.ScriptVerified)     { "<span style='color:#00B336;'>Yes</span>" } else { "<span style='color:#DC2626;'>No</span>" }
     $rpTime = if ($_.RestorePointTime) { ([datetime]$_.RestorePointTime).ToString("yyyy-MM-dd HH:mm") } else { "N/A" }
 
+    # HTML-encode dynamic fields to prevent XSS
+    $safeVmName = ConvertTo-HtmlSafe $_.VmName
+    $safeRestoreDuration = ConvertTo-HtmlSafe $_.RestoreDuration
+    $safeDetails = ConvertTo-HtmlSafe $_.Details
+
     @"
         <tr>
-          <td><strong>$($_.VmName)</strong></td>
+          <td><strong>$safeVmName</strong></td>
           <td>$rpTime</td>
-          <td>$($_.RestoreDuration)</td>
+          <td>$safeRestoreDuration</td>
           <td>$bootIcon</td>
           <td>$heartbeatIcon</td>
           <td>$portsIcon</td>
           <td>$scriptIcon</td>
           <td>$statusIcon</td>
-          <td>$($_.Details)</td>
+          <td>$safeDetails</td>
         </tr>
 "@
   } -join "`n"
@@ -1040,7 +1121,11 @@ function Generate-HTMLReport {
       "SUCCESS" { "#00B336" }
       default   { "#605E5C" }
     }
-    "<tr><td style='white-space:nowrap;'>$($_.Timestamp)</td><td style='color:$levelColor;font-weight:600;'>$($_.Level)</td><td>$($_.Message)</td></tr>"
+    # HTML-encode log fields to prevent XSS
+    $safeTimestamp = ConvertTo-HtmlSafe $_.Timestamp
+    $safeLevel = ConvertTo-HtmlSafe $_.Level
+    $safeMessage = ConvertTo-HtmlSafe $_.Message
+    "<tr><td style='white-space:nowrap;'>$safeTimestamp</td><td style='color:$levelColor;font-weight:600;'>$safeLevel</td><td>$safeMessage</td></tr>"
   } -join "`n"
 
   $html = @"
@@ -1484,7 +1569,7 @@ try {
   if ($ZipOutput) {
     Write-ProgressStep -Activity "Creating Archive" -Status "Compressing output files..."
     $zipPath = Join-Path (Split-Path $OutputPath -Parent) "$(Split-Path $OutputPath -Leaf).zip"
-    Compress-Archive -Path "$OutputPath\*" -DestinationPath $zipPath -Force
+    Compress-Archive -Path (Join-Path $OutputPath '*') -DestinationPath $zipPath -Force
     Write-Log "Created ZIP archive: $zipPath" -Level "SUCCESS"
   }
 

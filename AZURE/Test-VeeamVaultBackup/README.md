@@ -5,7 +5,7 @@ Automated recoverability testing of Azure VM backups stored in **Veeam Vault** â
 ## What It Does
 
 1. **Discovers** restore points in Veeam Vault via the VBR REST API
-2. **Creates** an isolated Azure test environment (VNet + NSG with no external connectivity)
+2. **Creates** an isolated Azure test environment (VNet + NSG with no inbound internet connectivity; outbound access is limited to Azure platform endpoints (e.g., AzureCloud service tag) required for VM Agent and Run Command)
 3. **Restores** selected VMs from Vault into the isolated environment
 4. **Verifies** each restored VM with four checks:
    - Boot verification (provisioning state + power state)
