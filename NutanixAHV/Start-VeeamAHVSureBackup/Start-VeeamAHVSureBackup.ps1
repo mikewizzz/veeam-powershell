@@ -308,7 +308,14 @@ public class TrustAllCertsPolicy : ICertificatePolicy {
       }
       [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
     }
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    # Enable TLS 1.2 and 1.3 for better security and future compatibility
+    try {
+      [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
+    }
+    catch {
+      # Fallback for environments where Tls13 is not supported
+      [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    }
     Write-Log "TLS certificate validation disabled (lab mode)" -Level "WARNING"
   }
 
@@ -406,6 +413,9 @@ function Get-PrismClusters {
   <#
   .SYNOPSIS
     Retrieve all Nutanix clusters from Prism Central
+  .NOTES
+    Uses a hardcoded length of 500 results, which should be sufficient for most environments.
+    For deployments with >500 clusters, implement pagination using the 'offset' parameter.
   #>
   $result = Invoke-PrismAPI -Method "POST" -Endpoint "clusters/list" -Body @{
     kind   = "cluster"
@@ -418,6 +428,9 @@ function Get-PrismSubnets {
   <#
   .SYNOPSIS
     Retrieve all subnets from Prism Central
+  .NOTES
+    Uses a hardcoded length of 500 results, which should be sufficient for most environments.
+    For deployments with >500 subnets, implement pagination using the 'offset' parameter.
   #>
   $result = Invoke-PrismAPI -Method "POST" -Endpoint "subnets/list" -Body @{
     kind   = "subnet"
@@ -815,9 +828,7 @@ function Start-AHVInstantRecovery {
   #>
   param(
     [Parameter(Mandatory = $true)]$RestorePointInfo,
-    [Parameter(Mandatory = $true)]$IsolatedNetwork,
-    [string]$ClusterUUID,
-    [string]$ContainerName
+    [Parameter(Mandatory = $true)]$IsolatedNetwork
   )
 
   $vmName = $RestorePointInfo.VMName
@@ -862,39 +873,47 @@ function Start-AHVInstantRecovery {
     $recoveredVM = Get-PrismVMByName -Name $recoveryName
 
     if ($recoveredVM) {
-      $vmUUID = $recoveredVM[0].metadata.uuid
+      # Normalize to array and take the first VM (handles single object, array, or empty)
+      $vmObject = @($recoveredVM)[0]
+      $vmUUID   = $vmObject?.metadata?.uuid
 
-      # Update VM NIC to use isolated network
-      try {
-        $vmSpec = Get-PrismVMByUUID -UUID $vmUUID
-        $specVersion = $vmSpec.metadata.spec_version
+      if ($vmUUID) {
+        # Update VM NIC to use isolated network
+        try {
+          $vmSpec = Get-PrismVMByUUID -UUID $vmUUID
+          $specVersion = $vmSpec.metadata.spec_version
 
-        # Build the NIC update - replace all NICs with isolated network
-        $nicList = @(
-          @{
-            subnet_reference = @{
-              kind = "subnet"
-              uuid = $IsolatedNetwork.UUID
+          # Build the NIC update - replace all NICs with isolated network
+          $nicList = @(
+            @{
+              subnet_reference = @{
+                kind = "subnet"
+                uuid = $IsolatedNetwork.UUID
+              }
+              is_connected     = $true
             }
-            is_connected     = $true
-          }
-        )
+          )
 
-        $updateBody = @{
-          metadata = @{
-            kind         = "vm"
-            uuid         = $vmUUID
-            spec_version = $specVersion
+          $updateBody = @{
+            metadata = @{
+              kind         = "vm"
+              uuid         = $vmUUID
+              spec_version = $specVersion
+            }
+            spec     = $vmSpec.spec
           }
-          spec     = $vmSpec.spec
+          $updateBody.spec.resources.nic_list = $nicList
+
+          Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$vmUUID" -Body $updateBody
+          Write-Log "  NIC reconfigured to isolated network: $($IsolatedNetwork.Name)" -Level "INFO"
         }
-        $updateBody.spec.resources.nic_list = $nicList
-
-        Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$vmUUID" -Body $updateBody
-        Write-Log "  NIC reconfigured to isolated network: $($IsolatedNetwork.Name)" -Level "INFO"
+        catch {
+          Write-Log "  Warning: Could not reconfigure NIC to isolated network: $($_.Exception.Message)" -Level "WARNING"
+        }
       }
-      catch {
-        Write-Log "  Warning: Could not reconfigure NIC to isolated network: $($_.Exception.Message)" -Level "WARNING"
+      else {
+        Write-Log "  Warning: Recovered VM object found but UUID is missing; skipping NIC reconfiguration." -Level "WARNING"
+        $vmUUID = $null
       }
     }
     else {
@@ -974,6 +993,7 @@ function Stop-AHVInstantRecovery {
           }
           # Use Prism to force power off, then delete
           Write-Log "  Force powering off lingering VM: $($RecoveryInfo.RecoveryVMName)" -Level "WARNING"
+          Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$($RecoveryInfo.RecoveryVMUUID)" -Body $powerBody
         }
         catch { }
 
@@ -1067,8 +1087,13 @@ function Test-VMPing {
     if ($passed) {
       # Get latency details
       $pingDetail = Test-Connection -ComputerName $IPAddress -Count 2 -ErrorAction SilentlyContinue
-      $avgLatency = ($pingDetail | Measure-Object -Property ResponseTime -Average).Average
-      $details = "Reply from $IPAddress - Avg latency: $([math]::Round($avgLatency, 1))ms"
+      if ($pingDetail -and $pingDetail.Count -gt 0) {
+        $avgLatency = ($pingDetail | Measure-Object -Property ResponseTime -Average).Average
+        $details = "Reply from $IPAddress - Avg latency: $([math]::Round($avgLatency, 1))ms"
+      }
+      else {
+        $details = "Reply from $IPAddress - latency information unavailable"
+      }
     }
     else {
       $details = "No reply from $IPAddress (4 packets sent, 0 received)"
@@ -1453,6 +1478,16 @@ function Generate-HTMLReport {
     [Parameter(Mandatory = $true)]$IsolatedNetwork
   )
 
+  # Load System.Web assembly for HTML encoding to prevent XSS
+  Add-Type -AssemblyName System.Web
+
+  # Helper function to safely encode HTML
+  function Encode-Html {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return "" }
+    return [System.Web.HttpUtility]::HtmlEncode($Text)
+  }
+
   $reportDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
   $duration = (Get-Date) - $script:StartTime
   $durationStr = "{0:hh\:mm\:ss}" -f $duration
@@ -1491,10 +1526,14 @@ function Generate-HTMLReport {
     $rpDate = if ($rpInfo) { $rpInfo.CreationTime.ToString("yyyy-MM-dd HH:mm") } else { "N/A" }
     $rpJob = if ($rpInfo) { $rpInfo.JobName } else { "N/A" }
 
+    # Encode user-controlled data for HTML output
+    $vmEncoded = Encode-Html $vm
+    $rpJobEncoded = Encode-Html $rpJob
+
     $vmDetailRows += @"
     <tr>
-      <td><strong>$vm</strong></td>
-      <td>$rpJob</td>
+      <td><strong>$vmEncoded</strong></td>
+      <td>$rpJobEncoded</td>
       <td>$rpDate</td>
       <td>$vmPassed / $vmTotal</td>
       <td><span class="$vmStatusClass">$vmStatus</span></td>
@@ -1509,12 +1548,17 @@ function Generate-HTMLReport {
     $statusText = if ($result.Passed) { "PASS" } else { "FAIL" }
     $durationText = "$([math]::Round($result.Duration, 1))s"
 
+    # Encode user-controlled data for HTML output
+    $vmNameEncoded = Encode-Html $result.VMName
+    $testNameEncoded = Encode-Html $result.TestName
+    $detailsEncoded = Encode-Html $result.Details
+
     $testDetailRows += @"
     <tr>
-      <td>$($result.VMName)</td>
-      <td>$($result.TestName)</td>
+      <td>$vmNameEncoded</td>
+      <td>$testNameEncoded</td>
       <td><span class="$statusClass">$statusText</span></td>
-      <td>$($result.Details)</td>
+      <td>$detailsEncoded</td>
       <td>$durationText</td>
     </tr>
 "@
@@ -1531,8 +1575,19 @@ function Generate-HTMLReport {
       "TEST-FAIL" { "log-error" }
       default     { "log-info" }
     }
-    $logRows += "    <tr class=`"$logClass`"><td>$($log.Timestamp)</td><td>$($log.Level)</td><td>$($log.Message)</td></tr>`n"
+    # Encode log message for HTML output
+    $logMessageEncoded = Encode-Html $log.Message
+    $logRows += "    <tr class=`"$logClass`"><td>$($log.Timestamp)</td><td>$($log.Level)</td><td>$logMessageEncoded</td></tr>`n"
   }
+
+  # Encode script-level variables for HTML output
+  $isolatedNetworkNameEncoded = Encode-Html $IsolatedNetwork.Name
+  $vbrServerEncoded = Encode-Html $script:VBRServer
+  $prismCentralEncoded = Encode-Html $script:PrismCentral
+  $testCustomScriptEncoded = Encode-Html $script:TestCustomScript
+  $testPortsDisplay = if ($script:TestPorts) { Encode-Html ($script:TestPorts -join ', ') } else { "None" }
+  $testHttpEndpointsDisplay = if ($script:TestHttpEndpoints) { Encode-Html ($script:TestHttpEndpoints -join ', ') } else { "None" }
+  $testCustomScriptDisplay = if ($script:TestCustomScript) { $testCustomScriptEncoded } else { "None" }
 
   $html = @"
 <!DOCTYPE html>
@@ -1835,7 +1890,7 @@ tbody tr:hover { background: var(--ms-gray-10); }
     </div>
     <div class="kpi-card nutanix">
       <div class="kpi-label">Isolated Network</div>
-      <div class="kpi-value" style="font-size: 20px;">$($IsolatedNetwork.Name)</div>
+      <div class="kpi-value" style="font-size: 20px;">$isolatedNetworkNameEncoded</div>
       <div class="kpi-subtext">VLAN $($IsolatedNetwork.VlanId)</div>
     </div>
   </div>
@@ -1881,15 +1936,15 @@ $testDetailRows
     <div class="info-card">
       <div class="info-card-title">SureBackup Parameters</div>
       <div class="info-card-text">
-        <strong>VBR Server:</strong> $VBRServer |
-        <strong>Prism Central:</strong> $PrismCentral<br>
-        <strong>Isolated Network:</strong> $($IsolatedNetwork.Name) (VLAN $($IsolatedNetwork.VlanId))<br>
+        <strong>VBR Server:</strong> $vbrServerEncoded |
+        <strong>Prism Central:</strong> $prismCentralEncoded<br>
+        <strong>Isolated Network:</strong> $isolatedNetworkNameEncoded (VLAN $($IsolatedNetwork.VlanId))<br>
         <strong>Boot Timeout:</strong> ${TestBootTimeoutSec}s |
         <strong>Ping Test:</strong> $TestPing |
-        <strong>Port Tests:</strong> $(if($TestPorts){"$($TestPorts -join ', ')"}else{"None"})<br>
+        <strong>Port Tests:</strong> $testPortsDisplay<br>
         <strong>DNS Test:</strong> $TestDNS |
-        <strong>HTTP Endpoints:</strong> $(if($TestHttpEndpoints){"$($TestHttpEndpoints -join ', ')"}else{"None"})<br>
-        <strong>Custom Script:</strong> $(if($TestCustomScript){$TestCustomScript}else{"None"}) |
+        <strong>HTTP Endpoints:</strong> $testHttpEndpointsDisplay<br>
+        <strong>Custom Script:</strong> $testCustomScriptDisplay |
         <strong>Max Concurrent VMs:</strong> $MaxConcurrentVMs<br>
         <strong>Application Groups:</strong> $(if($ApplicationGroups){"$($ApplicationGroups.Count) group(s) defined"}else{"None (parallel recovery)"})
       </div>

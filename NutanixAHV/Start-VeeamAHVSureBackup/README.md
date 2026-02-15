@@ -362,4 +362,4 @@ Register-ScheduledTask -TaskName "Veeam-AHV-SureBackup" -Action $action -Trigger
 
 ## License
 
-MIT License - See [LICENSE](../../M365/LICENSE) in the repository root.
+MIT License - See [LICENSE](../../LICENSE) in the repository root.
