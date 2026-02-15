@@ -334,7 +334,8 @@ function Test-RestorePointSecurity {
 
   # Priority 2: SureBackup Verification Sessions
   try {
-    $sbSession = Get-VSBSession -ErrorAction SilentlyContinue |
+    # Use cached sessions instead of querying every time
+    $sbSession = $script:AllVsbSessions |
       Where-Object { $_.RestorePointId -eq $RestorePoint.Id } |
       Sort-Object EndTime -Descending |
       Select-Object -First 1
@@ -365,10 +366,10 @@ function Test-RestorePointSecurity {
   # Priority 4: Backup session success (lowest confidence)
   if (-not $RequireMalwareScan) {
     try {
-      $backupSession = Get-VBRBackupSession -ErrorAction SilentlyContinue |
+      # Use cached successful backup sessions instead of querying every time
+      $backupSession = $script:SuccessfulBackupSessions |
         Where-Object {
-          $_.CreationTime.ToString("o") -eq $RestorePoint.CreationTime.ToString("o") -and
-          $_.Result -eq "Success"
+          $_.CreationTime.ToString("o") -eq $RestorePoint.CreationTime.ToString("o")
         } |
         Select-Object -First 1
 
@@ -427,6 +428,17 @@ function Find-CleanPoint {
   # Scan points
   $scanned = 0
   $scanResults = [System.Collections.Generic.List[object]]::new()
+
+  # Cache SureBackup sessions once to avoid repeated enumeration
+  Write-Log "Caching SureBackup sessions for faster lookup..."
+  $script:AllVsbSessions = Get-VSBSession -ErrorAction SilentlyContinue
+
+  # Cache successful backup sessions once to avoid repeated enumeration (used when RequireMalwareScan is false)
+  if (-not $RequireMalwareScan) {
+    Write-Log "Caching successful backup sessions for fallback verification..."
+    $script:SuccessfulBackupSessions = Get-VBRBackupSession -ErrorAction SilentlyContinue |
+      Where-Object { $_.Result -eq "Success" }
+  }
 
   foreach ($rp in $eligiblePoints) {
     if ($scanned -ge $MaxPointsToScan) {

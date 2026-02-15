@@ -190,7 +190,7 @@
   VBR Compatibility: Veeam Backup & Replication 12.0+ (12.1+ recommended)
 #>
 
-[CmdletBinding(SupportsShouldProcess)]
+[CmdletBinding()]
 param(
   # ===== VBR Server Connection =====
   [string]$VBRServer = "localhost",
@@ -224,7 +224,6 @@ param(
   [string]$SubnetId,
   [ValidateScript({ $_ | ForEach-Object { $_ -match '^sg-[a-f0-9]+$' } })]
   [string[]]$SecurityGroupIds,
-  [ValidatePattern('^\w+\.\w+$')]
   [string]$InstanceType = "t3.medium",
   [string]$KeyPairName,
 
@@ -238,11 +237,6 @@ param(
   [switch]$EncryptVolumes,
   [string]$KMSKeyId,
   [bool]$PowerOnAfterRestore = $true,
-
-  # ===== Network =====
-  [switch]$AssociatePublicIP,
-  [ValidatePattern('^(\d{1,3}\.){3}\d{1,3}$')]
-  [string]$PrivateIPAddress,
 
   # ===== Validation =====
   [switch]$SkipValidation,
@@ -440,7 +434,7 @@ function Test-Prerequisites {
   }
 
   # Check AWS PowerShell modules
-  $awsModules = @("AWS.Tools.Common", "AWS.Tools.EC2")
+  $awsModules = @("AWS.Tools.Common", "AWS.Tools.EC2", "AWS.Tools.SecurityToken")
   foreach ($mod in $awsModules) {
     if (-not (Get-Module -ListAvailable -Name $mod)) {
       throw "AWS module '$mod' not found. Install via: Install-Module $mod -Scope CurrentUser"
@@ -647,6 +641,13 @@ function Find-LatestCleanRestorePoint {
 
   Write-Log "Scanning restore points for latest clean (malware-free) point..."
 
+  # Cache SureBackup sessions once to avoid repeated enumeration
+  if (-not $script:VsbSessionsCacheInitialized) {
+    Write-Log "  Caching SureBackup sessions..."
+    $script:AllVsbSessions = Get-VSBSession -ErrorAction SilentlyContinue
+    $script:VsbSessionsCacheInitialized = $true
+  }
+
   foreach ($rp in $RestorePoints) {
     Write-Log "  Checking restore point: $($rp.CreationTime) (ID: $($rp.Id))"
 
@@ -670,7 +671,7 @@ function Find-LatestCleanRestorePoint {
 
     # Fallback: check SureBackup session results for this restore point
     try {
-      $sbSessions = Get-VSBSession -ErrorAction SilentlyContinue |
+      $sbSessions = $script:AllVsbSessions |
         Where-Object { $_.RestorePointId -eq $rp.Id -and $_.Result -eq "Success" }
       if ($sbSessions) {
         Write-Log "  VERIFIED: Restore point $($rp.CreationTime) validated by SureBackup" -Level SUCCESS
@@ -681,13 +682,13 @@ function Find-LatestCleanRestorePoint {
       # SureBackup sessions may not exist
     }
 
-    # If no scan data exists, check backup session result
+    # If no scan data exists, do NOT treat the point as clean when UseLatestCleanPoint is enabled
     try {
       $session = Get-VBRBackupSession -ErrorAction SilentlyContinue |
         Where-Object { $_.CreationTime -eq $rp.CreationTime -and $_.Result -eq "Success" }
       if ($session) {
-        Write-Log "  PRESUMED CLEAN: No malware data; backup session succeeded. Using this point." -Level WARNING
-        return $rp
+        Write-Log "  PRESUMED CLEAN: No malware or SureBackup data; backup session succeeded but point will NOT be treated as clean. Continuing search..." -Level WARNING
+        # Do not return this restore point as "clean" without explicit malware/SureBackup validation
       }
     }
     catch {
@@ -897,9 +898,19 @@ function Start-EC2Restore {
     return $null
   }
 
-  Write-Log "Submitting restore job to VBR..."
-  $session = Invoke-WithRetry -OperationName "Start EC2 Restore" -ScriptBlock {
-    Start-VBRRestoreVMToAmazon @restoreParams
+  # Determine effective restore mode (default to FullRestore for backward compatibility)
+  $effectiveRestoreMode = if ([string]::IsNullOrWhiteSpace($RestoreMode)) { "FullRestore" } else { $RestoreMode }
+
+  Write-Log "Submitting $effectiveRestoreMode job to VBR..."
+  $operationName = if ($effectiveRestoreMode -eq "InstantRestore") { "Start EC2 Instant Restore" } else { "Start EC2 Full Restore" }
+
+  $session = Invoke-WithRetry -OperationName $operationName -ScriptBlock {
+    if ($effectiveRestoreMode -eq "InstantRestore") {
+      Start-VBRInstantRestoreVMToAmazon @restoreParams
+    }
+    else {
+      Start-VBRRestoreVMToAmazon @restoreParams
+    }
   }
 
   Write-Log "Restore session started: ID=$($session.Id), State=$($session.State)" -Level SUCCESS
@@ -1155,7 +1166,7 @@ function New-RestoreReport {
       "SUCCESS" { "#00B336" }
       default   { "#6C757D" }
     }
-    "<tr><td style='white-space:nowrap'>$($_.Timestamp)</td><td><span style='color:$levelColor;font-weight:600'>$($_.Level)</span></td><td>$([System.Web.HttpUtility]::HtmlEncode($_.Message))</td></tr>"
+    "<tr><td style='white-space:nowrap'>$($_.Timestamp)</td><td><span style='color:$levelColor;font-weight:600'>$($_.Level)</span></td><td>$([System.Net.WebUtility]::HtmlEncode($_.Message))</td></tr>"
   }) -join "`n"
 
   $html = @"
@@ -1195,9 +1206,9 @@ function New-RestoreReport {
     <div class="card">
       <div class="header">
         <h1>VRO AWS EC2 Restore Report</h1>
-        <div class="subtitle">Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")</div>
+        <div class="subtitle">Generated: $((Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss")) UTC</div>
       </div>
-      <div class="status-banner">Restore Status: $statusText$(if($ErrorMessage){ " - $([System.Web.HttpUtility]::HtmlEncode($ErrorMessage))" })</div>
+      <div class="status-banner">Restore Status: $statusText$(if($ErrorMessage){ " - $([System.Net.WebUtility]::HtmlEncode($ErrorMessage))" })</div>
 
       <div class="section">
         <h2>Restore Summary</h2>
