@@ -168,7 +168,25 @@ $GATEWAY_MIN_DISK_GB = 100
 $ESTIMATED_THROUGHPUT_GBPS = 0.5  # Conservative estimate: 500 Mbps per task
 
 # Create output directory
-if (-not (Test-Path $OutputPath)) {
+$parentDirectory = Split-Path -Path $OutputPath -Parent
+if (-not $parentDirectory) {
+  $parentDirectory = (Get-Location).ProviderPath
+}
+
+if (-not (Test-Path -LiteralPath $parentDirectory)) {
+  throw "The output path '$OutputPath' is invalid because the parent directory '$parentDirectory' does not exist. Please specify a valid, existing directory or run the script from a writable location."
+}
+
+# Verify that the parent directory is writable by creating a temporary file
+try {
+  $testFile = Join-Path -Path $parentDirectory -ChildPath ([System.IO.Path]::GetRandomFileName())
+  New-Item -ItemType File -Path $testFile -Force -ErrorAction Stop | Out-Null
+  Remove-Item -Path $testFile -Force -ErrorAction Stop
+} catch {
+  throw "The parent directory '$parentDirectory' for output path '$OutputPath' is not writable. Please specify a writable directory (for example, `$env:TEMP) and try again."
+}
+
+if (-not (Test-Path -LiteralPath $OutputPath)) {
   New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
 }
 
