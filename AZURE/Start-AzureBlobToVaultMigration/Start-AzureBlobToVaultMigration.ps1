@@ -901,9 +901,14 @@ function Deploy-GatewayServer {
 
   $vmConfig = New-AzVMConfig -VMName $gatewayVmName -VMSize $VmSize
 
+  # Ensure gateway VM credentials are provided non-interactively
+  if (-not $GatewayCredential) {
+    throw "Gateway VM credential not provided. Please supply a PSCredential in `$GatewayCredential before running the gateway deployment."
+  }
+
   # Use Ubuntu 22.04 LTS
   $vmConfig = Set-AzVMOperatingSystem -VM $vmConfig -Linux -ComputerName $gatewayVmName `
-    -Credential (Get-Credential -Message "Enter credentials for the gateway VM admin user")
+    -Credential $GatewayCredential
 
   $vmConfig = Set-AzVMSourceImage -VM $vmConfig -PublisherName "Canonical" `
     -Offer "0001-com-ubuntu-server-jammy" -Skus "22_04-lts-gen2" -Version "latest"
