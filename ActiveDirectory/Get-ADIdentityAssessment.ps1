@@ -59,7 +59,6 @@ param(
   # ===== Stale Object Thresholds (days) =====
   [ValidateRange(30, 730)][int]$StaleUserDays       = 90,
   [ValidateRange(30, 730)][int]$StaleComputerDays   = 90,
-  [ValidateRange(1, 365)][int]$StaleGPODays         = 365,
 
   # ===== Output =====
   [string]$OutFolder = ".\ADIdentityAssessment",
