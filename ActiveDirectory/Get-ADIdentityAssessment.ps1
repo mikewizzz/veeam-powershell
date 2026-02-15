@@ -306,7 +306,16 @@ function Get-DomainDetail {
   $gpoCount = Invoke-ADQuery -Description "GPO count" -Server $dc -DefaultValue 0 -Query {
     param($Server, $Credential)
     $p = @{}; if ($Server) { $p['Server'] = $Server }; if ($Credential) { $p['Credential'] = $Credential }
-    ([xml](Get-GPO -All -Domain ($Server -replace ':.*') | Out-Null); 0)  # GPO module fallback
+    # Try to use the GroupPolicy module (Get-GPO) when available; fall back to LDAP if not.
+    if (Get-Command Get-GPO -ErrorAction SilentlyContinue) {
+      try {
+        (Get-GPO -All -Domain ($Server -replace ':.*') @p | Measure-Object).Count
+      } catch {
+        0
+      }
+    } else {
+      0
+    }
   }
   # GPO count via AD object if GroupPolicy module unavailable
   if ($gpoCount -eq 0) {
