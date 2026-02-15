@@ -296,6 +296,18 @@ function Format-Duration {
   }
 }
 
+function ConvertTo-HtmlEncodedString {
+  param([string]$Text)
+  if ([string]::IsNullOrEmpty($Text)) { return "" }
+  
+  # Load System.Web if not already loaded
+  if (-not ([System.Management.Automation.PSTypeName]'System.Web.HttpUtility').Type) {
+    Add-Type -AssemblyName System.Web
+  }
+  
+  return [System.Web.HttpUtility]::HtmlEncode($Text)
+}
+
 #endregion
 
 # ===== Pre-Flight Check Functions =====
@@ -983,14 +995,14 @@ function Generate-MigrationReport {
       "SKIP"    { '<span style="color:#9ca3af;font-weight:600;">&#8212; SKIP</span>' }
       default   { '<span style="color:#0078d4;font-weight:600;">&#9432; INFO</span>' }
     }
-    $remediationCell = if ($_.Remediation) { "<br><small style='color:#605e5c;'>Fix: $($_.Remediation)</small>" } else { "" }
-    "<tr><td>$($_.Category)</td><td>$($_.Check)</td><td>$statusIcon</td><td>$($_.Detail)$remediationCell</td></tr>"
+    $remediationCell = if ($_.Remediation) { "<br><small style='color:#605e5c;'>Fix: $(ConvertTo-HtmlEncodedString $_.Remediation)</small>" } else { "" }
+    "<tr><td>$(ConvertTo-HtmlEncodedString $_.Category)</td><td>$(ConvertTo-HtmlEncodedString $_.Check)</td><td>$statusIcon</td><td>$(ConvertTo-HtmlEncodedString $_.Detail)$remediationCell</td></tr>"
   } | Out-String
 
   # Build extents table
   $extentRows = if ($BlobExtents -and $BlobExtents.Count -gt 0) {
     $BlobExtents | ForEach-Object {
-      "<tr><td>$($_.SOBRName)</td><td>$($_.ExtentName)</td><td>$($_.StorageAccount)</td><td>$($_.Container)</td><td style='font-weight:600;'>$($_.UsedSpaceGB) GB</td><td>$($_.BackupCount)</td></tr>"
+      "<tr><td>$(ConvertTo-HtmlEncodedString $_.SOBRName)</td><td>$(ConvertTo-HtmlEncodedString $_.ExtentName)</td><td>$(ConvertTo-HtmlEncodedString $_.StorageAccount)</td><td>$(ConvertTo-HtmlEncodedString $_.Container)</td><td style='font-weight:600;'>$($_.UsedSpaceGB) GB</td><td>$($_.BackupCount)</td></tr>"
     } | Out-String
   } else {
     "<tr><td colspan='6' style='text-align:center;color:#605e5c;'>No Azure Blob extents discovered</td></tr>"
