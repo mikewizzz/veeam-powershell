@@ -71,6 +71,10 @@
 .PARAMETER MaxConcurrentTasks
   Maximum concurrent data transfer tasks during evacuation. Default: 4.
 
+.PARAMETER VeeamVaultPricePerTB
+  Veeam Vault pricing per TB per month (USD). Default: 14.00.
+  Override this if Veeam pricing changes or for custom calculations.
+
 .PARAMETER OutputPath
   Custom output folder for reports and logs.
 
@@ -89,6 +93,10 @@
 .EXAMPLE
   .\Start-AzureBlobToVaultMigration.ps1 -TargetVaultName "VeeamVault-01" -SkipGatewayDeploy -ExecuteEvacuate
   # Execute migration using an existing gateway (skip deployment)
+
+.EXAMPLE
+  .\Start-AzureBlobToVaultMigration.ps1 -AssessOnly -VeeamVaultPricePerTB 15.00
+  # Assessment with custom Veeam Vault pricing (e.g., if pricing changes)
 
 .NOTES
   Author: Veeam Sales Engineering
@@ -145,6 +153,11 @@ param(
   [ValidateRange(1, 16)]
   [int]$MaxConcurrentTasks = 4,
 
+  # Pricing
+  [Parameter(Mandatory=$false)]
+  [ValidateRange(0.01, 1000)]
+  [double]$VeeamVaultPricePerTB = 14.00,
+
   # Output
   [Parameter(Mandatory=$false)]
   [string]$OutputPath = ".\VaultMigration_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
@@ -161,7 +174,6 @@ $script:CurrentStep = 0
 
 # ===== Constants =====
 $MIN_VBR_VERSION = [version]"12.3.0"
-$VEEAM_VAULT_PRICE_PER_TB = 14.00
 $GATEWAY_MIN_CPU = 4
 $GATEWAY_MIN_RAM_GB = 8
 $GATEWAY_MIN_DISK_GB = 100
@@ -684,7 +696,7 @@ function Get-MigrationEstimate {
   } else { 0 }
 
   # Veeam Vault monthly cost
-  $monthlyVaultCost = [math]::Round($totalTB * $VEEAM_VAULT_PRICE_PER_TB, 2)
+  $monthlyVaultCost = [math]::Round($totalTB * $VeeamVaultPricePerTB, 2)
 
   $estimate = [PSCustomObject]@{
     TotalDataGB          = [math]::Round($totalGB, 2)
@@ -705,7 +717,7 @@ function Get-MigrationEstimate {
     -Detail "$($estimate.EstimatedDuration) ($MaxConcurrentTasks concurrent tasks at ~$($ESTIMATED_THROUGHPUT_GBPS) Gbps each)"
 
   Add-CheckResult -Category "Estimate" -Check "Veeam Vault Monthly Cost" -Status "INFO" `
-    -Detail "`$$($estimate.MonthlyVaultCost)/month (`$$VEEAM_VAULT_PRICE_PER_TB/TB all-inclusive)"
+    -Detail "`$$($estimate.MonthlyVaultCost)/month (`$$VeeamVaultPricePerTB/TB all-inclusive)"
 
   Add-CheckResult -Category "Estimate" -Check "Veeam Vault Annual Cost" -Status "INFO" `
     -Detail "`$$($estimate.AnnualVaultCost)/year (zero egress, zero API ops, no reservations)"
