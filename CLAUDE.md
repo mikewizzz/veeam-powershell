@@ -29,6 +29,10 @@ veeam-powershell/
 │   │   └── README.md
 │   └── Start-VRO-Azure-Recovery/
 │       └── Start-VROAzureRecovery.ps1    # Stub/placeholder
+├── VBR/
+│   └── Get-VeeamDiagram/
+│       ├── Get-VeeamDiagram.ps1            # VBR v13 REST API diagram generator (production)
+│       └── README.md
 ├── AWS/
 │   ├── Find-CleanEC2-RestorePoint/
 │   │   └── Find-CleanEC2-RestorePoint.ps1  # Stub/placeholder
