@@ -180,7 +180,7 @@ $LogFile = Join-Path $OutputPath "migration_log.csv"
 function Write-Log {
   param(
     [string]$Message,
-    [ValidateSet("INFO", "WARNING", "ERROR", "SUCCESS")]
+    [ValidateSet("INFO", "WARNING", "ERROR", "SUCCESS", "DEBUG")]
     [string]$Level = "INFO"
   )
 
@@ -198,6 +198,7 @@ function Write-Log {
     "ERROR"   { "Red" }
     "WARNING" { "Yellow" }
     "SUCCESS" { "Green" }
+    "DEBUG"   { "DarkGray" }
     default   { "White" }
   }
 
@@ -376,6 +377,9 @@ function Get-AzureBlobRepositories {
   Write-Host "  ---------------------------------" -ForegroundColor DarkGray
 
   $blobExtents = @()
+  $script:AzureDetailsFailureCount = 0
+  $script:BackupCountFailureCount = 0
+  $script:StorageSizeFailureCount = 0
 
   try {
     # Get all Scale-Out Backup Repositories
@@ -422,7 +426,10 @@ function Get-AzureBlobRepositories {
           $extentInfo.Container = $repo.AzureBlobFolder.Container
           $extentInfo.ImmutabilityEnabled = $repo.ImmutabilityEnabled
           $extentInfo.EncryptionEnabled = $repo.EncryptionEnabled
-        } catch { }
+        } catch {
+          $script:AzureDetailsFailureCount++
+          Write-Log "Failed to retrieve Azure-specific details for extent '$($repo.Name)': $($_.Exception.Message)" -Level "DEBUG"
+        }
 
         # Count backups and estimate size
         try {
@@ -438,12 +445,18 @@ function Get-AzureBlobRepositories {
               foreach ($storage in $storages) {
                 $totalSize += $storage.Stats.BackupSize
               }
-            } catch { }
+            } catch {
+              $script:StorageSizeFailureCount++
+              Write-Log "Failed to retrieve storage size for backup '$($backup.Name)': $($_.Exception.Message)" -Level "DEBUG"
+            }
           }
 
           $extentInfo.UsedSpaceGB = [math]::Round($totalSize / 1GB, 2)
           $extentInfo.UsedSpaceTB = [math]::Round($totalSize / 1TB, 3)
-        } catch { }
+        } catch {
+          $script:BackupCountFailureCount++
+          Write-Log "Failed to count backups for extent '$($repo.Name)': $($_.Exception.Message)" -Level "DEBUG"
+        }
 
         $blobExtents += $extentInfo
 
@@ -484,6 +497,18 @@ function Get-AzureBlobRepositories {
       $totalGB = ($blobExtents | Measure-Object -Property UsedSpaceGB -Sum).Sum
       Add-CheckResult -Category "Discovery" -Check "Total Azure Blob Data" -Status "PASS" `
         -Detail "Found $($blobExtents.Count) Azure Blob extent(s) with $([math]::Round($totalGB, 2)) GB total data"
+    }
+
+    # Report any data collection failures
+    $totalFailures = $script:AzureDetailsFailureCount + $script:BackupCountFailureCount + $script:StorageSizeFailureCount
+    if ($totalFailures -gt 0) {
+      $failureDetail = "Data collection incomplete: $($script:AzureDetailsFailureCount) Azure detail failure(s), " +
+                       "$($script:BackupCountFailureCount) backup count failure(s), " +
+                       "$($script:StorageSizeFailureCount) storage size failure(s)"
+      Add-CheckResult -Category "Discovery" -Check "Data Collection Status" -Status "WARNING" `
+        -Detail $failureDetail `
+        -Remediation "Check debug logs for details. Some metrics may be incomplete but discovery can proceed."
+      Write-Log $failureDetail -Level "WARNING"
     }
 
   } catch {
