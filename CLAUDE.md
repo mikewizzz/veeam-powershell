@@ -24,6 +24,9 @@ veeam-powershell/
 │   ├── Get-VeeamVaultPricing/
 │   │   ├── Get-VeeamVaultPricing.ps1     # Vault vs Azure Blob cost comparison (980+ lines, production)
 │   │   └── README.md
+│   ├── Test-VeeamVaultBackup/
+│   │   ├── Test-VeeamVaultBackup.ps1     # Automated backup verification / SureBackup for Azure (800+ lines, production)
+│   │   └── README.md
 │   └── Start-VRO-Azure-Recovery/
 │       └── Start-VROAzureRecovery.ps1    # Stub/placeholder
 ├── AWS/
@@ -34,7 +37,7 @@ veeam-powershell/
 └── CLAUDE.md
 ```
 
-**Three production scripts** (M365 sizing, Azure sizing, Vault pricing). AWS and Azure Recovery scripts are stubs for future development.
+**Four production scripts** (M365 sizing, Azure sizing, Vault pricing, Vault backup testing). AWS and Azure Recovery scripts are stubs for future development.
 
 ## Architecture
 
@@ -146,6 +149,7 @@ do {
 | Get-VeeamM365Sizing.ps1 | Microsoft.Graph.Authentication, Microsoft.Graph.Reports, Microsoft.Graph.Identity.DirectoryManagement |
 | Get-VeeamAzureSizing.ps1 | Az.Accounts, Az.Resources, Az.Compute, Az.Network, Az.Sql, Az.Storage, Az.RecoveryServices |
 | Get-VeeamVaultPricing.ps1 | None (uses REST API directly) |
+| Test-VeeamVaultBackup.ps1 | Az.Accounts, Az.Resources, Az.Compute, Az.Network |
 
 PowerShell 7.x recommended; 5.1 supported.
 
