@@ -114,7 +114,7 @@ function Assert-ADModule {
     return
   }
   if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
-    Write-Log "ActiveDirectory module not found. Install RSAT or run: Install-WindowsFeature RSAT-AD-PowerShell" 'ERROR'
+    Write-Log "ActiveDirectory module not found. Install RSAT: Active Directory module (on servers: Install-WindowsFeature RSAT-AD-PowerShell; on Windows 10/11 clients: Add-WindowsCapability -Online -Name RSAT.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0)." 'ERROR'
     throw "Required module 'ActiveDirectory' is not installed."
   }
   Import-Module ActiveDirectory -ErrorAction Stop
