@@ -3,10 +3,10 @@
   Veeam Vault vs Azure Blob Storage Cost Comparison Tool
 
 .DESCRIPTION
-  Helps Veeam Sales Engineers compare Veeam Vault Foundation pricing against DIY Azure Blob 
-  storage options. Provides factual cost analysis for presales conversations.
-  
-  Common Sales Scenarios:
+  Compares Veeam Vault Foundation pricing against DIY Azure Blob storage options.
+  Provides factual, data-driven cost analysis for capacity planning and storage decisions.
+
+  Common Scenarios:
   1. Net New Customer - Existing backup solutions needing offsite cloud storage
   2. Existing Veeam Customer - Using Azure Blob today, evaluating Veeam Vault cost-effectiveness
   
@@ -62,7 +62,7 @@
   .\Get-VeeamVaultPricing.ps1 -CapacityTB 100 -Region "eastus" -ApiOperationsPerTBMonth 1000000
 
 .NOTES
-  Author: Veeam Sales Engineering
+  Author: Community Contributors
   Version: 1.0.0
   Date: 2026-01-06
   Requires: PowerShell 7.x or 5.1
@@ -765,8 +765,8 @@ function Generate-HTMLReport {
     </div>
     
     <div class="footer">
-      <p><strong>© 2026 Veeam Software</strong> | Presales Assessment Tool</p>
-      <p>Pricing is based on publicly available information and may vary. Contact Veeam Sales for custom quotes.</p>
+      <p>Veeam Vault Pricing Comparison Tool</p>
+      <p>Pricing is based on publicly available information and may vary. Verify current pricing before making purchasing decisions.</p>
     </div>
   </div>
 </body>
@@ -787,7 +787,7 @@ try {
   
   Write-Host "`n$separator" -ForegroundColor Cyan
   Write-Host "  VEEAM VAULT PRICING COMPARISON TOOL" -ForegroundColor White
-  Write-Host "  Veeam Software - Sales Engineering" -ForegroundColor Gray
+  Write-Host "  Open-Source Community Tool" -ForegroundColor Gray
   Write-Host "$separator`n" -ForegroundColor Cyan
   
   # Configuration summary

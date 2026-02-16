@@ -114,7 +114,7 @@
 
 .NOTES
   Version: 1.0.0
-  Author: Veeam Software
+  Author: Community Contributors
   Requires: PowerShell 5.1+, Veeam Backup & Replication 12+ with PowerShell snap-in
   Platform: VMware vSphere or Microsoft Hyper-V
 #>
