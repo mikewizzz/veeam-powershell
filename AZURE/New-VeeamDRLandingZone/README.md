@@ -203,11 +203,11 @@ Customer has Veeam Vault Advanced backups and wants to explore DR to Azure for t
 .\New-VeeamDRLandingZone.ps1 -VMCount 30 -SourceDataTB 15 -Region "eastus2"
 ```
 
-**Talking points:**
-- "Here's exactly what we need to build in Azure for DR"
-- "Your always-on cost is just management VMs and storage"
-- "Compute costs only apply during an actual DR event"
-- "VRO orchestrates the entire recovery automatically"
+**Key considerations:**
+- Shows exactly what needs to be built in Azure for DR
+- Always-on cost is just management VMs and storage
+- Compute costs only apply during an actual DR event
+- VRO orchestrates the entire recovery automatically
 
 ### Existing Azure Customer Adding DR
 Customer already has Azure subscriptions but hasn't set up a dedicated DR landing zone.
@@ -219,7 +219,7 @@ Customer already has Azure subscriptions but hasn't set up a dedicated DR landin
 ```
 
 ### Proof of Concept
-SE needs to quickly stand up a DR environment for a customer demo.
+Quickly stand up a DR environment for testing or demonstration.
 
 ```powershell
 # Small footprint for POC
@@ -237,10 +237,6 @@ SE needs to quickly stand up a DR environment for a customer demo.
 
 ## Support
 
-- **Sales Engineers** - Contact your Veeam Solutions Architect
+- **Issues** - Open an issue on GitHub
 - **VRO Documentation** - [Veeam Recovery Orchestrator Guide](https://helpcenter.veeam.com/docs/one/reporter/about.html)
 - **Azure Pricing** - [Azure Retail Prices API](https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices)
-
----
-
-**© 2026 Veeam Software**

@@ -1,18 +1,8 @@
 # Invoke-VeeamMySQLBackup
 
-**Veeam MySQL Hot Backup Integration — NetWorker Competitive Displacement Tool**
+**Application-consistent MySQL hot backup integration for Veeam Backup & Replication.**
 
-Provides application-consistent MySQL hot backups for Veeam Backup & Replication, directly addressing the NetWorker MySQL Enterprise Backup (MEB) integration that customers cite as a migration blocker.
-
----
-
-## The Competitive Problem
-
-Dell EMC NetWorker ships a built-in MySQL Enterprise Backup module (`nsrmysqld`) that provides hot, application-consistent backups of MySQL databases. Customers migrating from NetWorker to Veeam often ask:
-
-> *"NetWorker has MySQL Enterprise Backup integration — can Veeam do the same?"*
-
-**The answer is yes.** This toolkit proves it.
+Automates the deployment and configuration of MySQL pre-freeze/post-thaw scripts for Veeam application-aware processing, providing true hot backups with zero application downtime.
 
 ---
 
@@ -183,41 +173,6 @@ veeamconfig job create --name "MySQL-Backup" \
     --prefreezecommand "/opt/veeam/mysql/prefreeze.sh" \
     --postthawcommand "/opt/veeam/mysql/postthaw.sh"
 ```
-
----
-
-## SE Talking Points: NetWorker vs. Veeam MySQL Backup
-
-Use these when positioning against NetWorker's MEB integration:
-
-### 1. Same Tool, Better Integration
-
-> "NetWorker's MySQL module is a wrapper around MySQL Enterprise Backup — the same tool our pre-freeze scripts can use. The difference is that Veeam's approach is transparent and customizable, while NetWorker's is a black box."
-
-### 2. More Options, Not Fewer
-
-> "NetWorker only supports MEB, which requires a MySQL Enterprise Edition license. Veeam supports MEB *and* Percona XtraBackup (free, open-source, feature-equivalent for InnoDB) *and* a universal FTWRL fallback. Your customers get choice."
-
-### 3. No Additional Module License
-
-> "NetWorker charges for the MySQL backup module separately. With Veeam, MySQL application-aware processing is included — no additional license."
-
-### 4. Veeam Agent for Linux
-
-> "For physical MySQL servers or containers, Veeam Agent for Linux provides the same pre/post script integration. NetWorker requires the full NetWorker client installation."
-
-### 5. Recovery Capabilities
-
-> "With Veeam, you get Instant VM Recovery, SureBackup verification, and Veeam Explorer capabilities on top of the MySQL-consistent backup. NetWorker's recovery is limited to file-level restore."
-
-### Common Objection Handling
-
-| Objection | Response |
-|-----------|----------|
-| "NetWorker has native MEB integration" | "So does Veeam — our pre-freeze scripts invoke the same `mysqlbackup` binary. The difference is we also support free alternatives." |
-| "We need zero-downtime hot backups" | "Both MEB and XtraBackup provide true hot backups with zero application downtime. FTWRL is only used as a fallback." |
-| "Scripts feel less enterprise-grade" | "Veeam's application-aware processing for Oracle RMAN uses the same script-based approach and protects hundreds of thousands of Oracle databases worldwide. This is a proven architecture." |
-| "We've been using NetWorker for years" | "This toolkit assesses your MySQL servers and generates a migration plan. Let's run the assessment and show you exactly what the Veeam deployment looks like." |
 
 ---
 
