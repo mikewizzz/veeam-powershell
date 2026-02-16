@@ -183,7 +183,7 @@
 
 .NOTES
   Version: 1.0.0
-  Author: Veeam Community
+  Author: Community Contributors
   Requires: PowerShell 5.1+ (7.x recommended)
   Modules: Veeam.Backup.PowerShell (VBR 12+), AWS.Tools.Common, AWS.Tools.EC2
   VRO Compatibility: Veeam Recovery Orchestrator 7.0+

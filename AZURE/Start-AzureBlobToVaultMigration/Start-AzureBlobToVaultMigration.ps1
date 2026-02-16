@@ -99,7 +99,7 @@
   # Assessment with custom Veeam Vault pricing of $15.00 per TB/month
 
 .NOTES
-  Author: Veeam Sales Engineering
+  Author: Community Contributors
   Version: 1.0.0
   Date: 2026-02-15
   Requires: PowerShell 5.1+, Veeam Backup & Replication v12.3+
@@ -1460,8 +1460,8 @@ function Generate-MigrationReport {
     </div>
 
     <div class="footer">
-      <p><strong>&copy; 2026 Veeam Software</strong> | Sales Engineering Migration Tool</p>
-      <p>For assistance, contact your Veeam Solutions Architect</p>
+      <p>Azure Blob to Veeam Vault Migration Tool</p>
+      <p>Open-source community tool — see Veeam documentation for assistance</p>
     </div>
   </div>
 </body>
@@ -1486,7 +1486,7 @@ try {
   Write-Host ""
   Write-Host $separator -ForegroundColor Cyan
   Write-Host "  AZURE BLOB TO VEEAM VAULT - MIGRATION TOOL" -ForegroundColor White
-  Write-Host "  Veeam Software - Sales Engineering" -ForegroundColor Gray
+  Write-Host "  Open-Source Community Tool" -ForegroundColor Gray
   Write-Host $separator -ForegroundColor Cyan
   Write-Host ""
 

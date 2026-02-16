@@ -138,7 +138,7 @@
 .NOTES
   Version: 1.0.0
   Date: 2026-02-15
-  Author: Veeam Sales Engineering
+  Author: Community Contributors
   Requires: PowerShell 7.x (recommended) or 5.1
   Modules: PureStoragePowerShellSDK2, VMware.PowerCLI
 #>

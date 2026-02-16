@@ -16,7 +16,7 @@
   - Job-to-proxy assignments
 
   The diagram uses proper Veeam iconography and auto-layout for immediate use
-  in architecture documentation and presales deliverables.
+  in architecture documentation and infrastructure reviews.
 
 .PARAMETER Server
   Hostname or IP address of the Veeam Backup & Replication server.
@@ -68,7 +68,7 @@
   Full discovery with self-signed cert, jobs, and JSON export.
 
 .NOTES
-  Author:  Veeam Sales Engineering
+  Author:  Community Contributors
   Version: 1.0.0
   Date:    2026-02-14
   Requires: PowerShell 7.x or 5.1

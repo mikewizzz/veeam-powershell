@@ -4,7 +4,7 @@ Guide for AI assistants working with the veeam-powershell repository.
 
 ## Repository Overview
 
-Collection of standalone PowerShell presales assessment tools for Veeam backup solutions across Microsoft 365, Azure, and AWS. Target audience: Veeam Sales Engineers, Architects, and IT Professionals performing capacity planning and cost analysis.
+Collection of open-source, community-maintained PowerShell tools for Veeam backup solutions across Microsoft 365, Azure, and AWS. These tools help IT professionals, architects, and administrators perform capacity planning, cost analysis, and infrastructure management.
 
 ## Repository Structure
 
