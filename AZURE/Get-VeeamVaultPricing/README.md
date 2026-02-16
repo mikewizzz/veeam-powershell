@@ -1,10 +1,10 @@
 # Veeam Vault Pricing Comparison Tool
 
-PowerShell tool for Veeam Sales Engineers to compare Veeam Vault Foundation pricing against DIY Azure Blob storage options during presales conversations.
+PowerShell tool to compare Veeam Vault Foundation pricing against DIY Azure Blob storage options for capacity planning and cost analysis.
 
 ## Purpose
 
-Addresses common sales scenarios:
+Addresses common scenarios:
 1. **Net New Customers** - Evaluating offsite cloud storage options
 2. **Existing Veeam Customers** - Using Azure Blob today, considering Veeam Vault
 
@@ -132,7 +132,7 @@ Customer has existing backup solution (Commvault, Veritas, etc.) and needs offsi
 .\Get-VeeamVaultPricing.ps1 -CapacityTB 50 -Region "eastus" -YearsToProject 3
 ```
 
-**Talking points:**
+**Key considerations:**
 - Veeam Vault provides predictable, all-inclusive pricing
 - No surprise egress or operations charges
 - Built-in immutability for ransomware protection
@@ -146,7 +146,7 @@ Customer using Azure Blob today for offsite copies, considering Veeam Vault.
 .\Get-VeeamVaultPricing.ps1 -CapacityTB 100 -Region "eastus" -AnnualGrowthPercent 25 -EgressGB 1000
 ```
 
-**Talking points:**
+**Key considerations:**
 - Compare against Azure Cool tier with 3-year reservation
 - Veeam Vault eliminates egress fees (important for DR testing)
 - Native integration with Veeam Backup & Replication
@@ -160,11 +160,11 @@ Multi-year TCO analysis for capacity planning.
 .\Get-VeeamVaultPricing.ps1 -CapacityTB 500 -Region "westeurope" -YearsToProject 5 -AnnualGrowthPercent 35
 ```
 
-**Talking points:**
-- Show TCO with realistic growth projections
+**Key considerations:**
+- TCO with realistic growth projections
 - Veeam Vault scales seamlessly without reservation commitments
 - Azure reservations lock in capacity, limiting flexibility
-- Consider multi-cloud strategy (Veeam Vault works with AWS, Azure, GCP)
+- Multi-cloud strategy (Veeam Vault works with AWS, Azure, GCP)
 
 ## Troubleshooting
 
@@ -182,24 +182,17 @@ Multi-year TCO analysis for capacity planning.
 
 ## Best Practices
 
-**For presales calls:**
-1. Run analysis before customer meeting
-2. Use customer's actual capacity and region
-3. Adjust growth rate based on customer environment
-4. Include egress if customer frequently restores/tests
-5. Show HTML report during screen share
+**Before running:**
+1. Use actual capacity and target Azure region
+2. Adjust growth rate based on your environment
+3. Include egress if you frequently restore or test DR
+4. Use HTML report for stakeholder presentations
 
-**For proposals:**
+**For detailed analysis:**
 1. Generate 3-year and 5-year projections
 2. Include both optimistic (20%) and conservative (40%) growth scenarios
-3. Export CSV for detailed analysis
-4. Attach HTML report to proposal
-
-**For competitive situations:**
-1. Compare against Azure Cool with 3-year reservation (most competitive)
-2. Highlight Veeam Vault flexibility (no long-term commitment)
-3. Emphasize zero egress fees (important for DR testing and migration)
-4. Show integrated management value (no separate Azure portal management)
+3. Export CSV for spreadsheet analysis
+4. Attach HTML report to planning documents
 
 ## Important Notes
 
@@ -211,10 +204,6 @@ Multi-year TCO analysis for capacity planning.
 
 ## Support
 
-- **Sales Engineers** - Contact your Veeam Solutions Architect
-- **Pricing questions** - Verify current Veeam Vault pricing with sales operations
+- **Issues** - Open an issue on GitHub
+- **Pricing questions** - Verify current Veeam Vault pricing on the Veeam website
 - **Azure pricing** - [Azure Retail Prices API](https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices)
-
----
-
-**© 2026 Veeam Software**

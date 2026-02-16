@@ -161,10 +161,10 @@ Install-Module Az -Scope CurrentUser
 
 ## Best Practices
 
-**For Sales Engineers:**
-- Use default parameters for quick assessments
+**For quick assessments:**
+- Use default parameters for a fast overview
 - Add `-CalculateBlobSizes` for detailed storage analysis
-- Adjust retention and overhead based on customer requirements
+- Adjust retention and overhead based on environment requirements
 
 **For Production:**
 - Use Managed Identity or certificate-based authentication
@@ -179,10 +179,6 @@ Install-Module Az -Scope CurrentUser
 
 ## Support
 
-- **Sales Engineers** - Contact your Veeam Solutions Architect
-- **Customers** - Contact your Veeam Account Team
-- **Partners** - Access Veeam Partner Portal
-
----
-
-**© 2026 Veeam Software**
+- **Issues** - Open an issue on GitHub
+- **Veeam documentation** - [Veeam Help Center](https://helpcenter.veeam.com)
+- **Azure modules** - [Az PowerShell documentation](https://learn.microsoft.com/en-us/powershell/azure)
