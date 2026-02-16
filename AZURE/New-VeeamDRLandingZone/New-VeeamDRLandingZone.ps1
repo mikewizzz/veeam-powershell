@@ -119,7 +119,7 @@
 
 .NOTES
   Version: 1.0.0
-  Author: Veeam Sales Engineering
+  Author: Community Contributors
   Date: 2026-02-15
   Requires: PowerShell 7.x (recommended) or 5.1
   Modules (Deploy mode only): Az.Accounts, Az.Resources, Az.Network, Az.Storage
@@ -1278,8 +1278,8 @@ Azure Subscription ($Region)
   </div>
 
   <div class="footer">
-    <p>&copy; 2026 Veeam Software | DR Landing Zone Assessment Tool v1.0.0</p>
-    <p>Pricing estimates based on Azure Retail Prices API. Actual costs may vary. Contact your Veeam Solutions Architect for detailed DR planning.</p>
+    <p>DR Landing Zone Assessment Tool v1.0.0</p>
+    <p>Pricing estimates based on Azure Retail Prices API. Actual costs may vary. See Veeam documentation for detailed DR planning.</p>
   </div>
 </div>
 </body>
@@ -1316,7 +1316,7 @@ try {
 
   Write-Host "`n$separator" -ForegroundColor Cyan
   Write-Host "  VEEAM AZURE DR LANDING ZONE TOOL" -ForegroundColor White
-  Write-Host "  Veeam Software - Sales Engineering" -ForegroundColor Gray
+  Write-Host "  Open-Source Community Tool" -ForegroundColor Gray
   Write-Host "$separator`n" -ForegroundColor Cyan
 
   $modeDisplay = if ($Deploy) { "DEPLOY (creating Azure resources)" } else { "ESTIMATE (planning only)" }
