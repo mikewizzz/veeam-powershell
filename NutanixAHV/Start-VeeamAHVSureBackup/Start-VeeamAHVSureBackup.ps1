@@ -133,7 +133,7 @@
 
 .NOTES
   Version: 1.0.0
-  Author: Veeam Software
+  Author: Community Contributors
   Date: 2026-02-15
   Requires: PowerShell 5.1+ (7.x recommended)
   Modules: Veeam.Backup.PowerShell (VBR Console), VeeamPSSnapin (legacy)
