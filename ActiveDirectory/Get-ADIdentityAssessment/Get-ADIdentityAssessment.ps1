@@ -522,10 +522,10 @@ function Get-EnvironmentComplexity {
 
   # 2. Identity scale
   $userScale = switch ($true) {
-    ($totalUsers -gt 50000) { 90 }
-    ($totalUsers -gt 20000) { 70 }
-    ($totalUsers -gt 5000)  { 50 }
-    ($totalUsers -gt 1000)  { 30 }
+    ($totalUsers -gt 50000) { 90; break }
+    ($totalUsers -gt 20000) { 70; break }
+    ($totalUsers -gt 5000)  { 50; break }
+    ($totalUsers -gt 1000)  { 30; break }
     default                 { 15 }
   }
   $scores['IdentityScale'] = [ordered]@{
@@ -555,10 +555,10 @@ function Get-EnvironmentComplexity {
 
   # 5. Group Policy complexity
   $gpoScore = switch ($true) {
-    ($totalGPOs -gt 500) { 95 }
-    ($totalGPOs -gt 200) { 75 }
-    ($totalGPOs -gt 100) { 55 }
-    ($totalGPOs -gt 30)  { 35 }
+    ($totalGPOs -gt 500) { 95; break }
+    ($totalGPOs -gt 200) { 75; break }
+    ($totalGPOs -gt 100) { 55; break }
+    ($totalGPOs -gt 30)  { 35; break }
     default              { 15 }
   }
   $scores['GroupPolicy'] = [ordered]@{
@@ -570,9 +570,9 @@ function Get-EnvironmentComplexity {
 
   # 6. Privileged access surface
   $privScore = switch ($true) {
-    ($totalPrivUsers -gt 100) { 90 }
-    ($totalPrivUsers -gt 50)  { 70 }
-    ($totalPrivUsers -gt 20)  { 45 }
+    ($totalPrivUsers -gt 100) { 90; break }
+    ($totalPrivUsers -gt 50)  { 70; break }
+    ($totalPrivUsers -gt 20)  { 45; break }
     default                   { 20 }
   }
   $scores['PrivilegedAccess'] = [ordered]@{
@@ -605,9 +605,9 @@ function Get-EnvironmentComplexity {
 
   # ---- Recovery impact tier ----
   $tier = switch ($true) {
-    ($compositeScore -ge 75) { "Critical" }
-    ($compositeScore -ge 50) { "High" }
-    ($compositeScore -ge 30) { "Moderate" }
+    ($compositeScore -ge 75) { "Critical"; break }
+    ($compositeScore -ge 50) { "High"; break }
+    ($compositeScore -ge 30) { "Moderate"; break }
     default                  { "Standard" }
   }
 

@@ -109,6 +109,9 @@ if (-not $PSBoundParameters.ContainsKey('Quick') -and -not $PSBoundParameters.Co
   $Quick = $true
 }
 
+# Compute once; referenced throughout the script for logging, CSV, and HTML.
+$runMode = if ($Full) { "Full" } else { "Quick" }
+
 # =============================
 # Output folder structure
 # =============================
@@ -138,7 +141,7 @@ function Write-Log([string]$msg) {
   }
 }
 
-Write-Log "Starting run (Mode: $(if($Full){'Full'}else{'Quick'}), Period: $Period days)"
+Write-Log "Starting run (Mode: $runMode, Period: $Period days)"
 
 # =============================
 # Unit Conversion Constants & Functions
@@ -191,8 +194,12 @@ function Mask-UPN([string]$upn) {
   if (-not $MaskUserIds -or [string]::IsNullOrWhiteSpace($upn)) { return $upn }
   $bytes = [Text.Encoding]::UTF8.GetBytes($upn)
   $sha   = [System.Security.Cryptography.SHA256]::Create()
-  $hash  = ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") }) -join ""
-  return "user_" + $hash.Substring(0,12)
+  try {
+    $hash = ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") }) -join ""
+    return "user_" + $hash.Substring(0,12)
+  } finally {
+    $sha.Dispose()
+  }
 }
 
 # =============================
@@ -201,38 +208,28 @@ function Mask-UPN([string]$upn) {
 
 <#
 .SYNOPSIS
-  Invokes Microsoft Graph API with exponential backoff retry logic for throttling.
+  Executes a scriptblock with exponential backoff retry for transient/throttling errors.
 .DESCRIPTION
-  Wraps Invoke-MgGraphRequest with automatic retry on throttling (429) and transient errors.
-  Uses exponential backoff with respect for Retry-After headers.
-.PARAMETER Uri
-  The Graph API endpoint URI.
-.PARAMETER Method
-  HTTP method (GET, POST, PATCH, DELETE).
-.PARAMETER Headers
-  Optional hashtable of custom headers.
-.PARAMETER Body
-  Optional request body for POST/PATCH operations.
+  Centralised retry engine used by all Graph API callers. Handles Retry-After headers,
+  exponential backoff (2^attempt, max 30s), and retryable-error detection.
+.PARAMETER Action
+  Scriptblock to execute (should call Invoke-MgGraphRequest or equivalent).
+.PARAMETER Label
+  Human-readable label for log messages (e.g. "Graph GET /users").
 .PARAMETER MaxRetries
-  Maximum number of retry attempts (default: 6).
-.NOTES
-  Sleeps between retries using exponential backoff: 2^attempt seconds (max 30s).
-  Respects Retry-After header when provided by Graph API.
+  Maximum retry attempts (default: 6).
 #>
-function Invoke-Graph {
+function Invoke-WithRetry {
   param(
-    [Parameter(Mandatory)][string]$Uri,
-    [ValidateSet('GET','POST','PATCH','DELETE')][string]$Method='GET',
-    [hashtable]$Headers,
-    $Body,
+    [Parameter(Mandatory)][scriptblock]$Action,
+    [string]$Label = "request",
     [int]$MaxRetries = 6
   )
   $attempt = 0
   do {
     try {
-      Write-Log "Graph $Method $Uri"
-      if ($Body) { return Invoke-MgGraphRequest -Method $Method -Uri $Uri -Headers $Headers -Body $Body }
-      else       { return Invoke-MgGraphRequest -Method $Method -Uri $Uri -Headers $Headers }
+      Write-Log $Label
+      return (& $Action)
     } catch {
       $attempt++
       $msg = $_.Exception.Message
@@ -257,6 +254,40 @@ function Invoke-Graph {
 
 <#
 .SYNOPSIS
+  Invokes Microsoft Graph API with exponential backoff retry logic for throttling.
+.DESCRIPTION
+  Wraps Invoke-MgGraphRequest with automatic retry on throttling (429) and transient errors.
+  Delegates retry mechanics to Invoke-WithRetry.
+.PARAMETER Uri
+  The Graph API endpoint URI.
+.PARAMETER Method
+  HTTP method (GET, POST, PATCH, DELETE).
+.PARAMETER Headers
+  Optional hashtable of custom headers.
+.PARAMETER Body
+  Optional request body for POST/PATCH operations.
+.PARAMETER MaxRetries
+  Maximum number of retry attempts (default: 6).
+#>
+function Invoke-Graph {
+  param(
+    [Parameter(Mandatory)][string]$Uri,
+    [ValidateSet('GET','POST','PATCH','DELETE')][string]$Method='GET',
+    [hashtable]$Headers,
+    $Body,
+    [int]$MaxRetries = 6
+  )
+  $graphParams = @{ Method = $Method; Uri = $Uri }
+  if ($Headers) { $graphParams.Headers = $Headers }
+  if ($Body)    { $graphParams.Body    = $Body }
+
+  Invoke-WithRetry -Label "Graph $Method $Uri" -MaxRetries $MaxRetries -Action {
+    Invoke-MgGraphRequest @graphParams
+  }
+}
+
+<#
+.SYNOPSIS
   Downloads CSV files from Graph API with retry logic for throttling.
 .PARAMETER Uri
   The Graph API report endpoint URI.
@@ -271,37 +302,32 @@ function Invoke-GraphDownloadCsv {
     [Parameter(Mandatory)][string]$OutPath,
     [int]$MaxRetries = 6
   )
-  $attempt = 0
-  do {
-    try {
-      Write-Log "Graph DOWNLOAD $Uri -> $OutPath"
-      Invoke-MgGraphRequest -Uri $Uri -OutputFilePath $OutPath | Out-Null
-      return
-    } catch {
-      $attempt++
-      $msg = $_.Exception.Message
-      $retryAfter = 0
-      try {
-        if ($_.Exception.Response -and $_.Exception.Response.Headers['Retry-After']) {
-          [int]::TryParse($_.Exception.Response.Headers['Retry-After'], [ref]$retryAfter) | Out-Null
-        }
-      } catch {}
-      $isRetryable = ($msg -match 'Too Many Requests|throttle|429|5\d\d|temporarily unavailable')
-      if ($attempt -le $MaxRetries -and $isRetryable) {
-        $sleep = [Math]::Min([int]([Math]::Pow(2, $attempt)), 30)
-        if ($retryAfter -gt 0) { $sleep = [Math]::Max($sleep, $retryAfter) }
-        Write-Log "Throttled/retryable download error: sleeping $sleep sec (attempt $attempt/$MaxRetries)"
-        Start-Sleep -Seconds $sleep
-      } else {
-        throw
-      }
-    }
-  } while ($true)
+  Invoke-WithRetry -Label "Graph DOWNLOAD $Uri -> $OutPath" -MaxRetries $MaxRetries -Action {
+    Invoke-MgGraphRequest -Uri $Uri -OutputFilePath $OutPath | Out-Null
+  }
 }
 
 # =============================
 # Module management (optional install)
 # =============================
+
+<#
+.SYNOPSIS
+  Ensures a PowerShell module is available: installs if missing and allowed, then imports.
+.PARAMETER Name
+  Module name to install/import.
+#>
+function Assert-RequiredModule([string]$Name) {
+  if (-not (Get-Module -ListAvailable -Name $Name)) {
+    if ($SkipModuleInstall) {
+      throw "Missing required module '$Name'. Install with: Install-Module $Name -Scope CurrentUser"
+    }
+    Write-Log "Installing module $Name"
+    Install-Module $Name -Scope CurrentUser -Force -AllowClobber
+  }
+  Import-Module $Name -ErrorAction Stop
+}
+
 $RequiredModules = @(
   'Microsoft.Graph.Authentication',
   'Microsoft.Graph.Reports',
@@ -309,16 +335,7 @@ $RequiredModules = @(
 )
 if ($ADGroup -or $ExcludeADGroup) { $RequiredModules += 'Microsoft.Graph.Groups' }
 
-foreach ($m in $RequiredModules) {
-  if (-not (Get-Module -ListAvailable -Name $m)) {
-    if ($SkipModuleInstall) {
-      throw "Missing required module '$m'. Install with: Install-Module $m -Scope CurrentUser"
-    }
-    Write-Log "Installing module $m"
-    Install-Module $m -Scope CurrentUser -Force -AllowClobber
-  }
-  Import-Module $m -ErrorAction Stop
-}
+foreach ($m in $RequiredModules) { Assert-RequiredModule $m }
 
 # =============================
 # Authentication & Authorization
@@ -660,14 +677,7 @@ $archBytes = 0.0
 $rifBytes  = 0.0
 
 if ($IncludeArchive -or $IncludeRecoverableItems) {
-  if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-    if ($SkipModuleInstall) {
-      throw "Missing required module 'ExchangeOnlineManagement'. Install with: Install-Module ExchangeOnlineManagement -Scope CurrentUser"
-    }
-    Write-Log "Installing ExchangeOnlineManagement"
-    Install-Module ExchangeOnlineManagement -Scope CurrentUser -Force -AllowClobber
-  }
-  Import-Module ExchangeOnlineManagement -ErrorAction Stop
+  Assert-RequiredModule 'ExchangeOnlineManagement'
 
   Write-Host "Connecting to Exchange Online for deep sizing (Archive/RIF)..." -ForegroundColor Yellow
   try {
@@ -858,7 +868,7 @@ if ($Full) {
 # Inputs export (raw totals + assumptions, no per-user identifiers)
 # =============================
 $inputs = @(
-  [pscustomobject]@{ Key="Mode"; Value=$(if($Full){"Full"}else{"Quick"}) },
+  [pscustomobject]@{ Key="Mode"; Value=$runMode },
   [pscustomobject]@{ Key="PeriodDays"; Value=$Period },
   [pscustomobject]@{ Key="ADGroup"; Value=($ADGroup ?? "") },
   [pscustomobject]@{ Key="ExcludeADGroup"; Value=($ExcludeADGroup ?? "") },
@@ -884,7 +894,7 @@ $summary = [pscustomobject]@{
   DefaultDomain             = $DefaultDomain
   GraphEnvironment          = $envName
   TenantCategory            = $TenantCategory
-  Mode                      = $(if($Full){"Full"}else{"Quick"})
+  Mode                      = $runMode
 
   UsersToProtect            = $UsersToProtect
 
@@ -1006,7 +1016,7 @@ if ($ExportJson) {
       DefaultDomain = $DefaultDomain
       GraphEnvironment = $envName
       TenantCategory = $TenantCategory
-      Mode = $(if($Full){"Full"}else{"Quick"})
+      Mode = $runMode
     }
     Inputs = $inputs
     Summary = $summary
@@ -1457,7 +1467,7 @@ tbody tr:last-child td {
   <div class="header">
     <h1 class="header-title">
       Microsoft 365 Backup Sizing Assessment
-      <span class="badge">$(if($Full){"Full"}else{"Quick"})</span>
+      <span class="badge">$runMode</span>
     </h1>
     <div class="header-subtitle">Generated: $(Get-Date -Format "MMMM dd, yyyy 'at' HH:mm") UTC</div>
   </div>
