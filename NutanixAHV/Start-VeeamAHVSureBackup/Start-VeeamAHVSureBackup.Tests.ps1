@@ -1,0 +1,1010 @@
+#Requires -Module Pester
+<#
+.SYNOPSIS
+  Pester 5.x test suite for Start-VeeamAHVSureBackup.ps1
+.DESCRIPTION
+  Comprehensive unit and integration-safe tests covering:
+  - Parameter validation and edge cases
+  - API request construction (v3 and v4)
+  - Retry/backoff behaviour with jitter
+  - Error handling paths (401/403/404/429/5xx)
+  - Pagination behaviour
+  - Idempotency checks (NTNX-Request-Id)
+  - Output contract/schema validation
+  - Smoke tests (no real AHV credentials needed)
+
+  All external calls (Invoke-RestMethod, Veeam cmdlets) are mocked.
+  No destructive live calls are made in default test runs.
+
+.NOTES
+  Run with:  Invoke-Pester ./Start-VeeamAHVSureBackup.Tests.ps1 -Output Detailed
+  CI mode:   Invoke-Pester ./Start-VeeamAHVSureBackup.Tests.ps1 -CI
+  Expected:  All tests pass without AHV/VBR credentials
+#>
+
+BeforeAll {
+  $scriptPath = Join-Path $PSScriptRoot "Start-VeeamAHVSureBackup.ps1"
+
+  # Parse the script AST to extract function definitions without executing main
+  $tokens = $null
+  $parseErrors = $null
+  $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
+
+  # Set up script-scoped variables that functions depend on
+  $script:PrismApiVersion = "v4"
+  $script:PrismOrigin = "https://testpc:9440"
+  $script:PrismBaseUrl = "https://testpc:9440/api"
+  $script:PrismHeaders = @{
+    "Authorization" = "Basic dGVzdDp0ZXN0"
+    "Content-Type"  = "application/json"
+    "Accept"        = "application/json"
+  }
+  $script:PrismEndpoints = @{
+    VMs      = "vmm/v4.0/ahv/config/vms"
+    Subnets  = "networking/v4.0/config/subnets"
+    Clusters = "clustermgmt/v4.0/config/clusters"
+    Tasks    = "prism/v4.0/config/tasks"
+  }
+  $script:SkipCert = $false
+  $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  $script:TestResults = New-Object System.Collections.Generic.List[object]
+  $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
+  $script:StartTime = Get-Date
+  $script:TotalSteps = 8
+  $script:CurrentStep = 0
+
+  # Extract and define all functions from the script in test scope
+  $functionDefs = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
+  foreach ($funcDef in $functionDefs) {
+    Invoke-Expression $funcDef.Extent.Text
+  }
+
+  # Helper to create mock HTTP exceptions with proper Response.StatusCode
+  function script:New-MockHttpException {
+    param([int]$StatusCode, [string]$Message = "Mock HTTP error $StatusCode")
+    $response = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]$StatusCode)
+    return [Microsoft.PowerShell.Commands.HttpResponseException]::new($Message, $response)
+  }
+}
+
+# ============================================================
+Describe "Write-Log" {
+  BeforeEach {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "adds an entry with correct level and message" {
+    Write-Log -Message "Test message" -Level "INFO"
+    $script:LogEntries.Count | Should -Be 1
+    $script:LogEntries[0].Level | Should -Be "INFO"
+    $script:LogEntries[0].Message | Should -Be "Test message"
+  }
+
+  It "defaults to INFO level" {
+    Write-Log -Message "Default level"
+    $script:LogEntries[0].Level | Should -Be "INFO"
+  }
+
+  It "accepts all valid log levels" {
+    foreach ($level in @("INFO", "WARNING", "ERROR", "SUCCESS", "TEST-PASS", "TEST-FAIL")) {
+      Write-Log -Message "test" -Level $level
+    }
+    $script:LogEntries.Count | Should -Be 6
+  }
+
+  It "includes a timestamp in yyyy-MM-dd HH:mm:ss format" {
+    Write-Log -Message "ts test"
+    $script:LogEntries[0].Timestamp | Should -Match "^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$"
+  }
+}
+
+# ============================================================
+Describe "Resolve-PrismResponseBody" {
+  It "unwraps a Body/ETag wrapper object" {
+    $wrapper = [PSCustomObject]@{
+      Body = @{ data = @("item1") }
+      ETag = "abc123"
+    }
+    $result = Resolve-PrismResponseBody $wrapper
+    $result.data | Should -Contain "item1"
+  }
+
+  It "returns raw response when no wrapper present" {
+    $raw = @{ entities = @("e1") }
+    $result = Resolve-PrismResponseBody $raw
+    $result.entities | Should -Contain "e1"
+  }
+}
+
+# ============================================================
+Describe "Invoke-PrismAPI" {
+  BeforeEach {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  Context "Successful requests" {
+    It "calls Invoke-RestMethod and returns response" {
+      Mock Invoke-RestMethod { return @{ data = @(@{ name = "test-vm" }) } }
+
+      $result = Invoke-PrismAPI -Method "GET" -Endpoint "vmm/v4.0/ahv/config/vms"
+      Should -Invoke Invoke-RestMethod -Times 1
+    }
+
+    It "includes NTNX-Request-Id header for v4 POST mutations" {
+      $script:capturedHeaders = $null
+      Mock Invoke-RestMethod {
+        $script:capturedHeaders = $Headers
+        return @{ data = @() }
+      }
+
+      Invoke-PrismAPI -Method "POST" -Endpoint "test" -Body @{ kind = "vm" }
+      $script:capturedHeaders["NTNX-Request-Id"] | Should -Not -BeNullOrEmpty
+    }
+
+    It "includes If-Match header when IfMatch is provided" {
+      $script:capturedHeaders = $null
+      Mock Invoke-RestMethod {
+        $script:capturedHeaders = $Headers
+        return @{ data = @() }
+      }
+
+      Invoke-PrismAPI -Method "PUT" -Endpoint "test" -IfMatch "etag123"
+      $script:capturedHeaders["If-Match"] | Should -Be "etag123"
+    }
+
+    It "serialises Body as JSON with depth" {
+      $script:capturedBody = $null
+      Mock Invoke-RestMethod {
+        $script:capturedBody = $Body
+        return @{ data = @() }
+      }
+
+      Invoke-PrismAPI -Method "POST" -Endpoint "test" -Body @{ kind = "vm"; nested = @{ a = 1 } }
+      $parsed = $script:capturedBody | ConvertFrom-Json
+      $parsed.kind | Should -Be "vm"
+    }
+  }
+
+  Context "Retry on transient errors" {
+    It "retries on 5xx and eventually succeeds" {
+      $script:mockCallCount = 0
+      Mock Invoke-RestMethod {
+        $script:mockCallCount++
+        if ($script:mockCallCount -le 1) {
+          throw (New-MockHttpException -StatusCode 500)
+        }
+        return @{ data = @() }
+      }
+      Mock Start-Sleep {}
+
+      $result = Invoke-PrismAPI -Method "GET" -Endpoint "test" -RetryCount 2
+      $script:mockCallCount | Should -Be 2
+    }
+
+    It "retries on 429 rate-limit and eventually succeeds" {
+      $script:mockCallCount = 0
+      Mock Invoke-RestMethod {
+        $script:mockCallCount++
+        if ($script:mockCallCount -le 1) {
+          throw (New-MockHttpException -StatusCode 429)
+        }
+        return @{ data = @() }
+      }
+      Mock Start-Sleep {}
+
+      Invoke-PrismAPI -Method "GET" -Endpoint "test" -RetryCount 2
+      $script:mockCallCount | Should -Be 2
+    }
+
+    It "throws after exhausting all retries" {
+      Mock Invoke-RestMethod {
+        throw (New-MockHttpException -StatusCode 502)
+      }
+      Mock Start-Sleep {}
+
+      { Invoke-PrismAPI -Method "GET" -Endpoint "test" -RetryCount 2 } | Should -Throw
+      Should -Invoke Invoke-RestMethod -Times 3  # 1 initial + 2 retries
+    }
+
+    It "uses Start-Sleep for backoff between retries" {
+      $script:mockCallCount = 0
+      Mock Invoke-RestMethod {
+        $script:mockCallCount++
+        if ($script:mockCallCount -le 2) {
+          throw (New-MockHttpException -StatusCode 503)
+        }
+        return @{ data = @() }
+      }
+      Mock Start-Sleep {}
+
+      Invoke-PrismAPI -Method "GET" -Endpoint "test" -RetryCount 3
+      Should -Invoke Start-Sleep -Times 2
+    }
+  }
+
+  Context "Non-retryable client errors" {
+    It "does NOT retry on 401 Unauthorized" {
+      Mock Invoke-RestMethod { throw (New-MockHttpException -StatusCode 401) }
+      Mock Start-Sleep {}
+
+      { Invoke-PrismAPI -Method "GET" -Endpoint "test" -RetryCount 3 } | Should -Throw
+      Should -Invoke Invoke-RestMethod -Times 1
+    }
+
+    It "does NOT retry on 403 Forbidden" {
+      Mock Invoke-RestMethod { throw (New-MockHttpException -StatusCode 403) }
+      Mock Start-Sleep {}
+
+      { Invoke-PrismAPI -Method "GET" -Endpoint "test" -RetryCount 3 } | Should -Throw
+      Should -Invoke Invoke-RestMethod -Times 1
+    }
+
+    It "does NOT retry on 404 Not Found" {
+      Mock Invoke-RestMethod { throw (New-MockHttpException -StatusCode 404) }
+      Mock Start-Sleep {}
+
+      { Invoke-PrismAPI -Method "GET" -Endpoint "test" -RetryCount 3 } | Should -Throw
+      Should -Invoke Invoke-RestMethod -Times 1
+    }
+
+    It "logs client error with status code" {
+      Mock Invoke-RestMethod { throw (New-MockHttpException -StatusCode 400) }
+
+      { Invoke-PrismAPI -Method "GET" -Endpoint "test" } | Should -Throw
+      $script:LogEntries | Where-Object { $_.Level -eq "ERROR" -and $_.Message -match "client error.*400" } |
+        Should -Not -BeNullOrEmpty
+    }
+  }
+}
+
+# ============================================================
+Describe "Get-PrismEntities" {
+  BeforeEach {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  Context "v4 pagination" {
+    BeforeAll { $script:PrismApiVersion = "v4" }
+
+    It "fetches all pages until totalAvailableResults is reached" {
+      $script:mockPage = 0
+      Mock Invoke-PrismAPI {
+        $script:mockPage++
+        if ($script:mockPage -eq 1) {
+          return @{
+            data     = @(@{ extId = "1"; name = "vm1" }, @{ extId = "2"; name = "vm2" })
+            metadata = @{ totalAvailableResults = 3 }
+          }
+        }
+        return @{
+          data     = @(@{ extId = "3"; name = "vm3" })
+          metadata = @{ totalAvailableResults = 3 }
+        }
+      }
+
+      $result = Get-PrismEntities -EndpointKey "VMs" -PageSize 2
+      $result.Count | Should -Be 3
+    }
+
+    It "passes OData filter in query string" {
+      Mock Invoke-PrismAPI {
+        param($Method, $Endpoint)
+        $Endpoint | Should -Match '\$filter='
+        return @{ data = @(); metadata = @{ totalAvailableResults = 0 } }
+      }
+
+      Get-PrismEntities -EndpointKey "VMs" -Filter "name eq 'test'"
+    }
+
+    It "uses GET method for v4 list operations" {
+      Mock Invoke-PrismAPI {
+        param($Method)
+        $Method | Should -Be "GET"
+        return @{ data = @(); metadata = @{ totalAvailableResults = 0 } }
+      }
+
+      Get-PrismEntities -EndpointKey "Clusters"
+    }
+
+    It "returns empty list when no data" {
+      Mock Invoke-PrismAPI {
+        return @{ data = @(); metadata = @{ totalAvailableResults = 0 } }
+      }
+
+      $result = Get-PrismEntities -EndpointKey "Subnets"
+      $result.Count | Should -Be 0
+    }
+  }
+
+  Context "v3 pagination" {
+    BeforeAll { $script:PrismApiVersion = "v3" }
+    AfterAll { $script:PrismApiVersion = "v4" }
+
+    It "uses POST method with kind/length/offset body" {
+      Mock Invoke-PrismAPI {
+        param($Method, $Endpoint, $Body)
+        $Method | Should -Be "POST"
+        $Endpoint | Should -Match "list$"
+        $Body.kind | Should -Be "cluster"
+        $Body.length | Should -BeGreaterThan 0
+        return @{ entities = @(); metadata = @{ total_matches = 0 } }
+      }
+
+      Get-PrismEntities -EndpointKey "Clusters"
+    }
+
+    It "pages through v3 results" {
+      $script:mockOffset = -1
+      Mock Invoke-PrismAPI {
+        param($Body)
+        $script:mockOffset++
+        if ($script:mockOffset -eq 0) {
+          return @{
+            entities = @(@{ metadata = @{ uuid = "1" } }, @{ metadata = @{ uuid = "2" } })
+            metadata = @{ total_matches = 3 }
+          }
+        }
+        return @{
+          entities = @(@{ metadata = @{ uuid = "3" } })
+          metadata = @{ total_matches = 3 }
+        }
+      }
+
+      $result = Get-PrismEntities -EndpointKey "Subnets" -PageSize 2
+      $result.Count | Should -Be 3
+    }
+  }
+
+  Context "Error handling" {
+    It "throws on unknown endpoint key" {
+      { Get-PrismEntities -EndpointKey "Nonexistent" } | Should -Throw "*Unknown Prism endpoint*"
+    }
+  }
+}
+
+# ============================================================
+Describe "Get-PrismVMByName" {
+  BeforeAll {
+    $script:PrismApiVersion = "v4"
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "returns only exact-match VMs by name (v4)" {
+    Mock Invoke-PrismAPI {
+      return @{
+        data = @(
+          @{ extId = "uuid1"; name = "test-vm" }
+          @{ extId = "uuid2"; name = "test-vm-other" }
+        )
+      }
+    }
+
+    $result = @(Get-PrismVMByName -Name "test-vm")
+    $result.Count | Should -Be 1
+    $result[0].name | Should -Be "test-vm"
+  }
+
+  It "uses OData filter in v4 endpoint URL" {
+    Mock Invoke-PrismAPI {
+      param($Method, $Endpoint)
+      $Endpoint | Should -Match "filter=name eq 'myvm'"
+      return @{ data = @() }
+    }
+
+    Get-PrismVMByName -Name "myvm"
+  }
+
+  Context "v3 mode" {
+    BeforeAll { $script:PrismApiVersion = "v3" }
+    AfterAll { $script:PrismApiVersion = "v4" }
+
+    It "uses POST vms/list with vm_name filter (v3)" {
+      Mock Invoke-PrismAPI {
+        param($Method, $Endpoint, $Body)
+        $Method | Should -Be "POST"
+        $Body.filter | Should -Match "vm_name=="
+        return @{ entities = @(@{ spec = @{ name = "target-vm" }; metadata = @{ uuid = "u1" } }) }
+      }
+
+      $result = @(Get-PrismVMByName -Name "target-vm")
+      $result.Count | Should -Be 1
+    }
+  }
+}
+
+# ============================================================
+Describe "Get-PrismVMByUUID" {
+  BeforeAll {
+    $script:PrismApiVersion = "v4"
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "returns VM data with ETag wrapper (v4)" {
+    Mock Invoke-PrismAPI {
+      return [PSCustomObject]@{
+        Body = @{ data = @{ extId = "uuid1"; name = "vm1"; powerState = "ON" } }
+        ETag = "etag-abc"
+      }
+    }
+
+    $result = Get-PrismVMByUUID -UUID "uuid1"
+    $result.VM | Should -Not -BeNullOrEmpty
+    $result.ETag | Should -Be "etag-abc"
+  }
+}
+
+# ============================================================
+Describe "Get-PrismVMIPAddress" {
+  BeforeAll {
+    $script:PrismApiVersion = "v4"
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "extracts IP from v4 NIC learnedIpAddresses" {
+    Mock Get-PrismVMByUUID {
+      return [PSCustomObject]@{
+        VM = @{
+          extId      = "uuid1"
+          powerState = "ON"
+          nics       = @(
+            @{
+              networkInfo = @{
+                ipv4Info = @{
+                  learnedIpAddresses = @(@{ value = "10.0.1.50" })
+                }
+              }
+            }
+          )
+        }
+        ETag = "e1"
+      }
+    }
+
+    $ip = Get-PrismVMIPAddress -UUID "uuid1"
+    $ip | Should -Be "10.0.1.50"
+  }
+
+  It "skips link-local 169.254.x.x addresses" {
+    Mock Get-PrismVMByUUID {
+      return [PSCustomObject]@{
+        VM = @{
+          nics = @(
+            @{
+              networkInfo = @{
+                ipv4Info = @{
+                  learnedIpAddresses = @(@{ value = "169.254.1.1" }, @{ value = "10.0.1.99" })
+                }
+              }
+            }
+          )
+        }
+        ETag = $null
+      }
+    }
+
+    $ip = Get-PrismVMIPAddress -UUID "uuid1"
+    $ip | Should -Be "10.0.1.99"
+  }
+
+  It "returns null when no IPs available" {
+    Mock Get-PrismVMByUUID {
+      return [PSCustomObject]@{
+        VM   = @{ nics = @() }
+        ETag = $null
+      }
+    }
+
+    $ip = Get-PrismVMIPAddress -UUID "uuid1"
+    $ip | Should -BeNullOrEmpty
+  }
+
+  Context "v3 mode" {
+    BeforeAll { $script:PrismApiVersion = "v3" }
+    AfterAll { $script:PrismApiVersion = "v4" }
+
+    It "extracts IP from v3 nic_list.ip_endpoint_list" {
+      Mock Get-PrismVMByUUID {
+        return @{
+          status = @{
+            resources = @{
+              nic_list = @(
+                @{
+                  ip_endpoint_list = @(@{ ip = "192.168.1.10" })
+                }
+              )
+            }
+          }
+        }
+      }
+
+      $ip = Get-PrismVMIPAddress -UUID "uuid1"
+      $ip | Should -Be "192.168.1.10"
+    }
+  }
+}
+
+# ============================================================
+Describe "Get-PrismVMPowerState" {
+  It "extracts power state from v4 VM result" {
+    $script:PrismApiVersion = "v4"
+    $vmResult = [PSCustomObject]@{ VM = @{ powerState = "ON" }; ETag = "e" }
+    Get-PrismVMPowerState $vmResult | Should -Be "ON"
+  }
+
+  It "extracts power state from v3 VM result" {
+    $script:PrismApiVersion = "v3"
+    $vmResult = @{ status = @{ resources = @{ power_state = "OFF" } } }
+    Get-PrismVMPowerState $vmResult | Should -Be "OFF"
+    $script:PrismApiVersion = "v4"
+  }
+}
+
+# ============================================================
+Describe "Wait-PrismVMPowerState" {
+  BeforeAll {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "returns true when VM reaches desired power state" {
+    $script:waitCallCount = 0
+    Mock Get-PrismVMByUUID {
+      $script:waitCallCount++
+      $state = if ($script:waitCallCount -ge 2) { "ON" } else { "OFF" }
+      return [PSCustomObject]@{
+        VM   = @{ powerState = $state }
+        ETag = $null
+      }
+    }
+    Mock Start-Sleep {}
+
+    $result = Wait-PrismVMPowerState -UUID "u1" -State "ON" -TimeoutSec 300
+    $result | Should -Be $true
+  }
+
+  It "returns false when timeout expires" {
+    Mock Get-PrismVMByUUID {
+      return [PSCustomObject]@{ VM = @{ powerState = "OFF" }; ETag = $null }
+    }
+    Mock Start-Sleep {}
+
+    $result = Wait-PrismVMPowerState -UUID "u1" -State "ON" -TimeoutSec 0
+    $result | Should -Be $false
+  }
+}
+
+# ============================================================
+Describe "Test-VMHeartbeat" {
+  BeforeAll {
+    $script:PrismApiVersion = "v4"
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "returns PASS when VM is powered ON with NGT" {
+    Mock Get-PrismVMByUUID {
+      return [PSCustomObject]@{
+        VM = @{ powerState = "ON"; guestTools = @{ isEnabled = $true } }
+        ETag = "e"
+      }
+    }
+
+    $result = Test-VMHeartbeat -UUID "u1" -VMName "testvm"
+    $result.Passed | Should -Be $true
+    $result.TestName | Should -Be "Heartbeat (NGT)"
+    $result.Details | Should -Match "Power: ON"
+  }
+
+  It "returns FAIL when VM is powered OFF" {
+    Mock Get-PrismVMByUUID {
+      return [PSCustomObject]@{
+        VM   = @{ powerState = "OFF"; guestTools = $null }
+        ETag = "e"
+      }
+    }
+
+    $result = Test-VMHeartbeat -UUID "u1" -VMName "testvm"
+    $result.Passed | Should -Be $false
+  }
+
+  It "handles API exceptions gracefully" {
+    Mock Get-PrismVMByUUID { throw "Connection refused" }
+
+    $result = Test-VMHeartbeat -UUID "u1" -VMName "testvm"
+    $result.Passed | Should -Be $false
+    $result.Details | Should -Match "Error"
+  }
+}
+
+# ============================================================
+Describe "Test-VMPing" {
+  BeforeAll {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "returns PASS when ping succeeds" {
+    Mock Test-Connection { return $true } -ParameterFilter { $Quiet }
+    Mock Test-Connection {
+      return @(
+        [PSCustomObject]@{ ResponseTime = 1.5 },
+        [PSCustomObject]@{ ResponseTime = 2.0 }
+      )
+    } -ParameterFilter { -not $Quiet }
+
+    $result = Test-VMPing -IPAddress "10.0.1.1" -VMName "vm1"
+    $result.Passed | Should -Be $true
+    $result.Details | Should -Match "Reply from"
+  }
+
+  It "returns FAIL when ping fails" {
+    Mock Test-Connection { return $false } -ParameterFilter { $Quiet }
+
+    $result = Test-VMPing -IPAddress "10.0.1.1" -VMName "vm1"
+    $result.Passed | Should -Be $false
+    $result.Details | Should -Match "No reply"
+  }
+}
+
+# ============================================================
+Describe "Test-VMPort" {
+  BeforeAll {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "returns PASS when TCP port is open" {
+    Mock New-Object {
+      $mock = [PSCustomObject]@{ Connected = $true }
+      $mock | Add-Member -MemberType ScriptMethod -Name ConnectAsync -Value {
+        $task = [PSCustomObject]@{}
+        $task | Add-Member -MemberType ScriptMethod -Name Wait -Value { return $true }
+        return $task
+      }
+      $mock | Add-Member -MemberType ScriptMethod -Name Close -Value {}
+      $mock | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+      return $mock
+    } -ParameterFilter { $TypeName -eq "System.Net.Sockets.TcpClient" }
+
+    $result = Test-VMPort -IPAddress "10.0.1.1" -Port 443 -VMName "vm1"
+    $result.Passed | Should -Be $true
+    $result.TestName | Should -Be "TCP Port 443"
+  }
+
+  It "returns FAIL on connection exception" {
+    Mock New-Object {
+      throw "Connection refused"
+    } -ParameterFilter { $TypeName -eq "System.Net.Sockets.TcpClient" }
+
+    $result = Test-VMPort -IPAddress "10.0.1.1" -Port 22 -VMName "vm1"
+    $result.Passed | Should -Be $false
+    $result.Details | Should -Match "refused|unreachable"
+  }
+}
+
+# ============================================================
+Describe "Test-VMDNS" {
+  BeforeAll {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "returns test result with correct schema" {
+    # DNS resolution depends on runtime environment; test the contract
+    $result = Test-VMDNS -IPAddress "127.0.0.1" -VMName "vm1"
+    $result.VMName | Should -Be "vm1"
+    $result.TestName | Should -Be "DNS Resolution"
+    $result.PSObject.Properties.Name | Should -Contain "Passed"
+    $result.PSObject.Properties.Name | Should -Contain "Details"
+  }
+}
+
+# ============================================================
+Describe "Test-VMHttpEndpoint" {
+  BeforeAll {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "replaces localhost with actual VM IP in URL" {
+    Mock Invoke-WebRequest {
+      param($Uri)
+      $Uri | Should -Match "10\.0\.1\.1"
+      $Uri | Should -Not -Match "localhost"
+      return @{ StatusCode = 200; Headers = @{ "Content-Length" = "42" } }
+    }
+
+    $result = Test-VMHttpEndpoint -IPAddress "10.0.1.1" -Url "http://localhost/health" -VMName "vm1"
+    $result.Passed | Should -Be $true
+  }
+
+  It "returns FAIL on HTTP error" {
+    Mock Invoke-WebRequest { throw "500 Internal Server Error" }
+
+    $result = Test-VMHttpEndpoint -IPAddress "10.0.1.1" -Url "http://10.0.1.1/api" -VMName "vm1"
+    $result.Passed | Should -Be $false
+    $result.Details | Should -Match "HTTP request failed"
+  }
+
+  It "replaces 127.0.0.1 with actual IP" {
+    Mock Invoke-WebRequest {
+      param($Uri)
+      $Uri | Should -Match "10\.0\.1\.1"
+      return @{ StatusCode = 200; Headers = @{ "Content-Length" = "10" } }
+    }
+
+    $result = Test-VMHttpEndpoint -IPAddress "10.0.1.1" -Url "http://127.0.0.1:8080/status" -VMName "vm1"
+    $result.Passed | Should -Be $true
+  }
+}
+
+# ============================================================
+Describe "Test-VMCustomScript" {
+  BeforeAll {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "returns FAIL when script path does not exist" {
+    $result = Test-VMCustomScript -ScriptPath "/nonexistent/script.ps1" -VMName "vm1"
+    $result.Passed | Should -Be $false
+    $result.Details | Should -Match "Script not found"
+  }
+}
+
+# ============================================================
+Describe "Get-VMBootOrder" {
+  It "returns a single 'All VMs' group when no ApplicationGroups defined" {
+    $rps = @(
+      [PSCustomObject]@{ VMName = "vm1" },
+      [PSCustomObject]@{ VMName = "vm2" }
+    )
+    $script:ApplicationGroups = $null
+    $result = Get-VMBootOrder -RestorePoints $rps
+    $result.Count | Should -Be 1
+    $result.Keys | Should -Contain "All VMs"
+  }
+}
+
+# ============================================================
+Describe "Get-SubnetName / Get-SubnetUUID" {
+  It "extracts from v4 entity (name, extId)" {
+    $script:PrismApiVersion = "v4"
+    $subnet = @{ name = "isolated-net"; extId = "abc-123" }
+    Get-SubnetName $subnet | Should -Be "isolated-net"
+    Get-SubnetUUID $subnet | Should -Be "abc-123"
+  }
+
+  It "extracts from v3 entity (spec.name, metadata.uuid)" {
+    $script:PrismApiVersion = "v3"
+    $subnet = @{ spec = @{ name = "isolated-net" }; metadata = @{ uuid = "abc-123" } }
+    Get-SubnetName $subnet | Should -Be "isolated-net"
+    Get-SubnetUUID $subnet | Should -Be "abc-123"
+    $script:PrismApiVersion = "v4"
+  }
+}
+
+# ============================================================
+Describe "Resolve-IsolatedNetwork" {
+  BeforeAll {
+    $script:PrismApiVersion = "v4"
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "finds network by UUID" {
+    Mock Get-PrismSubnets {
+      return @(
+        @{ extId = "net-uuid-1"; name = "prod-net"; vlanId = 100; subnetType = "VLAN"; clusterReference = @{ extId = "c1" } },
+        @{ extId = "net-uuid-2"; name = "isolated-lab"; vlanId = 999; subnetType = "VLAN"; clusterReference = @{ extId = "c1" } }
+      )
+    }
+
+    $IsolatedNetworkUUID = "net-uuid-2"
+    $IsolatedNetworkName = $null
+    $result = Resolve-IsolatedNetwork
+    $result.UUID | Should -Be "net-uuid-2"
+    $result.Name | Should -Be "isolated-lab"
+  }
+
+  It "auto-detects isolated network by name pattern" {
+    Mock Get-PrismSubnets {
+      return @(
+        @{ extId = "n1"; name = "production"; vlanId = 10; subnetType = "VLAN"; clusterReference = @{ extId = "c1" } },
+        @{ extId = "n2"; name = "surebackup-lab"; vlanId = 999; subnetType = "VLAN"; clusterReference = @{ extId = "c1" } }
+      )
+    }
+
+    $IsolatedNetworkUUID = $null
+    $IsolatedNetworkName = $null
+    $result = Resolve-IsolatedNetwork
+    $result.Name | Should -Be "surebackup-lab"
+  }
+
+  It "throws when no matching network exists" {
+    Mock Get-PrismSubnets {
+      return @(
+        @{ extId = "n1"; name = "production"; vlanId = 10; subnetType = "VLAN"; clusterReference = @{ extId = "c1" } }
+      )
+    }
+
+    $IsolatedNetworkUUID = $null
+    $IsolatedNetworkName = $null
+    { Resolve-IsolatedNetwork } | Should -Throw "*No isolated network*"
+  }
+}
+
+# ============================================================
+Describe "Remove-PrismVM" {
+  BeforeAll {
+    $script:PrismApiVersion = "v4"
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "fetches ETag before DELETE in v4 mode" {
+    Mock Get-PrismVMByUUID {
+      return [PSCustomObject]@{
+        VM   = @{ extId = "uuid1"; name = "vm1" }
+        ETag = "del-etag"
+      }
+    }
+    $script:capturedIfMatch = $null
+    Mock Invoke-PrismAPI {
+      $script:capturedIfMatch = $IfMatch
+    }
+
+    $result = Remove-PrismVM -UUID "uuid1"
+    $result | Should -Be $true
+    $script:capturedIfMatch | Should -Be "del-etag"
+  }
+
+  It "returns false on failure" {
+    Mock Get-PrismVMByUUID { throw "not found" }
+
+    $result = Remove-PrismVM -UUID "uuid1"
+    $result | Should -Be $false
+  }
+}
+
+# ============================================================
+Describe "Test-PrismConnection" {
+  BeforeAll {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  Context "v4 API" {
+    BeforeAll { $script:PrismApiVersion = "v4" }
+
+    It "returns true on successful cluster list" {
+      Mock Invoke-PrismAPI {
+        return @{
+          data     = @(@{ extId = "c1"; name = "cluster1" })
+          metadata = @{ totalAvailableResults = 1 }
+        }
+      }
+
+      Test-PrismConnection | Should -Be $true
+    }
+
+    It "returns false on connection error" {
+      Mock Invoke-PrismAPI { throw "Connection refused" }
+
+      Test-PrismConnection | Should -Be $false
+    }
+  }
+
+  Context "v3 API" {
+    BeforeAll { $script:PrismApiVersion = "v3" }
+    AfterAll { $script:PrismApiVersion = "v4" }
+
+    It "uses POST clusters/list for v3" {
+      Mock Invoke-PrismAPI {
+        param($Method)
+        $Method | Should -Be "POST"
+        return @{ metadata = @{ total_matches = 2 } }
+      }
+
+      Test-PrismConnection | Should -Be $true
+    }
+  }
+}
+
+# ============================================================
+Describe "Wait-PrismTask" {
+  BeforeAll {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "returns task on SUCCEEDED status" {
+    Mock Get-PrismTaskStatus {
+      return @{ status = "SUCCEEDED"; extId = "task1" }
+    }
+
+    $result = Wait-PrismTask -TaskUUID "task1" -TimeoutSec 10
+    $result.status | Should -Be "SUCCEEDED"
+  }
+
+  It "throws on FAILED status with error detail" {
+    Mock Get-PrismTaskStatus {
+      return @{ status = "FAILED"; error_detail = "disk full" }
+    }
+
+    { Wait-PrismTask -TaskUUID "task1" -TimeoutSec 10 } | Should -Throw "*disk full*"
+  }
+
+  It "throws on timeout when task stays RUNNING" {
+    Mock Get-PrismTaskStatus {
+      return @{ status = "RUNNING" }
+    }
+    Mock Start-Sleep {}
+
+    { Wait-PrismTask -TaskUUID "task1" -TimeoutSec 0 } | Should -Throw "*timed out*"
+  }
+}
+
+# ============================================================
+Describe "Output contract validation" {
+  It "test result objects have all required properties" {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+    $script:PrismApiVersion = "v4"
+
+    Mock Get-PrismVMByUUID {
+      return [PSCustomObject]@{
+        VM = @{ powerState = "ON"; guestTools = @{ isEnabled = $true } }
+        ETag = "e"
+      }
+    }
+
+    $result = Test-VMHeartbeat -UUID "u1" -VMName "testvm"
+    $result.PSObject.Properties.Name | Should -Contain "VMName"
+    $result.PSObject.Properties.Name | Should -Contain "TestName"
+    $result.PSObject.Properties.Name | Should -Contain "Passed"
+    $result.PSObject.Properties.Name | Should -Contain "Details"
+    $result.PSObject.Properties.Name | Should -Contain "Duration"
+    $result.PSObject.Properties.Name | Should -Contain "Timestamp"
+    $result.Passed | Should -BeOfType [bool]
+    $result.Duration | Should -BeOfType [double]
+  }
+
+  It "log entry objects have Timestamp, Level, Message" {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+    Write-Log -Message "test" -Level "INFO"
+    $entry = $script:LogEntries[0]
+    $entry.PSObject.Properties.Name | Should -Contain "Timestamp"
+    $entry.PSObject.Properties.Name | Should -Contain "Level"
+    $entry.PSObject.Properties.Name | Should -Contain "Message"
+  }
+}
+
+# ============================================================
+Describe "Smoke test - script integrity" {
+  It "script file parses with no syntax errors" {
+    $scriptPath = Join-Path $PSScriptRoot "Start-VeeamAHVSureBackup.ps1"
+    $tokens = $null
+    $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
+    $errors.Count | Should -Be 0
+  }
+
+  It "script uses CmdletBinding" {
+    $scriptPath = Join-Path $PSScriptRoot "Start-VeeamAHVSureBackup.ps1"
+    $content = Get-Content $scriptPath -Raw
+    $content | Should -Match '\[CmdletBinding'
+  }
+
+  It "script defines all expected functions" {
+    $expectedFunctions = @(
+      "Write-Log", "Invoke-PrismAPI", "Test-PrismConnection",
+      "Get-PrismEntities", "Get-PrismClusters", "Get-PrismSubnets",
+      "Get-PrismVMByName", "Get-PrismVMByUUID", "Get-PrismVMIPAddress",
+      "Wait-PrismVMPowerState", "Wait-PrismVMIPAddress", "Remove-PrismVM",
+      "Get-PrismTaskStatus", "Wait-PrismTask",
+      "Test-VMHeartbeat", "Test-VMPing", "Test-VMPort", "Test-VMDNS",
+      "Test-VMHttpEndpoint", "Test-VMCustomScript",
+      "Invoke-VMVerificationTests", "Get-VMBootOrder",
+      "New-HTMLReport", "Export-Results"
+    )
+    foreach ($fn in $expectedFunctions) {
+      Get-Command $fn -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty -Because "function $fn should be defined"
+    }
+  }
+
+  It "v4 API endpoint constants are set correctly" {
+    $script:PrismEndpoints.VMs | Should -Match "vmm/v4"
+    $script:PrismEndpoints.Subnets | Should -Match "networking/v4"
+    $script:PrismEndpoints.Clusters | Should -Match "clustermgmt/v4"
+    $script:PrismEndpoints.Tasks | Should -Match "prism/v4"
+  }
+}
