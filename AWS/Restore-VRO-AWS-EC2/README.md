@@ -1,6 +1,6 @@
 # Restore-VRO-AWS-EC2 - VRO Plan Step: Restore Veeam Backups to Amazon EC2
 
-PowerShell script that bridges Veeam Recovery Orchestrator (VRO) and AWS by enabling automated restore of Veeam backups stored in S3 (direct repository or SOBR capacity tier) to Amazon EC2 instances.
+PowerShell script that bridges Veeam Recovery Orchestrator (VRO) and AWS by enabling automated restore of Veeam backups stored in S3 (direct repository or SOBR capacity tier) to Amazon EC2 instances. Includes enterprise features for ransomware recovery, SLA tracking, and DR drill automation.
 
 ## Features
 
@@ -16,6 +16,23 @@ PowerShell script that bridges Veeam Recovery Orchestrator (VRO) and AWS by enab
 - **Dry run mode** — Validate parameters and connectivity without executing restore
 - **Exponential backoff retry** for transient failures
 
+### Enterprise Features (v2.0)
+
+| Feature | Description |
+|---------|-------------|
+| **Network Isolation** | Isolated security group for clean room ransomware recovery |
+| **Application Health Checks** | TCP port, HTTP endpoint, and SSM in-guest verification |
+| **SLA/RTO Tracking** | Measures actual vs target RTO with compliance reporting |
+| **Credential Refresh** | Auto-refreshes STS credentials during long restores |
+| **Rollback on Failure** | Terminates orphaned resources when restore fails |
+| **CloudWatch Alarms** | Creates CPU and status check alarms on restored instances |
+| **Route53 DNS Failover** | Updates DNS records after successful restore |
+| **SSM Post-Restore Scripts** | Executes configuration documents on restored instances |
+| **DR Drill Mode** | Restore, validate, keep alive, auto-terminate with compliance report |
+| **Compliance Audit Trail** | Structured JSONL event log for regulatory compliance |
+| **AZ-Level Validation** | Validates instance type availability in target Availability Zone |
+| **Private IP Check** | Detects IP collisions before restore |
+
 ## Prerequisites
 
 - PowerShell 5.1+ (7.x recommended)
@@ -26,6 +43,14 @@ PowerShell script that bridges Veeam Recovery Orchestrator (VRO) and AWS by enab
   - `AWS.Tools.SecurityToken` (for STS AssumeRole)
   - `AWS.Tools.S3` (optional, for backup validation)
 - VRO Compatibility: Veeam Recovery Orchestrator 7.0+
+
+### Optional AWS Modules
+
+| Module | Required For |
+|--------|-------------|
+| `AWS.Tools.SimpleSystemsManagement` | SSM health checks and post-restore scripts |
+| `AWS.Tools.CloudWatch` | CloudWatch alarm creation |
+| `AWS.Tools.Route53` | DNS record updates |
 
 ## Quick Start
 
@@ -47,6 +72,31 @@ PowerShell script that bridges Veeam Recovery Orchestrator (VRO) and AWS by enab
 .\Restore-VRO-AWS-EC2.ps1 -BackupName "WebServer" -AWSRegion "us-east-1" `
   -AWSRoleArn "arn:aws:iam::123456789012:role/VeeamRestoreRole" `
   -AWSExternalId "VeeamDR2026" -DryRun
+```
+
+### Advanced Examples
+
+```powershell
+# Ransomware recovery with network isolation
+.\Restore-VRO-AWS-EC2.ps1 -BackupName "DC-Backup" -UseLatestCleanPoint `
+  -AWSRegion "us-west-2" -IsolateNetwork -CleanupOnFailure `
+  -HealthCheckPorts @(3389) -RTOTargetMinutes 60
+
+# DR drill with compliance audit
+.\Restore-VRO-AWS-EC2.ps1 -BackupName "SAP-Production" -VMName "SAP-APP01" `
+  -AWSRegion "eu-west-1" -DRDrillMode -DRDrillKeepMinutes 15 `
+  -EnableAuditTrail -HealthCheckPorts @(443, 1433) -RTOTargetMinutes 120
+
+# Full enterprise restore with DNS, CloudWatch, and SSM
+.\Restore-VRO-AWS-EC2.ps1 -BackupName "WebServer" -AWSRegion "us-east-1" `
+  -VPCId "vpc-abc123" -SubnetId "subnet-def456" `
+  -InstanceType "m5.xlarge" -EncryptVolumes `
+  -HealthCheckPorts @(80, 443) -HealthCheckUrls @("http://localhost/health") `
+  -Route53HostedZoneId "Z1234567" -Route53RecordName "app.dr.example.com" `
+  -CreateCloudWatchAlarms -CloudWatchSNSTopicArn "arn:aws:sns:us-east-1:123456789012:DR-Alerts" `
+  -PostRestoreSSMDocument "AWS-RunPowerShellScript" `
+  -PostRestoreSSMParameters @{ commands = @("Set-Service -Name 'AppService' -StartupType Automatic") } `
+  -RTOTargetMinutes 90 -EnableAuditTrail
 ```
 
 ## Parameters
@@ -75,6 +125,7 @@ PowerShell script that bridges Veeam Recovery Orchestrator (VRO) and AWS by enab
 | `-AWSRoleArn` | String | | IAM Role ARN for STS AssumeRole |
 | `-AWSExternalId` | String | | External ID for STS AssumeRole |
 | `-AWSSessionDuration` | Int | `3600` | STS session duration in seconds |
+| `-EnableCredentialRefresh` | Switch | | Auto-refresh STS creds during long restores |
 
 ### EC2 Target Configuration
 | Parameter | Type | Default | Description |
@@ -82,26 +133,39 @@ PowerShell script that bridges Veeam Recovery Orchestrator (VRO) and AWS by enab
 | `-VPCId` | String | | Target VPC ID (auto-selects default VPC) |
 | `-SubnetId` | String | | Target subnet ID |
 | `-SecurityGroupIds` | String[] | | Security group IDs |
-| `-InstanceType` | String | `t3.medium` | EC2 instance type |
+| `-InstanceType` | String | `t3.medium` | EC2 instance type (validated per AZ) |
 | `-KeyPairName` | String | | EC2 key pair for SSH access |
 
 ### Restore Options
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-RestoreMode` | String | `FullRestore` | `FullRestore` or `InstantRestore` |
+| `-RestoreMode` | String | `FullRestore` | `FullRestore` (InstantRestore not yet supported) |
 | `-EC2InstanceName` | String | `Restored-<VM>-<timestamp>` | Name tag for restored instance |
-| `-Tags` | Hashtable | `@{}` | Additional tags for restored resources |
+| `-Tags` | Hashtable | `@{}` | Additional tags (AWS 50-tag limit enforced) |
 | `-DiskType` | String | `gp3` | EBS volume type |
 | `-EncryptVolumes` | Switch | | Encrypt EBS volumes with KMS |
 | `-KMSKeyId` | String | | KMS key for encryption |
 | `-PowerOnAfterRestore` | Bool | `$true` | Start instance after restore |
 
-### Validation
+### Network Isolation
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-SkipValidation` | Switch | | Skip post-restore health checks |
+| `-IsolateNetwork` | Switch | | Create isolated SG blocking all traffic |
+| `-IsolatedSGName` | String | `VeeamIsolated-<timestamp>` | Custom name for isolated SG |
+
+### Validation & Health Checks
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-SkipValidation` | Switch | | Skip all post-restore checks |
 | `-ValidationTimeoutMinutes` | Int | `15` | Max wait for validation |
-| `-RestoreTimeoutMinutes` | Int | `120` | Max wait for restore completion |
+| `-HealthCheckPorts` | Int[] | | TCP ports to verify (e.g., `22, 443, 3389`) |
+| `-HealthCheckUrls` | String[] | | HTTP endpoints to verify |
+| `-SSMHealthCheckCommand` | String | | SSM command to run inside the VM |
+
+### SLA/RTO Tracking
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-RTOTargetMinutes` | Int | | Target RTO in minutes (tracked in report) |
 
 ### VRO Integration
 | Parameter | Type | Description |
@@ -110,15 +174,43 @@ PowerShell script that bridges Veeam Recovery Orchestrator (VRO) and AWS by enab
 | `-VROStepName` | String | VRO plan step name |
 | `-DryRun` | Switch | Validate without executing |
 
+### Rollback & DR Drill
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-CleanupOnFailure` | Switch | | Terminate resources on failure |
+| `-DRDrillMode` | Switch | | Full drill: restore, validate, auto-terminate |
+| `-DRDrillKeepMinutes` | Int | `30` | Keep-alive duration in drill mode |
+
+### CloudWatch & Route53
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-CreateCloudWatchAlarms` | Switch | | Create CPU/status check alarms |
+| `-CloudWatchSNSTopicArn` | String | | SNS topic for alarm notifications |
+| `-Route53HostedZoneId` | String | | Route53 zone for DNS update |
+| `-Route53RecordName` | String | | DNS record to create/update |
+| `-Route53RecordType` | String | `A` | `A` or `CNAME` |
+
+### SSM Post-Restore Scripts
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-PostRestoreSSMDocument` | String | | SSM document to execute post-restore |
+| `-PostRestoreSSMParameters` | Hashtable | `@{}` | Parameters for the SSM document |
+
+### Compliance
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `-EnableAuditTrail` | Switch | Write JSONL audit event log |
+
 ## Outputs
 
 Each run creates a timestamped folder with:
 
 | File | Description |
 |------|-------------|
-| `Restore-Log-*.txt` | Execution log |
-| `Restore-Report-*.html` | Professional HTML restore report |
+| `Restore-Log-*.txt` | Execution log with timestamps and levels |
+| `Restore-Report-*.html` | HTML report with SLA/RTO and health check results |
 | `Restore-Result-*.json` | Machine-readable result with instance details |
+| `Restore-AuditTrail-*.jsonl` | Compliance audit trail (when `-EnableAuditTrail` is set) |
 
 ## Exit Codes
 
@@ -134,7 +226,7 @@ Authentication follows IAM best practices in priority order:
 2. **Named Profile** — AWS CLI profile via `-AWSProfile`
 3. **Default credential chain** — IAM Instance Profile or environment variables (auto-detected)
 
-No plaintext credentials are accepted.
+No plaintext credentials are accepted. STS sessions are automatically refreshed when `-EnableCredentialRefresh` is set.
 
 ## Resource Tagging
 
@@ -143,3 +235,18 @@ All restored resources (EC2 instance, EBS volumes, network interfaces) are autom
 - `veeam:vro-plan`, `veeam:vro-step`, `veeam:restore-mode`
 - `ManagedBy: VeeamVRO`
 - Any additional tags provided via the `-Tags` parameter
+
+AWS 50-tag limit is enforced. Standard tags are preserved; user tags are truncated if the limit is exceeded.
+
+## Testing
+
+```powershell
+# Install Pester 5.x
+Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser
+
+# Run all tests
+Invoke-Pester ./Restore-VRO-AWS-EC2.Tests.ps1 -Output Detailed
+
+# Run with code coverage
+Invoke-Pester ./Restore-VRO-AWS-EC2.Tests.ps1 -CodeCoverage ./Restore-VRO-AWS-EC2.ps1
+```
