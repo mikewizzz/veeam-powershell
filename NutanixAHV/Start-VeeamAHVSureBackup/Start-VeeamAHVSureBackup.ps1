@@ -44,6 +44,11 @@
 .PARAMETER PrismCredential
   PSCredential for Prism Central authentication (required).
 
+.PARAMETER PrismApiVersion
+  Prism Central API version to use: "v4" (default, GA in pc.2024.3+) or "v3" (legacy).
+  v4 uses namespace-based endpoints (vmm, networking, clustermgmt), ETag concurrency,
+  NTNX-Request-Id idempotency, and OData filtering. Use "v3" for older Prism Central.
+
 .PARAMETER SkipCertificateCheck
   Skip TLS certificate validation for self-signed Prism certificates (lab environments).
 
@@ -132,12 +137,12 @@
   # Custom application-level verification script
 
 .NOTES
-  Version: 1.0.0
+  Version: 1.1.0
   Author: Community Contributors
-  Date: 2026-02-15
+  Date: 2026-02-22
   Requires: PowerShell 5.1+ (7.x recommended)
   Modules: Veeam.Backup.PowerShell (VBR Console), VeeamPSSnapin (legacy)
-  Nutanix: Prism Central v3 API (pc.2024.1+)
+  Nutanix: Prism Central v4 API (pc.2024.3+ GA, default) or v3 (legacy)
   VBR: Veeam Backup & Replication v12.3+ with Nutanix AHV plugin
 #>
 
@@ -145,16 +150,22 @@
 param(
   # VBR Connection
   [Parameter(Mandatory = $true)]
+  [ValidateNotNullOrEmpty()]
   [string]$VBRServer,
+  [ValidateRange(1, 65535)]
   [int]$VBRPort = 9419,
   [PSCredential]$VBRCredential,
 
   # Nutanix Prism Central Connection
   [Parameter(Mandatory = $true)]
+  [ValidateNotNullOrEmpty()]
   [string]$PrismCentral,
+  [ValidateRange(1, 65535)]
   [int]$PrismPort = 9440,
   [Parameter(Mandatory = $true)]
   [PSCredential]$PrismCredential,
+  [ValidateSet("v4", "v3")]
+  [string]$PrismApiVersion = "v4",
   [switch]$SkipCertificateCheck,
 
   # Backup Scope
@@ -177,9 +188,12 @@ param(
   [ValidateRange(60, 1800)]
   [int]$TestBootTimeoutSec = 300,
   [bool]$TestPing = $true,
+  [ValidateScript({ foreach ($p in $_) { if ($p -lt 1 -or $p -gt 65535) { throw "Port $p is out of valid range (1-65535)" } }; $true })]
   [int[]]$TestPorts,
   [switch]$TestDNS,
+  [ValidateScript({ foreach ($u in $_) { if ($u -notmatch '^https?://') { throw "Endpoint '$u' must start with http:// or https://" } }; $true })]
   [string[]]$TestHttpEndpoints,
+  [ValidateScript({ if ($_ -and -not (Test-Path $_)) { throw "Custom script not found: $_" }; $true })]
   [string]$TestCustomScript,
 
   # Application Groups (boot order)
@@ -205,10 +219,31 @@ $script:StartTime = Get-Date
 $script:LogEntries = New-Object System.Collections.Generic.List[object]
 $script:TestResults = New-Object System.Collections.Generic.List[object]
 $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
-$script:PrismBaseUrl = "https://${PrismCentral}:${PrismPort}/api/nutanix/v3"
 $script:PrismHeaders = @{}
 $script:TotalSteps = 8
 $script:CurrentStep = 0
+
+# API version-aware base URL and endpoint mapping
+$script:PrismOrigin = "https://${PrismCentral}:${PrismPort}"
+if ($PrismApiVersion -eq "v4") {
+  $script:PrismBaseUrl = "$($script:PrismOrigin)/api"
+  # v4 namespace-based endpoints (GA in pc.2024.3+)
+  $script:PrismEndpoints = @{
+    VMs      = "vmm/v4.0/ahv/config/vms"
+    Subnets  = "networking/v4.0/config/subnets"
+    Clusters = "clustermgmt/v4.0/config/clusters"
+    Tasks    = "prism/v4.0/config/tasks"
+  }
+}
+else {
+  $script:PrismBaseUrl = "$($script:PrismOrigin)/api/nutanix/v3"
+  $script:PrismEndpoints = @{
+    VMs      = "vms"
+    Subnets  = "subnets"
+    Clusters = "clusters"
+    Tasks    = "tasks"
+  }
+}
 
 # Output folder
 if (-not $OutputPath) {
@@ -263,7 +298,7 @@ function Write-Banner {
   $banner = @"
 
   ╔══════════════════════════════════════════════════════════════════╗
-  ║          Veeam SureBackup for Nutanix AHV  v1.0.0              ║
+  ║          Veeam SureBackup for Nutanix AHV  v1.1.0              ║
   ║          Automated Backup Verification & Recovery Testing       ║
   ╚══════════════════════════════════════════════════════════════════╝
 
@@ -280,7 +315,7 @@ function Write-Banner {
 
 #region Nutanix Prism Central REST API
 # =============================
-# Nutanix Prism Central REST API v3
+# Nutanix Prism Central REST API (v3 + v4)
 # =============================
 
 function Initialize-PrismConnection {
@@ -312,12 +347,16 @@ public class TrustAllCertsPolicy : ICertificatePolicy {
     Write-Log "TLS certificate validation disabled (lab mode)" -Level "WARNING"
   }
 
-  # Build Basic Auth header
+  # Build Basic Auth header — clear plaintext password from memory promptly
   $username = $PrismCredential.UserName
-  $password = $PrismCredential.GetNetworkCredential().Password
-  $pair = "${username}:${password}"
+  $networkCred = $PrismCredential.GetNetworkCredential()
+  $pair = "${username}:$($networkCred.Password)"
   $bytes = [System.Text.Encoding]::ASCII.GetBytes($pair)
   $base64 = [System.Convert]::ToBase64String($bytes)
+
+  # Zero out temporary byte array and string references
+  [Array]::Clear($bytes, 0, $bytes.Length)
+  Remove-Variable -Name pair, networkCred -ErrorAction SilentlyContinue
 
   $script:PrismHeaders = @{
     "Authorization" = "Basic $base64"
@@ -331,32 +370,60 @@ public class TrustAllCertsPolicy : ICertificatePolicy {
 function Invoke-PrismAPI {
   <#
   .SYNOPSIS
-    Execute a Prism Central v3 REST API call with retry logic
+    Execute a Prism Central REST API call with retry logic, rate-limit
+    handling, correlation IDs, and deterministic timeouts.
+    Supports both v3 and v4 API conventions.
   .PARAMETER Method
     HTTP method (GET, POST, PUT, DELETE)
   .PARAMETER Endpoint
     API endpoint path (appended to base URL)
   .PARAMETER Body
     Request body hashtable (converted to JSON)
+  .PARAMETER IfMatch
+    ETag value for v4 PUT/DELETE concurrency control (If-Match header)
   .PARAMETER RetryCount
     Number of retries on transient failure (default: 3)
+  .PARAMETER TimeoutSec
+    Per-request timeout in seconds (default: 30)
+  .OUTPUTS
+    For v4 PUT/DELETE with ETag, returns a PSCustomObject with .Body and .ETag.
+    Otherwise returns the parsed response body.
   #>
   param(
     [Parameter(Mandatory = $true)][string]$Method,
     [Parameter(Mandatory = $true)][string]$Endpoint,
     [hashtable]$Body,
-    [int]$RetryCount = 3
+    [string]$IfMatch,
+    [int]$RetryCount = 3,
+    [int]$TimeoutSec = 30
   )
 
   $url = "$($script:PrismBaseUrl)/$Endpoint"
   $attempt = 0
+  $correlationId = [guid]::NewGuid().ToString("N").Substring(0, 12)
+
+  # v4 mutations require NTNX-Request-Id for idempotency
+  $needsRequestId = ($PrismApiVersion -eq "v4" -and $Method -in @("POST", "PUT", "DELETE"))
+  # Capture response headers when we may need ETags (v4 GET)
+  $captureHeaders = ($PrismApiVersion -eq "v4")
 
   while ($attempt -le $RetryCount) {
     try {
+      $requestHeaders = $script:PrismHeaders.Clone()
+      $requestHeaders["X-Request-Id"] = $correlationId
+
+      if ($needsRequestId) {
+        $requestHeaders["NTNX-Request-Id"] = [guid]::NewGuid().ToString()
+      }
+      if ($IfMatch) {
+        $requestHeaders["If-Match"] = $IfMatch
+      }
+
       $params = @{
-        Method  = $Method
-        Uri     = $url
-        Headers = $script:PrismHeaders
+        Method      = $Method
+        Uri         = $url
+        Headers     = $requestHeaders
+        TimeoutSec  = $TimeoutSec
       }
 
       if ($Body) {
@@ -367,17 +434,61 @@ function Invoke-PrismAPI {
         $params.SkipCertificateCheck = $true
       }
 
+      # v4 ETag values may contain characters that PS rejects without this
+      if ($IfMatch -and $PSVersionTable.PSVersion.Major -ge 7) {
+        $params.SkipHeaderValidation = $true
+      }
+
+      # Capture response headers for ETag on v4
+      if ($captureHeaders -and $PSVersionTable.PSVersion.Major -ge 7) {
+        $params.ResponseHeadersVariable = "respHeaders"
+      }
+
       $response = Invoke-RestMethod @params -ErrorAction Stop
+
+      # Return ETag alongside body for v4 so callers can do updates
+      if ($captureHeaders -and $PSVersionTable.PSVersion.Major -ge 7 -and $respHeaders -and $respHeaders.ContainsKey("ETag")) {
+        return [PSCustomObject]@{ Body = $response; ETag = $respHeaders["ETag"][0] }
+      }
       return $response
     }
     catch {
-      $attempt++
-      if ($attempt -gt $RetryCount) {
-        Write-Log "Prism API call failed after $RetryCount retries: $Method $Endpoint - $($_.Exception.Message)" -Level "ERROR"
+      $statusCode = $null
+      if ($_.Exception.Response) {
+        $statusCode = [int]$_.Exception.Response.StatusCode
+      }
+
+      # Non-retryable client errors (except 429)
+      if ($statusCode -and $statusCode -ge 400 -and $statusCode -lt 500 -and $statusCode -ne 429) {
+        Write-Log "Prism API client error ($statusCode) [correlation=$correlationId]: $Method $Endpoint - $($_.Exception.Message)" -Level "ERROR"
         throw
       }
-      $waitSec = [math]::Pow(2, $attempt)
-      Write-Log "Prism API transient failure (attempt $attempt/$RetryCount), retrying in ${waitSec}s: $($_.Exception.Message)" -Level "WARNING"
+
+      $attempt++
+      if ($attempt -gt $RetryCount) {
+        Write-Log "Prism API call failed after $RetryCount retries [correlation=$correlationId]: $Method $Endpoint - $($_.Exception.Message)" -Level "ERROR"
+        throw
+      }
+
+      # Rate-limit: honour Retry-After header if present
+      $waitSec = $null
+      if ($statusCode -eq 429 -and $_.Exception.Response.Headers) {
+        try {
+          $retryAfter = $_.Exception.Response.Headers | Where-Object { $_.Key -eq "Retry-After" } | Select-Object -ExpandProperty Value -First 1
+          if ($retryAfter) { $waitSec = [int]$retryAfter }
+        }
+        catch { }
+      }
+
+      if (-not $waitSec) {
+        # Exponential backoff with jitter: base * 2^attempt + random(0..base)
+        $baseSec = [math]::Min([int]([math]::Pow(2, $attempt)), 30)
+        $jitter = Get-Random -Minimum 0 -Maximum ([math]::Max(1, $baseSec))
+        $waitSec = $baseSec + $jitter
+      }
+
+      $reason = if ($statusCode -eq 429) { "rate-limited (429)" } else { "transient failure" }
+      Write-Log "Prism API $reason (attempt $attempt/$RetryCount) [correlation=$correlationId], retrying in ${waitSec}s: $($_.Exception.Message)" -Level "WARNING"
       Start-Sleep -Seconds $waitSec
     }
   }
@@ -386,14 +497,21 @@ function Invoke-PrismAPI {
 function Test-PrismConnection {
   <#
   .SYNOPSIS
-    Validate Prism Central connectivity and credentials
+    Validate Prism Central connectivity and credentials (v3 and v4)
   #>
-  Write-Log "Testing Prism Central connectivity: $PrismCentral`:$PrismPort" -Level "INFO"
+  Write-Log "Testing Prism Central connectivity ($PrismApiVersion): $PrismCentral`:$PrismPort" -Level "INFO"
 
   try {
-    $cluster = Invoke-PrismAPI -Method "POST" -Endpoint "clusters/list" -Body @{ kind = "cluster"; length = 1 }
-    $clusterCount = $cluster.metadata.total_matches
-    Write-Log "Prism Central connected - $clusterCount cluster(s) visible" -Level "SUCCESS"
+    if ($PrismApiVersion -eq "v4") {
+      $result = Invoke-PrismAPI -Method "GET" -Endpoint "$($script:PrismEndpoints.Clusters)?`$limit=1"
+      $raw = if ($result.Body) { $result.Body } else { $result }
+      $clusterCount = if ($raw.metadata.totalAvailableResults) { $raw.metadata.totalAvailableResults } else { ($raw.data | Measure-Object).Count }
+    }
+    else {
+      $result = Invoke-PrismAPI -Method "POST" -Endpoint "clusters/list" -Body @{ kind = "cluster"; length = 1 }
+      $clusterCount = $result.metadata.total_matches
+    }
+    Write-Log "Prism Central connected ($PrismApiVersion) - $clusterCount cluster(s) visible" -Level "SUCCESS"
     return $true
   }
   catch {
@@ -402,49 +520,145 @@ function Test-PrismConnection {
   }
 }
 
+function Resolve-PrismResponseBody {
+  <#
+  .SYNOPSIS
+    Unwrap Invoke-PrismAPI response that may contain .Body/.ETag wrapper
+  #>
+  param([Parameter(Mandatory = $true)]$Response)
+  if ($Response -and $Response.PSObject.Properties.Name -contains "Body" -and $Response.PSObject.Properties.Name -contains "ETag") {
+    return $Response.Body
+  }
+  return $Response
+}
+
+function Get-PrismEntities {
+  <#
+  .SYNOPSIS
+    Retrieve all entities from Prism Central with automatic pagination.
+    Supports both v3 (POST list) and v4 (GET with OData) conventions.
+  .PARAMETER EndpointKey
+    Key into $script:PrismEndpoints (e.g., "Clusters", "Subnets", "VMs")
+  .PARAMETER Filter
+    v3: filter string in body; v4: OData $filter query parameter
+  .PARAMETER PageSize
+    Entities per page (v3 max 500, v4 max 100)
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$EndpointKey,
+    [string]$Filter,
+    [int]$PageSize
+  )
+
+  $endpoint = $script:PrismEndpoints[$EndpointKey]
+  if (-not $endpoint) { throw "Unknown Prism endpoint key: $EndpointKey" }
+
+  $allEntities = New-Object System.Collections.Generic.List[object]
+
+  if ($PrismApiVersion -eq "v4") {
+    if (-not $PageSize) { $PageSize = 100 }
+    $page = 0
+
+    do {
+      $qs = "`$page=$page&`$limit=$PageSize"
+      if ($Filter) { $qs += "&`$filter=$Filter" }
+
+      $raw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint "${endpoint}?${qs}")
+
+      if ($raw.data) {
+        foreach ($entity in $raw.data) {
+          $allEntities.Add($entity)
+        }
+      }
+
+      $totalAvailable = if ($raw.metadata.totalAvailableResults) { $raw.metadata.totalAvailableResults } else { 0 }
+      $page++
+    } while (($page * $PageSize) -lt $totalAvailable)
+  }
+  else {
+    # v3: POST-based pagination
+    if (-not $PageSize) { $PageSize = 250 }
+    # Derive v3 kind from endpoint key
+    $kindMap = @{ Clusters = "cluster"; Subnets = "subnet"; VMs = "vm" }
+    $kind = $kindMap[$EndpointKey]
+    if (-not $kind) { $kind = $EndpointKey.ToLower().TrimEnd("s") }
+    $offset = 0
+
+    do {
+      $body = @{ kind = $kind; length = $PageSize; offset = $offset }
+      if ($Filter) { $body.filter = $Filter }
+
+      $result = Invoke-PrismAPI -Method "POST" -Endpoint "${kind}s/list" -Body $body
+
+      if ($result.entities) {
+        foreach ($entity in $result.entities) {
+          $allEntities.Add($entity)
+        }
+      }
+
+      $totalMatches = if ($result.metadata.total_matches) { $result.metadata.total_matches } else { 0 }
+      $offset += $PageSize
+    } while ($offset -lt $totalMatches)
+  }
+
+  return $allEntities
+}
+
 function Get-PrismClusters {
   <#
   .SYNOPSIS
-    Retrieve all Nutanix clusters from Prism Central
+    Retrieve all Nutanix clusters from Prism Central (paginated, v3/v4)
   #>
-  $result = Invoke-PrismAPI -Method "POST" -Endpoint "clusters/list" -Body @{
-    kind   = "cluster"
-    length = 500
-  }
-  return $result.entities
+  return Get-PrismEntities -EndpointKey "Clusters"
 }
 
 function Get-PrismSubnets {
   <#
   .SYNOPSIS
-    Retrieve all subnets from Prism Central
+    Retrieve all subnets from Prism Central (paginated, v3/v4)
   #>
-  $result = Invoke-PrismAPI -Method "POST" -Endpoint "subnets/list" -Body @{
-    kind   = "subnet"
-    length = 500
-  }
-  return $result.entities
+  return Get-PrismEntities -EndpointKey "Subnets"
+}
+
+function Get-SubnetName {
+  <#
+  .SYNOPSIS
+    Extract subnet name from a v3 or v4 entity object
+  #>
+  param([Parameter(Mandatory = $true)]$Subnet)
+  if ($PrismApiVersion -eq "v4") { return $Subnet.name }
+  return $Subnet.spec.name
+}
+
+function Get-SubnetUUID {
+  <#
+  .SYNOPSIS
+    Extract subnet UUID/extId from a v3 or v4 entity object
+  #>
+  param([Parameter(Mandatory = $true)]$Subnet)
+  if ($PrismApiVersion -eq "v4") { return $Subnet.extId }
+  return $Subnet.metadata.uuid
 }
 
 function Resolve-IsolatedNetwork {
   <#
   .SYNOPSIS
-    Find and validate the isolated network for SureBackup recovery
+    Find and validate the isolated network for SureBackup recovery (v3/v4)
   #>
   Write-Log "Resolving isolated network for SureBackup lab..." -Level "INFO"
 
   $subnets = Get-PrismSubnets
 
   if ($IsolatedNetworkUUID) {
-    $target = $subnets | Where-Object { $_.metadata.uuid -eq $IsolatedNetworkUUID }
+    $target = $subnets | Where-Object { (Get-SubnetUUID $_) -eq $IsolatedNetworkUUID }
     if (-not $target) {
       throw "Isolated network UUID '$IsolatedNetworkUUID' not found in Prism Central"
     }
   }
   elseif ($IsolatedNetworkName) {
-    $target = $subnets | Where-Object { $_.spec.name -eq $IsolatedNetworkName }
+    $target = $subnets | Where-Object { (Get-SubnetName $_) -eq $IsolatedNetworkName }
     if (-not $target) {
-      throw "Isolated network '$IsolatedNetworkName' not found in Prism Central. Available: $(($subnets | ForEach-Object { $_.spec.name }) -join ', ')"
+      throw "Isolated network '$IsolatedNetworkName' not found in Prism Central. Available: $(($subnets | ForEach-Object { Get-SubnetName $_ }) -join ', ')"
     }
     if ($target.Count -gt 1) {
       Write-Log "Multiple subnets named '$IsolatedNetworkName' found, using first match" -Level "WARNING"
@@ -454,21 +668,33 @@ function Resolve-IsolatedNetwork {
   else {
     # Look for a subnet with 'isolated', 'surebackup', or 'lab' in the name
     $target = $subnets | Where-Object {
-      $_.spec.name -imatch "isolated|surebackup|lab|sandbox|test-recovery"
+      (Get-SubnetName $_) -imatch "isolated|surebackup|lab|sandbox|test-recovery"
     } | Select-Object -First 1
 
     if (-not $target) {
       throw "No isolated network specified and none auto-detected. Use -IsolatedNetworkName or -IsolatedNetworkUUID, or create a subnet with 'isolated'/'surebackup'/'lab' in its name."
     }
-    Write-Log "Auto-detected isolated network: $($target.spec.name)" -Level "WARNING"
+    Write-Log "Auto-detected isolated network: $(Get-SubnetName $target)" -Level "WARNING"
   }
 
-  $networkInfo = [PSCustomObject]@{
-    Name       = $target.spec.name
-    UUID       = $target.metadata.uuid
-    VlanId     = $target.spec.resources.vlan_id
-    SubnetType = $target.spec.resources.subnet_type
-    ClusterRef = $target.spec.cluster_reference.uuid
+  # Normalize to a common structure regardless of API version
+  if ($PrismApiVersion -eq "v4") {
+    $networkInfo = [PSCustomObject]@{
+      Name       = $target.name
+      UUID       = $target.extId
+      VlanId     = $target.vlanId
+      SubnetType = $target.subnetType
+      ClusterRef = if ($target.clusterReference) { $target.clusterReference.extId } else { $null }
+    }
+  }
+  else {
+    $networkInfo = [PSCustomObject]@{
+      Name       = $target.spec.name
+      UUID       = $target.metadata.uuid
+      VlanId     = $target.spec.resources.vlan_id
+      SubnetType = $target.spec.resources.subnet_type
+      ClusterRef = $target.spec.cluster_reference.uuid
+    }
   }
 
   Write-Log "Isolated network resolved: $($networkInfo.Name) [VLAN $($networkInfo.VlanId)] on cluster $($networkInfo.ClusterRef)" -Level "SUCCESS"
@@ -478,44 +704,77 @@ function Resolve-IsolatedNetwork {
 function Get-PrismVMByName {
   <#
   .SYNOPSIS
-    Find a VM by name in Prism Central
+    Find a VM by name in Prism Central (v3/v4)
   #>
   param([Parameter(Mandatory = $true)][string]$Name)
 
-  $result = Invoke-PrismAPI -Method "POST" -Endpoint "vms/list" -Body @{
-    kind   = "vm"
-    length = 50
-    filter = "vm_name==$Name"
+  if ($PrismApiVersion -eq "v4") {
+    $endpoint = "$($script:PrismEndpoints.VMs)?`$filter=name eq '$Name'"
+    $raw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $endpoint)
+    return $raw.data | Where-Object { $_.name -eq $Name }
   }
-  return $result.entities | Where-Object { $_.spec.name -eq $Name }
+  else {
+    $result = Invoke-PrismAPI -Method "POST" -Endpoint "vms/list" -Body @{
+      kind   = "vm"
+      length = 50
+      filter = "vm_name==$Name"
+    }
+    return $result.entities | Where-Object { $_.spec.name -eq $Name }
+  }
 }
 
 function Get-PrismVMByUUID {
   <#
   .SYNOPSIS
-    Get a VM by UUID from Prism Central
+    Get a VM by UUID/extId from Prism Central (v3/v4).
+    Returns a PSCustomObject with .Body and .ETag on v4 (PS7+), raw response on v3.
   #>
   param([Parameter(Mandatory = $true)][string]$UUID)
 
-  return Invoke-PrismAPI -Method "GET" -Endpoint "vms/$UUID"
+  if ($PrismApiVersion -eq "v4") {
+    $result = Invoke-PrismAPI -Method "GET" -Endpoint "$($script:PrismEndpoints.VMs)/$UUID"
+    # Unwrap to get the vm data from .data if present
+    $raw = if ($result.Body) { $result.Body } else { $result }
+    $vmData = if ($raw.data) { $raw.data } else { $raw }
+    $etag = if ($result.ETag) { $result.ETag } else { $null }
+    return [PSCustomObject]@{ VM = $vmData; ETag = $etag }
+  }
+  else {
+    return Invoke-PrismAPI -Method "GET" -Endpoint "vms/$UUID"
+  }
 }
 
 function Get-PrismVMIPAddress {
   <#
   .SYNOPSIS
-    Retrieve IP address(es) from a Nutanix VM via NGT or NIC info
+    Retrieve IP address(es) from a Nutanix VM via NGT or NIC info (v3/v4)
   #>
   param([Parameter(Mandatory = $true)][string]$UUID)
 
   try {
-    $vm = Get-PrismVMByUUID -UUID $UUID
-    $nics = $vm.status.resources.nic_list
+    $vmResult = Get-PrismVMByUUID -UUID $UUID
 
-    foreach ($nic in $nics) {
-      $endpoints = $nic.ip_endpoint_list
-      foreach ($ep in $endpoints) {
-        if ($ep.ip -and $ep.ip -notmatch "^169\.254") {
-          return $ep.ip
+    if ($PrismApiVersion -eq "v4") {
+      $vm = $vmResult.VM
+      $nics = $vm.nics
+      foreach ($nic in $nics) {
+        # v4 NIC IP endpoints
+        $ipEndpoints = $nic.networkInfo.ipv4Info.learnedIpAddresses
+        if (-not $ipEndpoints) { $ipEndpoints = $nic.networkInfo.ipv4Info.ipAddresses }
+        foreach ($ip in $ipEndpoints) {
+          $addr = if ($ip.value) { $ip.value } else { "$ip" }
+          if ($addr -and $addr -notmatch "^169\.254") { return $addr }
+        }
+      }
+    }
+    else {
+      $nics = $vmResult.status.resources.nic_list
+      foreach ($nic in $nics) {
+        $endpoints = $nic.ip_endpoint_list
+        foreach ($ep in $endpoints) {
+          if ($ep.ip -and $ep.ip -notmatch "^169\.254") {
+            return $ep.ip
+          }
         }
       }
     }
@@ -526,10 +785,24 @@ function Get-PrismVMIPAddress {
   return $null
 }
 
+function Get-PrismVMPowerState {
+  <#
+  .SYNOPSIS
+    Extract power state string from a VM object (v3/v4)
+  #>
+  param([Parameter(Mandatory = $true)]$VMResult)
+
+  if ($PrismApiVersion -eq "v4") {
+    $vm = if ($VMResult.VM) { $VMResult.VM } else { $VMResult }
+    return $vm.powerState
+  }
+  return $VMResult.status.resources.power_state
+}
+
 function Wait-PrismVMPowerState {
   <#
   .SYNOPSIS
-    Wait for a VM to reach a specific power state
+    Wait for a VM to reach a specific power state (v3/v4)
   #>
   param(
     [Parameter(Mandatory = $true)][string]$UUID,
@@ -541,8 +814,8 @@ function Wait-PrismVMPowerState {
 
   while ((Get-Date) -lt $deadline) {
     try {
-      $vm = Get-PrismVMByUUID -UUID $UUID
-      $currentState = $vm.status.resources.power_state
+      $vmResult = Get-PrismVMByUUID -UUID $UUID
+      $currentState = Get-PrismVMPowerState $vmResult
 
       if ($currentState -eq $State) {
         return $true
@@ -581,12 +854,20 @@ function Wait-PrismVMIPAddress {
 function Remove-PrismVM {
   <#
   .SYNOPSIS
-    Delete a VM from Nutanix (cleanup)
+    Delete a VM from Nutanix (cleanup, v3/v4)
   #>
   param([Parameter(Mandatory = $true)][string]$UUID)
 
   try {
-    Invoke-PrismAPI -Method "DELETE" -Endpoint "vms/$UUID"
+    if ($PrismApiVersion -eq "v4") {
+      # v4 DELETE requires ETag via If-Match
+      $vmResult = Get-PrismVMByUUID -UUID $UUID
+      $etag = if ($vmResult.ETag) { $vmResult.ETag } else { $null }
+      Invoke-PrismAPI -Method "DELETE" -Endpoint "$($script:PrismEndpoints.VMs)/$UUID" -IfMatch $etag
+    }
+    else {
+      Invoke-PrismAPI -Method "DELETE" -Endpoint "vms/$UUID"
+    }
     Write-Log "Deleted VM: $UUID" -Level "INFO"
     return $true
   }
@@ -599,17 +880,21 @@ function Remove-PrismVM {
 function Get-PrismTaskStatus {
   <#
   .SYNOPSIS
-    Check the status of an async Prism task
+    Check the status of an async Prism task (v3/v4)
   #>
   param([Parameter(Mandatory = $true)][string]$TaskUUID)
 
+  if ($PrismApiVersion -eq "v4") {
+    $raw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint "$($script:PrismEndpoints.Tasks)/$TaskUUID")
+    return if ($raw.data) { $raw.data } else { $raw }
+  }
   return Invoke-PrismAPI -Method "GET" -Endpoint "tasks/$TaskUUID"
 }
 
 function Wait-PrismTask {
   <#
   .SYNOPSIS
-    Wait for a Prism async task to complete
+    Wait for a Prism async task to complete (v3/v4)
   #>
   param(
     [Parameter(Mandatory = $true)][string]$TaskUUID,
@@ -626,7 +911,8 @@ function Wait-PrismTask {
       return $task
     }
     elseif ($status -eq "FAILED") {
-      throw "Prism task $TaskUUID failed: $($task.error_detail)"
+      $errorMsg = if ($task.error_detail) { $task.error_detail } elseif ($task.errorMessages) { $task.errorMessages -join "; " } else { "unknown" }
+      throw "Prism task $TaskUUID failed: $errorMsg"
     }
 
     Start-Sleep -Seconds 5
@@ -862,35 +1148,66 @@ function Start-AHVInstantRecovery {
     $recoveredVM = Get-PrismVMByName -Name $recoveryName
 
     if ($recoveredVM) {
-      $vmUUID = $recoveredVM[0].metadata.uuid
+      if ($PrismApiVersion -eq "v4") {
+        $vmUUID = $recoveredVM[0].extId
+      }
+      else {
+        $vmUUID = $recoveredVM[0].metadata.uuid
+      }
 
       # Update VM NIC to use isolated network
       try {
-        $vmSpec = Get-PrismVMByUUID -UUID $vmUUID
-        $specVersion = $vmSpec.metadata.spec_version
+        if ($PrismApiVersion -eq "v4") {
+          # v4: GET VM with ETag, then PUT with If-Match and NTNX-Request-Id
+          $vmResult = Get-PrismVMByUUID -UUID $vmUUID
+          $vmData = $vmResult.VM
+          $etag = $vmResult.ETag
 
-        # Build the NIC update - replace all NICs with isolated network
-        $nicList = @(
-          @{
-            subnet_reference = @{
-              kind = "subnet"
-              uuid = $IsolatedNetwork.UUID
+          # Replace NIC list with isolated network reference
+          $vmData.nics = @(
+            @{
+              backingInfo = @{
+                model = "VIRTIO"
+                isConnected = $true
+              }
+              networkInfo = @{
+                subnet = @{
+                  extId = $IsolatedNetwork.UUID
+                }
+              }
             }
-            is_connected     = $true
-          }
-        )
+          )
 
-        $updateBody = @{
-          metadata = @{
-            kind         = "vm"
-            uuid         = $vmUUID
-            spec_version = $specVersion
-          }
-          spec     = $vmSpec.spec
+          $updateBody = $vmData
+          Invoke-PrismAPI -Method "PUT" -Endpoint "$($script:PrismEndpoints.VMs)/$vmUUID" -Body $updateBody -IfMatch $etag
         }
-        $updateBody.spec.resources.nic_list = $nicList
+        else {
+          # v3: spec_version based concurrency
+          $vmSpec = Get-PrismVMByUUID -UUID $vmUUID
+          $specVersion = $vmSpec.metadata.spec_version
 
-        Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$vmUUID" -Body $updateBody
+          $nicList = @(
+            @{
+              subnet_reference = @{
+                kind = "subnet"
+                uuid = $IsolatedNetwork.UUID
+              }
+              is_connected     = $true
+            }
+          )
+
+          $updateBody = @{
+            metadata = @{
+              kind         = "vm"
+              uuid         = $vmUUID
+              spec_version = $specVersion
+            }
+            spec     = $vmSpec.spec
+          }
+          $updateBody.spec.resources.nic_list = $nicList
+
+          Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$vmUUID" -Body $updateBody
+        }
         Write-Log "  NIC reconfigured to isolated network: $($IsolatedNetwork.Name)" -Level "INFO"
       }
       catch {
@@ -959,21 +1276,26 @@ function Stop-AHVInstantRecovery {
       catch { }
 
       if ($stillExists) {
-        # Power off first if still running
+        # Power off first if still running, then delete
+        Write-Log "  Force powering off lingering VM: $($RecoveryInfo.RecoveryVMName)" -Level "WARNING"
         try {
-          $powerBody = @{
-            spec     = @{
-              resources = @{
-                power_state = "OFF"
-              }
-            }
-            metadata = @{
-              kind = "vm"
-              uuid = $RecoveryInfo.RecoveryVMUUID
-            }
+          $vmUUID = $RecoveryInfo.RecoveryVMUUID
+          if ($PrismApiVersion -eq "v4") {
+            $vmResult = Get-PrismVMByUUID -UUID $vmUUID
+            $vmData = $vmResult.VM
+            $vmData.powerState = "OFF"
+            Invoke-PrismAPI -Method "PUT" -Endpoint "$($script:PrismEndpoints.VMs)/$vmUUID" -Body $vmData -IfMatch $vmResult.ETag
           }
-          # Use Prism to force power off, then delete
-          Write-Log "  Force powering off lingering VM: $($RecoveryInfo.RecoveryVMName)" -Level "WARNING"
+          else {
+            $vmSpec = Get-PrismVMByUUID -UUID $vmUUID
+            $vmSpec.spec.resources.power_state = "OFF"
+            $powerBody = @{
+              metadata = @{ kind = "vm"; uuid = $vmUUID; spec_version = $vmSpec.metadata.spec_version }
+              spec     = $vmSpec.spec
+            }
+            Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$vmUUID" -Body $powerBody
+          }
+          Start-Sleep -Seconds 10
         }
         catch { }
 
@@ -1010,22 +1332,34 @@ function Test-VMHeartbeat {
   $startTime = Get-Date
 
   try {
-    $vm = Get-PrismVMByUUID -UUID $UUID
-    $powerState = $vm.status.resources.power_state
-    $ngtEnabled = $vm.status.resources.guest_tools
+    $vmResult = Get-PrismVMByUUID -UUID $UUID
+    $powerState = Get-PrismVMPowerState $vmResult
 
     $passed = ($powerState -eq "ON")
     $details = "Power: $powerState"
 
-    if ($ngtEnabled) {
-      $ngtStatus = $ngtEnabled.nutanix_guest_tools.state
-      $details += ", NGT: $ngtStatus"
-      if ($ngtStatus -eq "ENABLED") {
-        $details += " (Guest tools communicating)"
+    if ($PrismApiVersion -eq "v4") {
+      $vm = $vmResult.VM
+      $ngtEnabled = $vm.guestTools
+      if ($ngtEnabled) {
+        $details += ", NGT: $($ngtEnabled.isEnabled)"
+        if ($ngtEnabled.isEnabled) { $details += " (Guest tools communicating)" }
+      }
+      else {
+        $details += ", NGT: Not installed"
       }
     }
     else {
-      $details += ", NGT: Not installed"
+      $vm = $vmResult
+      $ngtEnabled = $vm.status.resources.guest_tools
+      if ($ngtEnabled) {
+        $ngtStatus = $ngtEnabled.nutanix_guest_tools.state
+        $details += ", NGT: $ngtStatus"
+        if ($ngtStatus -eq "ENABLED") { $details += " (Guest tools communicating)" }
+      }
+      else {
+        $details += ", NGT: Not installed"
+      }
     }
 
     $level = if ($passed) { "TEST-PASS" } else { "TEST-FAIL" }
@@ -1442,7 +1776,7 @@ function Get-VMBootOrder {
 # HTML Report Generation
 # =============================
 
-function Generate-HTMLReport {
+function New-HTMLReport {
   <#
   .SYNOPSIS
     Generate a professional HTML report with SureBackup test results
@@ -1961,7 +2295,7 @@ function Export-Results {
   # HTML Report
   if ($GenerateHTML) {
     $htmlPath = Join-Path $OutputPath "SureBackup_Report.html"
-    $htmlContent = Generate-HTMLReport -TestResults $TestResults -RestorePoints $RestorePoints -IsolatedNetwork $IsolatedNetwork
+    $htmlContent = New-HTMLReport -TestResults $TestResults -RestorePoints $RestorePoints -IsolatedNetwork $IsolatedNetwork
     $htmlContent | Out-File -FilePath $htmlPath -Encoding UTF8
     Write-Log "  HTML report: $htmlPath" -Level "SUCCESS"
   }
