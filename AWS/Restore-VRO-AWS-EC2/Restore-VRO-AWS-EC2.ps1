@@ -12,12 +12,17 @@
   2. Authenticates to AWS using IAM best practices (roles, profiles, STS)
   3. Locates the backup and selects the appropriate restore point
   4. Optionally validates restore point is clean (malware-free) via Secure Restore
-  5. Executes Veeam "Restore to Amazon EC2" with full EC2 configuration
-  6. Monitors restore progress with timeout enforcement
-  7. Validates the restored EC2 instance is running and reachable
-  8. Tags all restored AWS resources for governance and cost tracking
-  9. Generates structured output for VRO plan step consumption
-  10. Produces optional HTML restore report
+  5. Optionally creates network isolation (clean room) for ransomware recovery
+  6. Executes Veeam "Restore to Amazon EC2" with full EC2 configuration
+  7. Monitors restore progress with timeout enforcement and credential refresh
+  8. Validates the restored EC2 instance via OS checks, TCP ports, HTTP, and SSM
+  9. Tags all restored AWS resources for governance and cost tracking
+  10. Optionally creates CloudWatch alarms and updates Route53 DNS records
+  11. Optionally runs SSM post-restore configuration scripts
+  12. Tracks SLA/RTO compliance and generates compliance audit trails
+  13. Supports DR drill mode with auto-terminate for recovery testing
+  14. Generates structured output for VRO plan step consumption
+  15. Produces professional HTML restore report with health check results
 
   VRO INTEGRATION:
   - Designed as a VRO Plan Step (Custom Script)
@@ -129,11 +134,30 @@
 .PARAMETER PrivateIPAddress
   Specific private IP to assign. Omit for automatic assignment from subnet CIDR.
 
+.PARAMETER IsolateNetwork
+  Create an isolated security group blocking all inbound/outbound traffic.
+  For ransomware recovery scenarios - prevents lateral movement from restored instance.
+
+.PARAMETER IsolatedSGName
+  Name for the isolated security group. Default: VeeamIsolated-<timestamp>.
+
 .PARAMETER SkipValidation
   Skip post-restore health checks. Use only for speed-critical DR scenarios.
 
 .PARAMETER ValidationTimeoutMinutes
   Maximum time to wait for post-restore validation. Default: 15 minutes.
+
+.PARAMETER HealthCheckPorts
+  TCP ports to verify post-restore (e.g., 22, 80, 443, 3389).
+
+.PARAMETER HealthCheckUrls
+  HTTP/HTTPS endpoints to verify (e.g., http://localhost/health).
+
+.PARAMETER SSMHealthCheckCommand
+  AWS SSM RunCommand to execute inside the VM for application-level verification.
+
+.PARAMETER RTOTargetMinutes
+  Target Recovery Time Objective in minutes. Tracks actual vs planned in report.
 
 .PARAMETER VROPlanName
   VRO recovery plan name (passed by VRO for logging context).
@@ -143,6 +167,42 @@
 
 .PARAMETER DryRun
   Validate all parameters and connectivity without executing the restore.
+
+.PARAMETER CleanupOnFailure
+  Terminate restored EC2 instance and delete created resources if restore fails.
+
+.PARAMETER DRDrillMode
+  Full DR drill: restore, validate, keep alive, then auto-terminate with compliance report.
+
+.PARAMETER DRDrillKeepMinutes
+  How long to keep the restored instance alive in DR drill mode. Default: 30 minutes.
+
+.PARAMETER EnableCredentialRefresh
+  Automatically refresh STS credentials before expiration during long restores.
+
+.PARAMETER CreateCloudWatchAlarms
+  Create CPU and status check CloudWatch alarms on the restored instance.
+
+.PARAMETER CloudWatchSNSTopicArn
+  SNS topic ARN for CloudWatch alarm notifications.
+
+.PARAMETER Route53HostedZoneId
+  Route53 hosted zone ID for DNS record update after successful restore.
+
+.PARAMETER Route53RecordName
+  DNS record name to create/update (e.g., app.dr.example.com).
+
+.PARAMETER Route53RecordType
+  DNS record type: A or CNAME. Default: A.
+
+.PARAMETER PostRestoreSSMDocument
+  SSM document name or ARN to execute on the restored instance after validation.
+
+.PARAMETER PostRestoreSSMParameters
+  Parameters hashtable for the SSM document.
+
+.PARAMETER EnableAuditTrail
+  Write a detailed JSON event log for compliance auditing.
 
 .PARAMETER OutputPath
   Output folder for logs and reports. Default: ./VRORestoreOutput_<timestamp>.
@@ -182,7 +242,7 @@
   # Cross-account dry run with STS AssumeRole
 
 .NOTES
-  Version: 1.0.0
+  Version: 2.0.0
   Author: Community Contributors
   Requires: PowerShell 5.1+ (7.x recommended)
   Modules: Veeam.Backup.PowerShell (VBR 12+), AWS.Tools.Common, AWS.Tools.EC2
@@ -244,15 +304,56 @@ param(
   [ValidatePattern('^(\d{1,3}\.){3}\d{1,3}$')]
   [string]$PrivateIPAddress,
 
+  # ===== Network Isolation (Clean Room Recovery) =====
+  [switch]$IsolateNetwork,
+  [string]$IsolatedSGName,
+
   # ===== Validation =====
   [switch]$SkipValidation,
   [ValidateRange(1,120)]
   [int]$ValidationTimeoutMinutes = 15,
 
+  # ===== Application Health Checks =====
+  [int[]]$HealthCheckPorts,
+  [string[]]$HealthCheckUrls,
+  [string]$SSMHealthCheckCommand,
+
+  # ===== SLA/RTO Tracking =====
+  [ValidateRange(1,1440)]
+  [int]$RTOTargetMinutes,
+
   # ===== VRO Integration =====
   [string]$VROPlanName,
   [string]$VROStepName,
   [switch]$DryRun,
+
+  # ===== Rollback & Cleanup =====
+  [switch]$CleanupOnFailure,
+
+  # ===== DR Drill Mode =====
+  [switch]$DRDrillMode,
+  [ValidateRange(1,480)]
+  [int]$DRDrillKeepMinutes = 30,
+
+  # ===== Credential Management =====
+  [switch]$EnableCredentialRefresh,
+
+  # ===== CloudWatch Integration =====
+  [switch]$CreateCloudWatchAlarms,
+  [string]$CloudWatchSNSTopicArn,
+
+  # ===== Route53 DNS Failover =====
+  [string]$Route53HostedZoneId,
+  [string]$Route53RecordName,
+  [ValidateSet("A","CNAME")]
+  [string]$Route53RecordType = "A",
+
+  # ===== SSM Post-Restore Scripts =====
+  [string]$PostRestoreSSMDocument,
+  [hashtable]$PostRestoreSSMParameters = @{},
+
+  # ===== Compliance Audit Trail =====
+  [switch]$EnableAuditTrail,
 
   # ===== Output & Logging =====
   [string]$OutputPath,
@@ -279,6 +380,12 @@ $script:ExitCode = 0
 $script:RestoredInstanceId = $null
 $script:VBRConnected = $false
 $script:AWSInitialized = $false
+$script:CreatedResources = [System.Collections.Generic.List[object]]::new()
+$script:IsolatedSGId = $null
+$script:STSExpiration = $null
+$script:STSAssumeParams = $null
+$script:HealthCheckResults = @()
+$script:AuditTrail = [System.Collections.Generic.List[object]]::new()
 
 # Output folder
 $stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
@@ -345,6 +452,44 @@ function Write-VROOutput {
   $Data["_vroStep"] = $VROStepName
   $json = $Data | ConvertTo-Json -Compress -Depth 5
   Write-Output "VRO_OUTPUT:$json"
+}
+
+# =============================
+# Compliance Audit Trail
+# =============================
+
+<#
+.SYNOPSIS
+  Records a structured audit event to the compliance event log.
+.PARAMETER EventType
+  Category: AUTH, RESTORE, VALIDATE, TAG, CLEANUP, CONFIG, DNS, ALARM, SSM, DRILL.
+.PARAMETER Action
+  Specific action taken.
+.PARAMETER Resource
+  AWS resource identifier affected.
+.PARAMETER Details
+  Additional details hashtable.
+#>
+function Write-AuditEvent {
+  param(
+    [Parameter(Mandatory)][string]$EventType,
+    [Parameter(Mandatory)][string]$Action,
+    [string]$Resource = "",
+    [hashtable]$Details = @{}
+  )
+
+  if (-not $EnableAuditTrail) { return }
+
+  $auditEntry = [PSCustomObject]@{
+    timestamp = (Get-Date -Format "o")
+    eventType = $EventType
+    action    = $Action
+    resource  = $Resource
+    vroPlan   = $VROPlanName
+    vroStep   = $VROStepName
+    details   = $Details
+  }
+  $script:AuditTrail.Add($auditEntry)
 }
 
 # =============================
@@ -464,6 +609,33 @@ function Test-Prerequisites {
     Write-Log "Loaded AWS module: AWS.Tools.SecurityToken"
   }
 
+  # Optional: AWS.Tools.SimpleSystemsManagement for SSM integration
+  if ($SSMHealthCheckCommand -or $PostRestoreSSMDocument) {
+    if (-not (Get-Module -ListAvailable -Name "AWS.Tools.SimpleSystemsManagement")) {
+      throw "AWS.Tools.SimpleSystemsManagement module required for SSM features. Install via: Install-Module AWS.Tools.SimpleSystemsManagement -Scope CurrentUser"
+    }
+    Import-Module AWS.Tools.SimpleSystemsManagement -ErrorAction Stop
+    Write-Log "Loaded AWS module: AWS.Tools.SimpleSystemsManagement"
+  }
+
+  # Optional: AWS.Tools.CloudWatch for alarm creation
+  if ($CreateCloudWatchAlarms) {
+    if (-not (Get-Module -ListAvailable -Name "AWS.Tools.CloudWatch")) {
+      throw "AWS.Tools.CloudWatch module required for -CreateCloudWatchAlarms. Install via: Install-Module AWS.Tools.CloudWatch -Scope CurrentUser"
+    }
+    Import-Module AWS.Tools.CloudWatch -ErrorAction Stop
+    Write-Log "Loaded AWS module: AWS.Tools.CloudWatch"
+  }
+
+  # Optional: AWS.Tools.Route53 for DNS updates
+  if ($Route53HostedZoneId) {
+    if (-not (Get-Module -ListAvailable -Name "AWS.Tools.Route53")) {
+      throw "AWS.Tools.Route53 module required for DNS updates. Install via: Install-Module AWS.Tools.Route53 -Scope CurrentUser"
+    }
+    Import-Module AWS.Tools.Route53 -ErrorAction Stop
+    Write-Log "Loaded AWS module: AWS.Tools.Route53"
+  }
+
   Write-Log "All prerequisites validated" -Level SUCCESS
 }
 
@@ -545,7 +717,10 @@ function Connect-AWSSession {
     }
 
     Set-AWSCredential -Credential $stsResult.Credentials
+    $script:STSExpiration = $stsResult.Credentials.Expiration
+    $script:STSAssumeParams = $assumeParams
     Write-Log "STS AssumeRole succeeded (expires: $($stsResult.Credentials.Expiration))" -Level SUCCESS
+    Write-AuditEvent -EventType "AUTH" -Action "STS AssumeRole" -Resource $AWSRoleArn -Details @{ expiration = $stsResult.Credentials.Expiration.ToString("o") }
   }
   elseif ($AWSProfile) {
     # Named profile
@@ -565,6 +740,38 @@ function Connect-AWSSession {
   }
 
   $script:AWSInitialized = $true
+}
+
+# =============================
+# Credential Refresh
+# =============================
+
+<#
+.SYNOPSIS
+  Checks if the current STS session is approaching expiration and refreshes
+  credentials if needed. Call periodically during long-running operations.
+.PARAMETER ThresholdMinutes
+  Minutes before expiration to trigger refresh. Default: 10.
+#>
+function Update-AWSCredentialIfNeeded {
+  param([int]$ThresholdMinutes = 10)
+
+  if (-not $AWSRoleArn -or -not $EnableCredentialRefresh) { return }
+  if (-not $script:STSExpiration) { return }
+
+  if ((Get-Date).AddMinutes($ThresholdMinutes) -ge $script:STSExpiration) {
+    Write-Log "STS credentials expiring soon. Refreshing..." -Level WARNING
+    try {
+      $stsResult = Use-STSRole @script:STSAssumeParams
+      Set-AWSCredential -Credential $stsResult.Credentials
+      $script:STSExpiration = $stsResult.Credentials.Expiration
+      Write-Log "STS credentials refreshed (new expiry: $($script:STSExpiration))" -Level SUCCESS
+      Write-AuditEvent -EventType "AUTH" -Action "STS Credential Refresh" -Resource $AWSRoleArn
+    }
+    catch {
+      Write-Log "Failed to refresh STS credentials: $($_.Exception.Message)" -Level ERROR
+    }
+  }
 }
 
 # =============================
@@ -747,6 +954,18 @@ function Get-EC2TargetConfig {
   $config["SubnetId"] = $subnet.SubnetId
   $config["AvailabilityZone"] = $subnet.AvailabilityZone
 
+  # Validate private IP availability
+  if ($PrivateIPAddress) {
+    $existingENI = Get-EC2NetworkInterface -Filter @(
+      @{ Name="addresses.private-ip-address"; Values=$PrivateIPAddress }
+      @{ Name="subnet-id"; Values=$subnet.SubnetId }
+    ) -Region $AWSRegion -ErrorAction SilentlyContinue
+    if ($existingENI) {
+      throw "Private IP '$PrivateIPAddress' is already in use in subnet '$($subnet.SubnetId)' (ENI: $($existingENI[0].NetworkInterfaceId))."
+    }
+    Write-Log "Private IP '$PrivateIPAddress' is available in subnet $($subnet.SubnetId)"
+  }
+
   # Resolve Security Groups
   if ($SecurityGroupIds) {
     foreach ($sgId in $SecurityGroupIds) {
@@ -770,14 +989,27 @@ function Get-EC2TargetConfig {
     }
   }
 
-  # Validate instance type availability
-  $availableTypes = Get-EC2InstanceTypeOffering -LocationType "region" `
-    -Filter @{ Name="instance-type"; Values=$InstanceType } -Region $AWSRegion
+  # Network isolation: override security groups with an isolated SG
+  if ($IsolateNetwork) {
+    Write-Log "Network isolation mode: creating isolated security group..."
+    $isolatedSGId = New-IsolatedSecurityGroup -VpcId $vpc.VpcId
+    $config["SecurityGroupIds"] = @($isolatedSGId)
+    $config["IsolatedSGId"] = $isolatedSGId
+    $script:IsolatedSGId = $isolatedSGId
+    Write-Log "Network isolation SG created: $isolatedSGId (all traffic blocked)" -Level SUCCESS
+  }
+
+  # Validate instance type availability in specific AZ
+  $availableTypes = Get-EC2InstanceTypeOffering -LocationType "availability-zone" `
+    -Filter @(
+      @{ Name="instance-type"; Values=$InstanceType }
+      @{ Name="location"; Values=$subnet.AvailabilityZone }
+    ) -Region $AWSRegion
   if (-not $availableTypes) {
-    throw "Instance type '$InstanceType' is not available in $AWSRegion."
+    throw "Instance type '$InstanceType' is not available in AZ '$($subnet.AvailabilityZone)' ($AWSRegion)."
   }
   $config["InstanceType"] = $InstanceType
-  Write-Log "Instance type '$InstanceType' validated in $AWSRegion"
+  Write-Log "Instance type '$InstanceType' validated in AZ $($subnet.AvailabilityZone)"
 
   # Key pair validation
   if ($KeyPairName) {
@@ -810,6 +1042,10 @@ function Start-EC2Restore {
     [Parameter(Mandatory)][object]$RestorePoint,
     [Parameter(Mandatory)][hashtable]$EC2Config
   )
+
+  if ($RestoreMode -eq "InstantRestore") {
+    throw "InstantRestore mode is not yet implemented for EC2 restores. Use 'FullRestore' (default)."
+  }
 
   $instanceName = if ($EC2InstanceName) {
     $EC2InstanceName
@@ -922,7 +1158,7 @@ function Wait-RestoreCompletion {
   param([Parameter(Mandatory)][object]$Session)
 
   $timeout = [TimeSpan]::FromMinutes($RestoreTimeoutMinutes)
-  $deadline = $script:StartTime.Add($timeout)
+  $deadline = (Get-Date).Add($timeout)
   $pollInterval = 15  # seconds between status checks
   $lastProgress = -1
 
@@ -958,6 +1194,7 @@ function Wait-RestoreCompletion {
     }
 
     Start-Sleep -Seconds $pollInterval
+    Update-AWSCredentialIfNeeded
   }
 
   throw "Restore timed out after $RestoreTimeoutMinutes minutes. Session ID: $($Session.Id)"
@@ -1002,15 +1239,17 @@ function Test-EC2InstanceHealth {
     return $instance
   }
 
-  # Wait for instance to reach running state
-  $valTimeout = [TimeSpan]::FromMinutes($ValidationTimeoutMinutes)
-  $valDeadline = (Get-Date).Add($valTimeout)
+  # Phase 1: Wait for instance to reach running state (independent timeout)
+  $runningTimeoutMin = [Math]::Max(5, [int]($ValidationTimeoutMinutes / 2))
+  $runningDeadline = (Get-Date).AddMinutes($runningTimeoutMin)
 
-  Write-Log "Waiting for instance to reach 'running' state..."
-  while ((Get-Date) -lt $valDeadline) {
+  Write-Log "Waiting for instance to reach 'running' state (timeout: $runningTimeoutMin min)..."
+  $reachedRunning = $false
+  while ((Get-Date) -lt $runningDeadline) {
     $state = (Get-EC2Instance -InstanceId $instance.InstanceId -Region $AWSRegion).Instances[0].State.Name
     if ($state -eq "running") {
       Write-Log "Instance is running" -Level SUCCESS
+      $reachedRunning = $true
       break
     }
     if ($state -eq "terminated" -or $state -eq "shutting-down") {
@@ -1019,10 +1258,17 @@ function Test-EC2InstanceHealth {
     Start-Sleep -Seconds 10
   }
 
-  # Wait for status checks to pass
-  Write-Log "Waiting for EC2 status checks..."
+  if (-not $reachedRunning) {
+    Write-Log "Instance did not reach 'running' state within $runningTimeoutMin minutes" -Level WARNING
+  }
+
+  # Phase 2: Wait for status checks (fresh timeout after running state confirmed)
+  $statusCheckTimeoutMin = [Math]::Max(5, $ValidationTimeoutMinutes - $runningTimeoutMin)
+  $statusCheckDeadline = (Get-Date).AddMinutes($statusCheckTimeoutMin)
+
+  Write-Log "Waiting for EC2 status checks (timeout: $statusCheckTimeoutMin min)..."
   $checksPass = $false
-  while ((Get-Date) -lt $valDeadline) {
+  while ((Get-Date) -lt $statusCheckDeadline) {
     $status = Get-EC2InstanceStatus -InstanceId $instance.InstanceId -Region $AWSRegion
     if ($status) {
       $instanceStatus = $status.InstanceStatus.Status
@@ -1038,10 +1284,25 @@ function Test-EC2InstanceHealth {
   }
 
   if (-not $checksPass) {
-    Write-Log "EC2 status checks did not pass within $ValidationTimeoutMinutes minutes" -Level WARNING
+    Write-Log "EC2 status checks did not pass within $statusCheckTimeoutMin minutes" -Level WARNING
   }
   else {
     Write-Log "All EC2 status checks passed" -Level SUCCESS
+  }
+
+  # Application-level health checks
+  if ($HealthCheckPorts -or $HealthCheckUrls -or $SSMHealthCheckCommand) {
+    Write-Log "Running application-level health checks..."
+    $healthResults = Invoke-EC2HealthChecks -Instance $instance
+    $script:HealthCheckResults = $healthResults
+
+    $failedChecks = @($healthResults | Where-Object { -not $_.Passed })
+    if ($failedChecks.Count -gt 0) {
+      Write-Log "$($failedChecks.Count) health check(s) failed" -Level WARNING
+    }
+    else {
+      Write-Log "All application health checks passed ($($healthResults.Count) checks)" -Level SUCCESS
+    }
   }
 
   # Refresh instance data
@@ -1081,6 +1342,21 @@ function Set-EC2ResourceTags {
     $allTags[$key] = $Tags[$key]
   }
 
+  # Validate AWS 50-tag limit
+  $MAX_AWS_TAGS = 50
+  if ($allTags.Count -gt $MAX_AWS_TAGS) {
+    Write-Log "Tag count ($($allTags.Count)) exceeds AWS limit ($MAX_AWS_TAGS). Truncating user tags to fit." -Level WARNING
+    $userTagsAllowed = $MAX_AWS_TAGS - $standardTags.Count
+    $allTags = $standardTags.Clone()
+    $userKeysAdded = 0
+    foreach ($key in $Tags.Keys) {
+      if ($userKeysAdded -ge $userTagsAllowed) { break }
+      $allTags[$key] = $Tags[$key]
+      $userKeysAdded++
+    }
+    Write-Log "Applied $($standardTags.Count) standard + $userKeysAdded user tags ($($allTags.Count) total)"
+  }
+
   # Convert to AWS tag format
   $awsTags = $allTags.GetEnumerator() | ForEach-Object {
     [Amazon.EC2.Model.Tag]::new($_.Key, $_.Value)
@@ -1105,6 +1381,607 @@ function Set-EC2ResourceTags {
   }
 
   Write-Log "All resources tagged" -Level SUCCESS
+  Write-AuditEvent -EventType "TAG" -Action "Resources tagged" -Resource $Instance.InstanceId -Details @{ tagCount = $allTags.Count }
+}
+
+# =============================
+# Network Isolation (Clean Room)
+# =============================
+
+<#
+.SYNOPSIS
+  Creates an isolated security group that blocks all inbound/outbound traffic
+  for clean room ransomware recovery scenarios.
+.PARAMETER VpcId
+  The VPC ID to create the security group in.
+.OUTPUTS
+  Security group ID of the newly created isolated group.
+#>
+function New-IsolatedSecurityGroup {
+  param([Parameter(Mandatory)][string]$VpcId)
+
+  $sgName = if ($IsolatedSGName) { $IsolatedSGName } else { "VeeamIsolated-$stamp" }
+
+  $sgId = New-EC2SecurityGroup -GroupName $sgName `
+    -Description "Veeam VRO isolated recovery - all traffic blocked" `
+    -VpcId $VpcId -Region $AWSRegion
+
+  # Revoke the default outbound "allow all" rule
+  $defaultEgress = Get-EC2SecurityGroup -GroupId $sgId -Region $AWSRegion |
+    Select-Object -ExpandProperty IpPermissionsEgress
+  if ($defaultEgress) {
+    Revoke-EC2SecurityGroupEgress -GroupId $sgId -IpPermission $defaultEgress -Region $AWSRegion
+  }
+
+  # Tag the SG for identification
+  $sgTags = @(
+    [Amazon.EC2.Model.Tag]::new("Name", $sgName),
+    [Amazon.EC2.Model.Tag]::new("ManagedBy", "VeeamVRO"),
+    [Amazon.EC2.Model.Tag]::new("veeam:purpose", "network-isolation"),
+    [Amazon.EC2.Model.Tag]::new("veeam:restore-timestamp", $stamp)
+  )
+  New-EC2Tag -Resource $sgId -Tag $sgTags -Region $AWSRegion
+
+  $script:CreatedResources.Add([PSCustomObject]@{ Type = "SecurityGroup"; Id = $sgId })
+  Write-AuditEvent -EventType "CONFIG" -Action "Created isolated security group" -Resource $sgId
+
+  return $sgId
+}
+
+# =============================
+# Application Health Checks
+# =============================
+
+<#
+.SYNOPSIS
+  Tests TCP port connectivity on the restored EC2 instance.
+.PARAMETER IPAddress
+  The IP address to test against.
+.PARAMETER Port
+  The TCP port to check.
+.PARAMETER TimeoutMs
+  Connection timeout in milliseconds. Default: 10000.
+.OUTPUTS
+  PSCustomObject with TestName, Passed, Details, Duration.
+#>
+function Test-EC2Port {
+  param(
+    [Parameter(Mandatory)][string]$IPAddress,
+    [Parameter(Mandatory)][int]$Port,
+    [int]$TimeoutMs = 10000
+  )
+
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  $passed = $false
+  $details = ""
+
+  try {
+    $tcpClient = [System.Net.Sockets.TcpClient]::new()
+    $connectTask = $tcpClient.ConnectAsync($IPAddress, $Port)
+    if ($connectTask.Wait($TimeoutMs)) {
+      if ($tcpClient.Connected) {
+        $passed = $true
+        $details = "TCP port $Port is open"
+      }
+      else {
+        $details = "TCP port $Port connection failed"
+      }
+    }
+    else {
+      $details = "TCP port $Port connection timed out after ${TimeoutMs}ms"
+    }
+  }
+  catch {
+    $details = "TCP port $Port error: $($_.Exception.Message)"
+  }
+  finally {
+    if ($tcpClient) { $tcpClient.Dispose() }
+  }
+
+  $sw.Stop()
+  $level = if ($passed) { "SUCCESS" } else { "WARNING" }
+  Write-Log "  Port check $IPAddress`:$Port - $(if($passed){'PASS'}else{'FAIL'}): $details" -Level $level
+
+  return [PSCustomObject]@{
+    TestName = "TCP:$Port"
+    Passed   = $passed
+    Details  = $details
+    Duration = $sw.Elapsed.TotalSeconds
+  }
+}
+
+<#
+.SYNOPSIS
+  Tests HTTP/HTTPS endpoint accessibility on the restored EC2 instance.
+.PARAMETER IPAddress
+  The instance IP address (replaces localhost in URL).
+.PARAMETER Url
+  The HTTP/HTTPS URL to test.
+.OUTPUTS
+  PSCustomObject with TestName, Passed, Details, Duration.
+#>
+function Test-EC2HttpEndpoint {
+  param(
+    [Parameter(Mandatory)][string]$IPAddress,
+    [Parameter(Mandatory)][string]$Url
+  )
+
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  $passed = $false
+  $details = ""
+
+  # Replace localhost with actual IP
+  $testUrl = $Url -replace 'localhost', $IPAddress -replace '127\.0\.0\.1', $IPAddress
+
+  try {
+    $response = Invoke-WebRequest -Uri $testUrl -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+    $statusCode = $response.StatusCode
+    if ($statusCode -ge 200 -and $statusCode -lt 400) {
+      $passed = $true
+      $details = "HTTP $statusCode OK"
+    }
+    else {
+      $details = "HTTP $statusCode unexpected status"
+    }
+  }
+  catch {
+    $details = "HTTP error: $($_.Exception.Message)"
+  }
+
+  $sw.Stop()
+  $level = if ($passed) { "SUCCESS" } else { "WARNING" }
+  Write-Log "  HTTP check $testUrl - $(if($passed){'PASS'}else{'FAIL'}): $details" -Level $level
+
+  return [PSCustomObject]@{
+    TestName = "HTTP:$Url"
+    Passed   = $passed
+    Details  = $details
+    Duration = $sw.Elapsed.TotalSeconds
+  }
+}
+
+<#
+.SYNOPSIS
+  Executes an SSM RunCommand on the restored instance for in-guest health check.
+.PARAMETER InstanceId
+  EC2 instance ID to run the command on.
+.PARAMETER Command
+  The shell command to execute.
+.PARAMETER TimeoutSeconds
+  Maximum wait time for command completion. Default: 120.
+.OUTPUTS
+  PSCustomObject with TestName, Passed, Details, Duration.
+#>
+function Test-EC2SSMCommand {
+  param(
+    [Parameter(Mandatory)][string]$InstanceId,
+    [Parameter(Mandatory)][string]$Command,
+    [int]$TimeoutSeconds = 120
+  )
+
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  $passed = $false
+  $details = ""
+
+  try {
+    $ssmResult = Send-SSMCommand -InstanceId $InstanceId `
+      -DocumentName "AWS-RunShellScript" `
+      -Parameter @{ commands = @($Command) } `
+      -TimeoutSecond $TimeoutSeconds `
+      -Region $AWSRegion
+
+    $commandId = $ssmResult.CommandId
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+
+    while ((Get-Date) -lt $deadline) {
+      Start-Sleep -Seconds 5
+      $invocation = Get-SSMCommandInvocation -CommandId $commandId `
+        -InstanceId $InstanceId -Details:$true -Region $AWSRegion
+
+      if ($invocation.Status -eq "Success") {
+        $passed = $true
+        $output = $invocation.CommandPlugins[0].Output
+        $details = "SSM command succeeded: $($output.Substring(0, [Math]::Min(200, $output.Length)))"
+        break
+      }
+      elseif ($invocation.Status -in @("Failed", "Cancelled", "TimedOut")) {
+        $details = "SSM command $($invocation.Status): $($invocation.CommandPlugins[0].Output)"
+        break
+      }
+    }
+
+    if (-not $passed -and -not $details) {
+      $details = "SSM command timed out after ${TimeoutSeconds}s"
+    }
+  }
+  catch {
+    $details = "SSM error: $($_.Exception.Message)"
+  }
+
+  $sw.Stop()
+  $level = if ($passed) { "SUCCESS" } else { "WARNING" }
+  Write-Log "  SSM check - $(if($passed){'PASS'}else{'FAIL'}): $details" -Level $level
+
+  return [PSCustomObject]@{
+    TestName = "SSM:RunCommand"
+    Passed   = $passed
+    Details  = $details
+    Duration = $sw.Elapsed.TotalSeconds
+  }
+}
+
+<#
+.SYNOPSIS
+  Orchestrates all configured application-level health checks.
+.PARAMETER Instance
+  The EC2 instance object.
+.OUTPUTS
+  Array of PSCustomObject health check results.
+#>
+function Invoke-EC2HealthChecks {
+  param([Parameter(Mandatory)][object]$Instance)
+
+  $results = [System.Collections.Generic.List[object]]::new()
+  $ip = $Instance.PrivateIpAddress
+
+  # TCP port checks
+  if ($HealthCheckPorts) {
+    foreach ($port in $HealthCheckPorts) {
+      $results.Add((Test-EC2Port -IPAddress $ip -Port $port))
+    }
+  }
+
+  # HTTP endpoint checks
+  if ($HealthCheckUrls) {
+    foreach ($url in $HealthCheckUrls) {
+      $results.Add((Test-EC2HttpEndpoint -IPAddress $ip -Url $url))
+    }
+  }
+
+  # SSM in-guest check
+  if ($SSMHealthCheckCommand) {
+    $results.Add((Test-EC2SSMCommand -InstanceId $Instance.InstanceId -Command $SSMHealthCheckCommand))
+  }
+
+  Write-AuditEvent -EventType "VALIDATE" -Action "Application health checks" -Resource $Instance.InstanceId -Details @{
+    total  = $results.Count
+    passed = @($results | Where-Object { $_.Passed }).Count
+    failed = @($results | Where-Object { -not $_.Passed }).Count
+  }
+
+  return $results.ToArray()
+}
+
+# =============================
+# SLA/RTO Compliance
+# =============================
+
+<#
+.SYNOPSIS
+  Calculates and reports RTO metrics, comparing actual recovery time to target.
+.PARAMETER ActualDuration
+  The actual recovery duration as a TimeSpan.
+.OUTPUTS
+  PSCustomObject with RTOTarget, RTOActual, Met, DeltaMinutes, or $null if no target set.
+#>
+function Measure-RTOCompliance {
+  param([Parameter(Mandatory)][TimeSpan]$ActualDuration)
+
+  if (-not $RTOTargetMinutes) { return $null }
+
+  $actualMinutes = [Math]::Round($ActualDuration.TotalMinutes, 1)
+  $met = $actualMinutes -le $RTOTargetMinutes
+  $delta = [Math]::Round($RTOTargetMinutes - $actualMinutes, 1)
+
+  $level = if ($met) { "SUCCESS" } else { "WARNING" }
+  $status = if ($met) { "MET" } else { "BREACHED" }
+  Write-Log "RTO $status - Target: ${RTOTargetMinutes}m | Actual: ${actualMinutes}m | Delta: ${delta}m" -Level $level
+
+  Write-AuditEvent -EventType "VALIDATE" -Action "RTO compliance check" -Details @{
+    target = $RTOTargetMinutes; actual = $actualMinutes; met = $met
+  }
+
+  return [PSCustomObject]@{
+    RTOTarget = $RTOTargetMinutes
+    RTOActual = $actualMinutes
+    Met       = $met
+    Delta     = $delta
+  }
+}
+
+# =============================
+# CloudWatch Integration
+# =============================
+
+<#
+.SYNOPSIS
+  Creates CloudWatch alarms for the restored EC2 instance.
+.PARAMETER InstanceId
+  The EC2 instance ID to monitor.
+#>
+function New-EC2CloudWatchAlarms {
+  param([Parameter(Mandatory)][string]$InstanceId)
+
+  Write-Log "Creating CloudWatch alarms for $InstanceId..."
+
+  $alarmActions = @()
+  if ($CloudWatchSNSTopicArn) {
+    $alarmActions = @($CloudWatchSNSTopicArn)
+  }
+
+  # Status check alarm
+  $statusAlarmParams = @{
+    AlarmName          = "VeeamRestore-StatusCheck-$InstanceId"
+    AlarmDescription   = "VRO restore: EC2 status check failed for $InstanceId"
+    Namespace          = "AWS/EC2"
+    MetricName         = "StatusCheckFailed"
+    Statistic          = "Maximum"
+    Period             = 60
+    EvaluationPeriod   = 2
+    Threshold          = 1
+    ComparisonOperator = "GreaterThanOrEqualToThreshold"
+    Dimension          = @{ Name = "InstanceId"; Value = $InstanceId }
+    Region             = $AWSRegion
+  }
+  if ($alarmActions.Count -gt 0) {
+    $statusAlarmParams["AlarmAction"] = $alarmActions
+  }
+  Write-CWMetricAlarm @statusAlarmParams
+  Write-Log "Created StatusCheckFailed alarm"
+
+  # CPU utilization alarm
+  $cpuAlarmParams = @{
+    AlarmName          = "VeeamRestore-HighCPU-$InstanceId"
+    AlarmDescription   = "VRO restore: CPU > 90% for $InstanceId"
+    Namespace          = "AWS/EC2"
+    MetricName         = "CPUUtilization"
+    Statistic          = "Average"
+    Period             = 300
+    EvaluationPeriod   = 3
+    Threshold          = 90
+    ComparisonOperator = "GreaterThanThreshold"
+    Dimension          = @{ Name = "InstanceId"; Value = $InstanceId }
+    Region             = $AWSRegion
+  }
+  if ($alarmActions.Count -gt 0) {
+    $cpuAlarmParams["AlarmAction"] = $alarmActions
+  }
+  Write-CWMetricAlarm @cpuAlarmParams
+  Write-Log "Created CPUUtilization alarm"
+
+  Write-Log "CloudWatch alarms created" -Level SUCCESS
+  Write-AuditEvent -EventType "ALARM" -Action "Created CloudWatch alarms" -Resource $InstanceId
+}
+
+# =============================
+# Route53 DNS Failover
+# =============================
+
+<#
+.SYNOPSIS
+  Creates or updates a Route53 DNS record pointing to the restored instance.
+.PARAMETER InstanceIP
+  The IP address to point the record to.
+#>
+function Update-Route53Record {
+  param([Parameter(Mandatory)][string]$InstanceIP)
+
+  Write-Log "Updating Route53 DNS: $Route53RecordName -> $InstanceIP ($Route53RecordType)"
+
+  $recordValue = if ($Route53RecordType -eq "A") { $InstanceIP } else { $InstanceIP }
+
+  $change = @{
+    Action            = "UPSERT"
+    ResourceRecordSet = @{
+      Name            = $Route53RecordName
+      Type            = $Route53RecordType
+      TTL             = 60
+      ResourceRecords = @(@{ Value = $recordValue })
+    }
+  }
+
+  $changeResult = Edit-R53ResourceRecordSet -HostedZoneId $Route53HostedZoneId `
+    -ChangeBatch_Change $change -Region $AWSRegion
+
+  Write-Log "Route53 change submitted: $($changeResult.ChangeInfo.Id) (Status: $($changeResult.ChangeInfo.Status))"
+
+  # Wait for propagation (max 60s)
+  $r53Deadline = (Get-Date).AddSeconds(60)
+  while ((Get-Date) -lt $r53Deadline) {
+    $changeStatus = Get-R53Change -Id $changeResult.ChangeInfo.Id -Region $AWSRegion
+    if ($changeStatus.ChangeInfo.Status -eq "INSYNC") {
+      Write-Log "Route53 DNS record propagated: $Route53RecordName -> $InstanceIP" -Level SUCCESS
+      break
+    }
+    Start-Sleep -Seconds 5
+  }
+
+  Write-AuditEvent -EventType "DNS" -Action "Route53 record updated" -Resource $Route53RecordName -Details @{
+    ip = $InstanceIP; type = $Route53RecordType; zoneId = $Route53HostedZoneId
+  }
+}
+
+# =============================
+# SSM Post-Restore Scripts
+# =============================
+
+<#
+.SYNOPSIS
+  Executes an SSM document on the restored instance for post-restore configuration.
+.PARAMETER InstanceId
+  The EC2 instance to target.
+.PARAMETER DocumentName
+  The SSM document name or ARN.
+.PARAMETER Parameters
+  Hashtable of document parameters.
+.PARAMETER TimeoutMinutes
+  Max wait time. Default: 30.
+.OUTPUTS
+  PSCustomObject with Status, Output, Duration.
+#>
+function Invoke-PostRestoreSSMDocument {
+  param(
+    [Parameter(Mandatory)][string]$InstanceId,
+    [Parameter(Mandatory)][string]$DocumentName,
+    [hashtable]$Parameters = @{},
+    [int]$TimeoutMinutes = 30
+  )
+
+  Write-Log "Executing SSM document '$DocumentName' on $InstanceId..."
+  Write-AuditEvent -EventType "SSM" -Action "Executing post-restore document" -Resource $InstanceId -Details @{ document = $DocumentName }
+
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+  $sendParams = @{
+    InstanceId   = @($InstanceId)
+    DocumentName = $DocumentName
+    Region       = $AWSRegion
+  }
+  if ($Parameters.Count -gt 0) {
+    $sendParams["Parameter"] = $Parameters
+  }
+
+  $ssmResult = Send-SSMCommand @sendParams
+  $commandId = $ssmResult.CommandId
+  $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 10
+    $invocation = Get-SSMCommandInvocation -CommandId $commandId `
+      -InstanceId $InstanceId -Details:$true -Region $AWSRegion
+
+    if ($invocation.Status -in @("Success", "Failed", "Cancelled", "TimedOut")) {
+      $sw.Stop()
+      $output = if ($invocation.CommandPlugins) { $invocation.CommandPlugins[0].Output } else { "" }
+
+      Write-AuditEvent -EventType "SSM" -Action "Post-restore document completed" -Resource $InstanceId -Details @{
+        status = $invocation.Status; commandId = $commandId
+      }
+
+      return [PSCustomObject]@{
+        Status   = $invocation.Status
+        Output   = $output
+        Duration = $sw.Elapsed.TotalSeconds
+      }
+    }
+  }
+
+  $sw.Stop()
+  return [PSCustomObject]@{
+    Status   = "TimedOut"
+    Output   = "Command timed out after $TimeoutMinutes minutes"
+    Duration = $sw.Elapsed.TotalSeconds
+  }
+}
+
+# =============================
+# Rollback / Cleanup
+# =============================
+
+<#
+.SYNOPSIS
+  Cleans up AWS resources created during a failed restore.
+  Best-effort: never throws, logs all actions.
+.PARAMETER InstanceId
+  The EC2 instance ID to terminate.
+.PARAMETER IsolatedSecurityGroupId
+  The isolated SG to delete.
+#>
+function Invoke-RestoreCleanup {
+  param(
+    [string]$InstanceId,
+    [string]$IsolatedSecurityGroupId
+  )
+
+  Write-Log "Initiating resource cleanup..." -Level WARNING
+
+  # Terminate EC2 instance
+  if ($InstanceId) {
+    try {
+      Write-Log "Terminating instance $InstanceId..."
+      Remove-EC2Instance -InstanceId $InstanceId -Force -Region $AWSRegion
+      Write-Log "Instance $InstanceId termination initiated" -Level SUCCESS
+      Write-AuditEvent -EventType "CLEANUP" -Action "Instance terminated" -Resource $InstanceId
+    }
+    catch {
+      Write-Log "Failed to terminate instance $InstanceId`: $($_.Exception.Message)" -Level WARNING
+    }
+  }
+
+  # Delete isolated security group (must wait for ENI detachment)
+  if ($IsolatedSecurityGroupId) {
+    try {
+      Write-Log "Waiting for ENI detachment before deleting SG $IsolatedSecurityGroupId..."
+      $sgDeadline = (Get-Date).AddMinutes(5)
+      $sgDeleted = $false
+      while ((Get-Date) -lt $sgDeadline) {
+        try {
+          Remove-EC2SecurityGroup -GroupId $IsolatedSecurityGroupId -Region $AWSRegion -Force
+          $sgDeleted = $true
+          Write-Log "Deleted isolated SG $IsolatedSecurityGroupId" -Level SUCCESS
+          Write-AuditEvent -EventType "CLEANUP" -Action "Security group deleted" -Resource $IsolatedSecurityGroupId
+          break
+        }
+        catch {
+          Start-Sleep -Seconds 10
+        }
+      }
+      if (-not $sgDeleted) {
+        Write-Log "Could not delete SG $IsolatedSecurityGroupId within timeout. Delete manually." -Level WARNING
+      }
+    }
+    catch {
+      Write-Log "SG cleanup error: $($_.Exception.Message)" -Level WARNING
+    }
+  }
+
+  Write-Log "Cleanup completed" -Level WARNING
+}
+
+# =============================
+# DR Drill Mode
+# =============================
+
+<#
+.SYNOPSIS
+  Executes DR drill lifecycle: keep instance alive for specified duration, then
+  auto-terminate. Produces compliance-ready drill report.
+.PARAMETER Instance
+  The restored EC2 instance.
+.PARAMETER KeepMinutes
+  How long to keep the instance alive before cleanup.
+#>
+function Invoke-DRDrill {
+  param(
+    [Parameter(Mandatory)][object]$Instance,
+    [int]$KeepMinutes = 30
+  )
+
+  Write-Log "DR Drill: Instance $($Instance.InstanceId) will be kept alive for $KeepMinutes minutes"
+  Write-AuditEvent -EventType "DRILL" -Action "DR drill started" -Resource $Instance.InstanceId -Details @{ keepMinutes = $KeepMinutes }
+
+  # Tag as DR drill
+  $drillTags = @(
+    [Amazon.EC2.Model.Tag]::new("veeam:dr-drill", "true"),
+    [Amazon.EC2.Model.Tag]::new("veeam:dr-drill-expiry", (Get-Date).AddMinutes($KeepMinutes).ToString("o"))
+  )
+  New-EC2Tag -Resource $Instance.InstanceId -Tag $drillTags -Region $AWSRegion
+
+  # Wait with periodic credential refresh
+  $drillDeadline = (Get-Date).AddMinutes($KeepMinutes)
+  while ((Get-Date) -lt $drillDeadline) {
+    $remaining = [Math]::Round(($drillDeadline - (Get-Date)).TotalMinutes, 0)
+    Write-Log "DR Drill: $remaining minutes remaining before cleanup"
+    Start-Sleep -Seconds ([Math]::Min(60, ($drillDeadline - (Get-Date)).TotalSeconds))
+    Update-AWSCredentialIfNeeded
+  }
+
+  # Auto-terminate
+  Write-Log "DR Drill: Keep-alive period expired. Initiating cleanup..."
+  Invoke-RestoreCleanup -InstanceId $Instance.InstanceId -IsolatedSecurityGroupId $script:IsolatedSGId
+
+  Write-AuditEvent -EventType "DRILL" -Action "DR drill completed" -Resource $Instance.InstanceId
+  Write-Log "DR Drill completed - instance terminated after $KeepMinutes minutes" -Level SUCCESS
 }
 
 # =============================
@@ -1235,6 +2112,42 @@ function New-RestoreReport {
         </div>
       </div>
 
+      $(if ($RTOTargetMinutes) {
+        $rtoResult = Measure-RTOCompliance -ActualDuration $Duration
+        $rtoColor = if ($rtoResult -and $rtoResult.Met) { "#00B336" } else { "#E74C3C" }
+        $rtoStatus = if ($rtoResult -and $rtoResult.Met) { "MET" } else { "BREACHED" }
+        $rtoActual = if ($rtoResult) { "$($rtoResult.RTOActual) min" } else { "N/A" }
+        $rtoDelta = if ($rtoResult) { "$($rtoResult.Delta) min" } else { "N/A" }
+@"
+      <div class="section">
+        <h2>SLA/RTO Compliance</h2>
+        <div class="grid">
+          <div class="field"><div class="label">RTO Target</div><div class="value">$RTOTargetMinutes min</div></div>
+          <div class="field"><div class="label">RTO Actual</div><div class="value">$rtoActual</div></div>
+          <div class="field"><div class="label">Status</div><div class="value" style="color:$rtoColor;font-weight:700">$rtoStatus</div></div>
+          <div class="field"><div class="label">Delta</div><div class="value">$rtoDelta</div></div>
+        </div>
+      </div>
+"@
+      })
+
+      $(if ($script:HealthCheckResults.Count -gt 0) {
+        $hcRows = ($script:HealthCheckResults | ForEach-Object {
+          $hcColor = if ($_.Passed) { "#00B336" } else { "#E74C3C" }
+          $hcResult = if ($_.Passed) { "PASS" } else { "FAIL" }
+          "<tr><td>$($_.TestName)</td><td style='color:$hcColor;font-weight:600'>$hcResult</td><td>$([System.Web.HttpUtility]::HtmlEncode($_.Details))</td><td>$([Math]::Round($_.Duration, 1))s</td></tr>"
+        }) -join "`n"
+@"
+      <div class="section">
+        <h2>Application Health Checks</h2>
+        <table>
+          <thead><tr><th>Test</th><th>Result</th><th>Details</th><th>Duration</th></tr></thead>
+          <tbody>$hcRows</tbody>
+        </table>
+      </div>
+"@
+      })
+
       <div class="section">
         <h2>Execution Log</h2>
         <table>
@@ -1243,7 +2156,7 @@ function New-RestoreReport {
         </table>
       </div>
     </div>
-    <div class="footer">Veeam Recovery Orchestrator &middot; AWS EC2 Restore Plugin v1.0.0</div>
+    <div class="footer">Veeam Recovery Orchestrator &middot; AWS EC2 Restore Plugin v2.0.0</div>
   </div>
 </body>
 </html>
@@ -1256,6 +2169,9 @@ function New-RestoreReport {
 # =============================
 # Main Execution
 # =============================
+
+# Guard: allow Pester to dot-source functions without triggering execution
+if ($MyInvocation.InvocationName -eq '.') { return }
 
 $restorePoint = $null
 $ec2Config = $null
@@ -1272,27 +2188,27 @@ try {
   if ($DryRun) { Write-Log "*** DRY RUN MODE - No changes will be made ***" -Level WARNING }
 
   # Step 1: Prerequisites
-  Write-Log "--- Step 1/8: Prerequisites ---"
+  Write-Log "--- Step 1: Prerequisites ---"
   Test-Prerequisites
 
   # Step 2: Connect to VBR
-  Write-Log "--- Step 2/8: VBR Connection ---"
+  Write-Log "--- Step 2: VBR Connection ---"
   Connect-VBRSession
 
   # Step 3: Connect to AWS
-  Write-Log "--- Step 3/8: AWS Authentication ---"
+  Write-Log "--- Step 3: AWS Authentication ---"
   Connect-AWSSession
 
   # Step 4: Find restore point
-  Write-Log "--- Step 4/8: Restore Point Discovery ---"
+  Write-Log "--- Step 4: Restore Point Discovery ---"
   $restorePoint = Find-RestorePoint
 
   # Step 5: Resolve EC2 target
-  Write-Log "--- Step 5/8: EC2 Target Configuration ---"
+  Write-Log "--- Step 5: EC2 Target Configuration ---"
   $ec2Config = Get-EC2TargetConfig
 
   # Step 6: Execute restore
-  Write-Log "--- Step 6/8: Restore Execution ---"
+  Write-Log "--- Step 6: Restore Execution ---"
   $session = Start-EC2Restore -RestorePoint $restorePoint -EC2Config $ec2Config
 
   if ($DryRun) {
@@ -1301,11 +2217,11 @@ try {
   }
   else {
     # Step 7: Monitor restore
-    Write-Log "--- Step 7/8: Restore Monitoring ---"
+    Write-Log "--- Step 7: Restore Monitoring ---"
     $finalSession = Wait-RestoreCompletion -Session $session
 
     # Step 8: Validate and tag
-    Write-Log "--- Step 8/8: Validation & Tagging ---"
+    Write-Log "--- Step 8: Validation & Tagging ---"
     $instanceName = if ($EC2InstanceName) { $EC2InstanceName } else {
       $vmLabel = if ($VMName) { $VMName } else { $BackupName }
       "Restored-$vmLabel-$stamp"
@@ -1314,7 +2230,40 @@ try {
     $instance = Test-EC2InstanceHealth -InstanceName $instanceName
     Set-EC2ResourceTags -Instance $instance
 
+    # Step 9: CloudWatch Alarms (optional)
+    if ($CreateCloudWatchAlarms -and $instance) {
+      Write-Log "--- Step 9: CloudWatch Alarms ---"
+      New-EC2CloudWatchAlarms -InstanceId $instance.InstanceId
+    }
+
+    # Step 10: Route53 DNS Update (optional)
+    if ($Route53HostedZoneId -and $Route53RecordName -and $instance) {
+      Write-Log "--- Step 10: Route53 DNS Update ---"
+      $dnsIP = if ($AssociatePublicIP -and $instance.PublicIpAddress) {
+        $instance.PublicIpAddress
+      }
+      else {
+        $instance.PrivateIpAddress
+      }
+      Update-Route53Record -InstanceIP $dnsIP
+    }
+
+    # Step 11: SSM Post-Restore Script (optional)
+    if ($PostRestoreSSMDocument -and $instance) {
+      Write-Log "--- Step 11: Post-Restore SSM Document ---"
+      $ssmResult = Invoke-PostRestoreSSMDocument -InstanceId $instance.InstanceId `
+        -DocumentName $PostRestoreSSMDocument -Parameters $PostRestoreSSMParameters
+      $ssmLevel = if ($ssmResult.Status -eq "Success") { "SUCCESS" } else { "WARNING" }
+      Write-Log "SSM document completed: $($ssmResult.Status)" -Level $ssmLevel
+    }
+
     $success = $true
+
+    # Step 12: DR Drill Lifecycle (optional, runs after success)
+    if ($DRDrillMode -and $instance) {
+      Write-Log "--- Step 12: DR Drill Lifecycle ---"
+      Invoke-DRDrill -Instance $instance -KeepMinutes $DRDrillKeepMinutes
+    }
   }
 }
 catch {
@@ -1322,6 +2271,18 @@ catch {
   Write-Log "FATAL: $errorMsg" -Level ERROR
   Write-Log "Stack: $($_.ScriptStackTrace)" -Level ERROR
   $script:ExitCode = 1
+  Write-AuditEvent -EventType "RESTORE" -Action "Restore failed" -Details @{ error = $errorMsg }
+
+  # Rollback on failure
+  if ($CleanupOnFailure -or $DRDrillMode) {
+    Write-Log "CleanupOnFailure enabled - initiating rollback..." -Level WARNING
+    try {
+      Invoke-RestoreCleanup -InstanceId $script:RestoredInstanceId -IsolatedSecurityGroupId $script:IsolatedSGId
+    }
+    catch {
+      Write-Log "Cleanup failed: $($_.Exception.Message)" -Level ERROR
+    }
+  }
 }
 finally {
   $duration = (Get-Date) - $script:StartTime
@@ -1335,27 +2296,49 @@ finally {
     Write-Log "Failed to generate report: $_" -Level WARNING
   }
 
+  # RTO compliance measurement
+  $rtoResult = if ($RTOTargetMinutes) { Measure-RTOCompliance -ActualDuration $duration } else { $null }
+
   # Export JSON result (machine-readable for VRO)
   $result = [ordered]@{
-    success         = $success
-    backupName      = $BackupName
-    vmName          = $VMName
-    region          = $AWSRegion
-    instanceId      = $script:RestoredInstanceId
-    instanceType    = $InstanceType
-    privateIp       = if ($instance) { $instance.PrivateIpAddress } else { $null }
-    publicIp        = if ($instance) { $instance.PublicIpAddress } else { $null }
-    restoreMode     = $RestoreMode
-    restorePoint    = if ($restorePoint) { $restorePoint.CreationTime.ToString("o") } else { $null }
-    durationSeconds = [int]$duration.TotalSeconds
-    dryRun          = [bool]$DryRun
-    vroPlan         = $VROPlanName
-    vroStep         = $VROStepName
-    error           = $errorMsg
-    timestamp       = (Get-Date -Format "o")
+    success          = $success
+    backupName       = $BackupName
+    vmName           = $VMName
+    region           = $AWSRegion
+    instanceId       = $script:RestoredInstanceId
+    instanceType     = $InstanceType
+    privateIp        = if ($instance) { $instance.PrivateIpAddress } else { $null }
+    publicIp         = if ($instance) { $instance.PublicIpAddress } else { $null }
+    restoreMode      = $RestoreMode
+    restorePoint     = if ($restorePoint) { $restorePoint.CreationTime.ToString("o") } else { $null }
+    durationSeconds  = [int]$duration.TotalSeconds
+    dryRun           = [bool]$DryRun
+    vroPlan          = $VROPlanName
+    vroStep          = $VROStepName
+    rtoTargetMinutes = $RTOTargetMinutes
+    rtoActualMinutes = if ($rtoResult) { $rtoResult.RTOActual } else { $null }
+    rtoMet           = if ($rtoResult) { $rtoResult.Met } else { $null }
+    healthChecks     = if ($script:HealthCheckResults.Count -gt 0) {
+      $script:HealthCheckResults | ForEach-Object {
+        [ordered]@{ test = $_.TestName; passed = $_.Passed; details = $_.Details; duration = $_.Duration }
+      }
+    } else { $null }
+    drDrill          = [bool]$DRDrillMode
+    networkIsolated  = [bool]$IsolateNetwork
+    error            = $errorMsg
+    timestamp        = (Get-Date -Format "o")
   }
 
   $result | ConvertTo-Json -Depth 5 | Set-Content -Path $jsonFile -Encoding UTF8
+
+  # Export audit trail
+  if ($EnableAuditTrail -and $script:AuditTrail.Count -gt 0) {
+    $auditFile = Join-Path $OutputPath "Restore-AuditTrail-$stamp.jsonl"
+    $script:AuditTrail | ForEach-Object {
+      $_ | ConvertTo-Json -Compress -Depth 5
+    } | Set-Content -Path $auditFile -Encoding UTF8
+    Write-Log "Audit trail saved: $auditFile ($($script:AuditTrail.Count) events)"
+  }
 
   # Output for VRO capture
   Write-VROOutput -Data @{
