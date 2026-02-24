@@ -671,14 +671,14 @@ function New-AssessmentReport {
             padding-bottom: 0.5rem;
             border-bottom: 2px solid var(--veeam-green);
         }
-        .competitive-note {
+        .capability-note {
             background: linear-gradient(135deg, #e8f5e9, #f1f8e9);
             border-left: 4px solid var(--veeam-green);
             padding: 1.5rem;
             border-radius: 0 8px 8px 0;
             margin-bottom: 2rem;
         }
-        .competitive-note h3 { color: var(--veeam-dark); margin-bottom: 0.5rem; }
+        .capability-note h3 { color: var(--veeam-dark); margin-bottom: 0.5rem; }
         .method-comparison {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -729,13 +729,12 @@ function New-AssessmentReport {
             </div>
         </div>
 
-        <div class="competitive-note">
-            <h3>NetWorker to Veeam Migration — MySQL Backup Capability</h3>
+        <div class="capability-note">
+            <h3>Veeam MySQL Backup — Supported Methods</h3>
             <p>
-                NetWorker provides MySQL hot backup through its MySQL Enterprise Backup (MEB) module.
-                Veeam delivers equivalent functionality using application-aware processing scripts that support
-                <strong>MEB</strong>, <strong>Percona XtraBackup</strong> (free), and <strong>FTWRL</strong> (universal).
-                This gives customers more flexibility and eliminates the NetWorker MySQL module license cost.
+                Veeam application-aware processing scripts support multiple MySQL hot backup methods:
+                <strong>MEB</strong> (MySQL Enterprise Backup), <strong>Percona XtraBackup</strong> (open-source), and <strong>FTWRL</strong> (universal fallback).
+                This provides flexibility to choose the best method for each environment.
             </p>
         </div>
 

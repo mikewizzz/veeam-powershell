@@ -12,10 +12,10 @@
 #
 # Supports: MySQL 5.7+, MySQL 8.0+, Percona Server, MariaDB 10.3+
 #
-# NetWorker Competitive Context:
-#   NetWorker uses MySQL Enterprise Backup (MEB) for hot backups. This script
-#   provides equivalent or superior functionality by supporting MEB *and*
-#   Percona XtraBackup (free/open-source alternative) and FTWRL fallback.
+# Supported backup methods:
+#   - MySQL Enterprise Backup (MEB): hot backup via backup-to-image
+#   - Percona XtraBackup: open-source hot backup alternative
+#   - FTWRL (FLUSH TABLES WITH READ LOCK): universal fallback
 # ============================================================================
 
 set -euo pipefail
@@ -131,7 +131,6 @@ run_meb_backup() {
     rm -f "$MEB_BACKUP_IMAGE"
 
     # MEB backup-to-image creates a single-file hot backup
-    # This is the equivalent of what NetWorker's MEB integration does
     if $MEB_BINARY \
         $mysql_args \
         --backup-dir="$MYSQL_BACKUP_DIR" \
