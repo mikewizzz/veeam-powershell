@@ -371,9 +371,8 @@ param(
 # =============================
 # Guardrails & Initialization
 # =============================
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
 
+# Script-level variables (safe for dot-source — no I/O or side effects)
 $script:StartTime = Get-Date
 $script:LogEntries = [System.Collections.Generic.List[object]]::new()
 $script:ExitCode = 0
@@ -387,16 +386,29 @@ $script:STSAssumeParams = $null
 $script:HealthCheckResults = @()
 $script:AuditTrail = [System.Collections.Generic.List[object]]::new()
 
-# Output folder
-$stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
-if (-not $OutputPath) {
-  $OutputPath = Join-Path "." "VRORestoreOutput_$stamp"
-}
-New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+# Guard: allow Pester to dot-source functions without triggering execution or side effects.
+# Variables above are safe (in-memory only). Everything below this guard has I/O side effects.
+if ($MyInvocation.InvocationName -eq '.') {
+  # Provide stubs so functions that reference these variables don't fail during Pester
+  $logFile = [System.IO.Path]::GetTempFileName()
+  $reportFile = ""
+  $jsonFile = ""
+  $stamp = "test"
+} else {
+  $ErrorActionPreference = "Stop"
+  $ProgressPreference = "SilentlyContinue"
 
-$logFile = Join-Path $OutputPath "Restore-Log-$stamp.txt"
-$reportFile = Join-Path $OutputPath "Restore-Report-$stamp.html"
-$jsonFile = Join-Path $OutputPath "Restore-Result-$stamp.json"
+  # Output folder
+  $stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+  if (-not $OutputPath) {
+    $OutputPath = Join-Path "." "VRORestoreOutput_$stamp"
+  }
+  New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+
+  $logFile = Join-Path $OutputPath "Restore-Log-$stamp.txt"
+  $reportFile = Join-Path $OutputPath "Restore-Report-$stamp.html"
+  $jsonFile = Join-Path $OutputPath "Restore-Result-$stamp.json"
+}
 
 # =============================
 # Logging & VRO Output
@@ -816,8 +828,8 @@ function Find-RestorePoint {
     $rpParams["Name"] = $VMName
   }
 
-  $restorePoints = Get-VBRRestorePoint @rpParams | Sort-Object CreationTime -Descending
-  if (-not $restorePoints -or $restorePoints.Count -eq 0) {
+  $restorePoints = @(Get-VBRRestorePoint @rpParams | Sort-Object CreationTime -Descending)
+  if ($restorePoints.Count -eq 0) {
     throw "No restore points found for backup '$BackupName'$(if($VMName){" / VM '$VMName'"})."
   }
 
@@ -1564,7 +1576,7 @@ function Test-EC2SSMCommand {
   $details = ""
 
   try {
-    $ssmResult = Send-SSMCommand -InstanceId $InstanceId `
+    $ssmResult = Send-SSMCommand -InstanceId @($InstanceId) `
       -DocumentName "AWS-RunShellScript" `
       -Parameter @{ commands = @($Command) } `
       -TimeoutSecond $TimeoutSeconds `
@@ -1580,12 +1592,17 @@ function Test-EC2SSMCommand {
 
       if ($invocation.Status -eq "Success") {
         $passed = $true
-        $output = $invocation.CommandPlugins[0].Output
-        $details = "SSM command succeeded: $($output.Substring(0, [Math]::Min(200, $output.Length)))"
+        $output = if ($invocation.CommandPlugins -and $invocation.CommandPlugins.Count -gt 0) { $invocation.CommandPlugins[0].Output } else { $null }
+        if ($output) {
+          $details = "SSM command succeeded: $($output.Substring(0, [Math]::Min(200, $output.Length)))"
+        } else {
+          $details = "SSM command succeeded (no output)"
+        }
         break
       }
       elseif ($invocation.Status -in @("Failed", "Cancelled", "TimedOut")) {
-        $details = "SSM command $($invocation.Status): $($invocation.CommandPlugins[0].Output)"
+        $output = if ($invocation.CommandPlugins -and $invocation.CommandPlugins.Count -gt 0) { $invocation.CommandPlugins[0].Output } else { $null }
+        $details = "SSM command $($invocation.Status)$(if ($output) { ": $output" })"
         break
       }
     }
@@ -1764,11 +1781,19 @@ function New-EC2CloudWatchAlarms {
   The IP address to point the record to.
 #>
 function Update-Route53Record {
-  param([Parameter(Mandatory)][string]$InstanceIP)
+  param(
+    [Parameter(Mandatory)][string]$InstanceIP,
+    [string]$InstanceHostname
+  )
 
-  Write-Log "Updating Route53 DNS: $Route53RecordName -> $InstanceIP ($Route53RecordType)"
+  # A records use IP; CNAME records require a hostname (fall back to IP if unavailable)
+  $recordValue = if ($Route53RecordType -eq "CNAME" -and $InstanceHostname) {
+    $InstanceHostname
+  } else {
+    $InstanceIP
+  }
 
-  $recordValue = if ($Route53RecordType -eq "A") { $InstanceIP } else { $InstanceIP }
+  Write-Log "Updating Route53 DNS: $Route53RecordName -> $recordValue ($Route53RecordType)"
 
   $change = @{
     Action            = "UPSERT"
@@ -1972,7 +1997,8 @@ function Invoke-DRDrill {
   while ((Get-Date) -lt $drillDeadline) {
     $remaining = [Math]::Round(($drillDeadline - (Get-Date)).TotalMinutes, 0)
     Write-Log "DR Drill: $remaining minutes remaining before cleanup"
-    Start-Sleep -Seconds ([Math]::Min(60, ($drillDeadline - (Get-Date)).TotalSeconds))
+    $sleepSec = [Math]::Max(1, [Math]::Min(60, ($drillDeadline - (Get-Date)).TotalSeconds))
+    Start-Sleep -Seconds $sleepSec
     Update-AWSCredentialIfNeeded
   }
 
@@ -2011,7 +2037,8 @@ function New-RestoreReport {
     [object]$Instance,
     [TimeSpan]$Duration,
     [bool]$Success,
-    [string]$ErrorMessage
+    [string]$ErrorMessage,
+    [object]$RTOResult
   )
 
   if (-not $GenerateReport) { return }
@@ -2032,7 +2059,7 @@ function New-RestoreReport {
       "SUCCESS" { "#00B336" }
       default   { "#6C757D" }
     }
-    "<tr><td style='white-space:nowrap'>$($_.Timestamp)</td><td><span style='color:$levelColor;font-weight:600'>$($_.Level)</span></td><td>$([System.Web.HttpUtility]::HtmlEncode($_.Message))</td></tr>"
+    "<tr><td style='white-space:nowrap'>$($_.Timestamp)</td><td><span style='color:$levelColor;font-weight:600'>$($_.Level)</span></td><td>$([System.Net.WebUtility]::HtmlEncode($_.Message))</td></tr>"
   }) -join "`n"
 
   $html = @"
@@ -2074,7 +2101,7 @@ function New-RestoreReport {
         <h1>VRO AWS EC2 Restore Report</h1>
         <div class="subtitle">Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")</div>
       </div>
-      <div class="status-banner">Restore Status: $statusText$(if($ErrorMessage){ " - $([System.Web.HttpUtility]::HtmlEncode($ErrorMessage))" })</div>
+      <div class="status-banner">Restore Status: $statusText$(if($ErrorMessage){ " - $([System.Net.WebUtility]::HtmlEncode($ErrorMessage))" })</div>
 
       <div class="section">
         <h2>Restore Summary</h2>
@@ -2112,12 +2139,11 @@ function New-RestoreReport {
         </div>
       </div>
 
-      $(if ($RTOTargetMinutes) {
-        $rtoResult = Measure-RTOCompliance -ActualDuration $Duration
-        $rtoColor = if ($rtoResult -and $rtoResult.Met) { "#00B336" } else { "#E74C3C" }
-        $rtoStatus = if ($rtoResult -and $rtoResult.Met) { "MET" } else { "BREACHED" }
-        $rtoActual = if ($rtoResult) { "$($rtoResult.RTOActual) min" } else { "N/A" }
-        $rtoDelta = if ($rtoResult) { "$($rtoResult.Delta) min" } else { "N/A" }
+      $(if ($RTOResult) {
+        $rtoColor = if ($RTOResult.Met) { "#00B336" } else { "#E74C3C" }
+        $rtoStatus = if ($RTOResult.Met) { "MET" } else { "BREACHED" }
+        $rtoActual = "$($RTOResult.RTOActual) min"
+        $rtoDelta = "$($RTOResult.Delta) min"
 @"
       <div class="section">
         <h2>SLA/RTO Compliance</h2>
@@ -2135,7 +2161,7 @@ function New-RestoreReport {
         $hcRows = ($script:HealthCheckResults | ForEach-Object {
           $hcColor = if ($_.Passed) { "#00B336" } else { "#E74C3C" }
           $hcResult = if ($_.Passed) { "PASS" } else { "FAIL" }
-          "<tr><td>$($_.TestName)</td><td style='color:$hcColor;font-weight:600'>$hcResult</td><td>$([System.Web.HttpUtility]::HtmlEncode($_.Details))</td><td>$([Math]::Round($_.Duration, 1))s</td></tr>"
+          "<tr><td>$($_.TestName)</td><td style='color:$hcColor;font-weight:600'>$hcResult</td><td>$([System.Net.WebUtility]::HtmlEncode($_.Details))</td><td>$([Math]::Round($_.Duration, 1))s</td></tr>"
         }) -join "`n"
 @"
       <div class="section">
@@ -2170,7 +2196,7 @@ function New-RestoreReport {
 # Main Execution
 # =============================
 
-# Guard: allow Pester to dot-source functions without triggering execution
+# When dot-sourced (Pester), stop here — functions are loaded, no execution
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 $restorePoint = $null
@@ -2245,7 +2271,8 @@ try {
       else {
         $instance.PrivateIpAddress
       }
-      Update-Route53Record -InstanceIP $dnsIP
+      $dnsHostname = if ($instance.PublicDnsName) { $instance.PublicDnsName } else { $instance.PrivateDnsName }
+      Update-Route53Record -InstanceIP $dnsIP -InstanceHostname $dnsHostname
     }
 
     # Step 11: SSM Post-Restore Script (optional)
@@ -2287,17 +2314,17 @@ catch {
 finally {
   $duration = (Get-Date) - $script:StartTime
 
+  # RTO compliance measurement (computed once, shared with report and JSON output)
+  $rtoResult = if ($RTOTargetMinutes) { Measure-RTOCompliance -ActualDuration $duration } else { $null }
+
   # Generate report
   try {
     New-RestoreReport -RestorePoint $restorePoint -EC2Config $ec2Config -Instance $instance `
-      -Duration $duration -Success $success -ErrorMessage $errorMsg
+      -Duration $duration -Success $success -ErrorMessage $errorMsg -RTOResult $rtoResult
   }
   catch {
     Write-Log "Failed to generate report: $_" -Level WARNING
   }
-
-  # RTO compliance measurement
-  $rtoResult = if ($RTOTargetMinutes) { Measure-RTOCompliance -ActualDuration $duration } else { $null }
 
   # Export JSON result (machine-readable for VRO)
   $result = [ordered]@{
