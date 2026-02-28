@@ -111,3 +111,18 @@ function _ExtractTaskId {
   if ($raw.status.execution_context.task_uuid) { return $raw.status.execution_context.task_uuid }
   return $null
 }
+
+function _FormatTimeAgo {
+  <#
+  .SYNOPSIS
+    Convert a datetime to a human-readable relative time string (e.g., "2 hours ago").
+  #>
+  param([datetime]$DateTime)
+  $span = (Get-Date) - $DateTime
+  if ($span.TotalMinutes -lt 1)     { return "just now" }
+  if ($span.TotalMinutes -lt 60)    { $n = [math]::Floor($span.TotalMinutes); return "$n minute$(if($n -ne 1){'s'}) ago" }
+  if ($span.TotalHours -lt 24)      { $n = [math]::Floor($span.TotalHours);   return "$n hour$(if($n -ne 1){'s'}) ago" }
+  if ($span.TotalDays -lt 30)       { $n = [math]::Floor($span.TotalDays);    return "$n day$(if($n -ne 1){'s'}) ago" }
+  if ($span.TotalDays -lt 365)      { $n = [math]::Floor($span.TotalDays / 30); return "$n month$(if($n -ne 1){'s'}) ago" }
+  $n = [math]::Floor($span.TotalDays / 365); return "$n year$(if($n -ne 1){'s'}) ago"
+}
