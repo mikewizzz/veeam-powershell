@@ -406,6 +406,21 @@ function _GetNGTStatus {
   return [PSCustomObject]@{ Installed = $false; Enabled = $false }
 }
 
+function _ExtractTaskId {
+  <#
+  .SYNOPSIS
+    Extract async task ID from a v4 API mutating response (POST/PUT/DELETE).
+    v4 returns { data: { extId: "taskExtId" } }; v3 returns task_uuid in status.
+  #>
+  param($Response)
+  $raw = if ($Response.Body) { $Response.Body } else { $Response }
+  $data = if ($raw.data) { $raw.data } else { $raw }
+  if ($data.extId) { return $data.extId }
+  # v3 fallback: task_uuid in status
+  if ($raw.status.execution_context.task_uuid) { return $raw.status.execution_context.task_uuid }
+  return $null
+}
+
 #endregion
 
 #region Nutanix Prism Central REST API
@@ -868,9 +883,9 @@ function Get-PrismVMIPAddress {
       $nics = $vm.nics
       foreach ($nic in $nics) {
         # v4 NIC IP endpoints - try multiple response structure paths
+        # v4: IPs only under networkInfo.ipv4Info (per VMM v4 SDK Nic model)
         $ipEndpoints = $nic.networkInfo.ipv4Info.learnedIpAddresses
         if (-not $ipEndpoints) { $ipEndpoints = $nic.networkInfo.ipv4Info.ipAddresses }
-        if (-not $ipEndpoints) { $ipEndpoints = $nic.ipAddresses }
         foreach ($ip in $ipEndpoints) {
           $addr = if ($ip.value) { $ip.value } else { "$ip" }
           if ($addr -and $addr -notmatch "^169\.254") { return $addr }
@@ -982,8 +997,8 @@ function Set-PrismVMNIC {
     foreach ($nic in $nics) {
       $nicId = $nic.extId
       $nicResult = Invoke-PrismAPI -Method "GET" -Endpoint "$nicsEndpoint/$nicId"
-      $nicData = if ($nicResult.Body) { $nicResult.Body } else { $nicResult }
-      $nicData = if ($nicData.data) { $nicData.data } else { $nicData }
+      $raw = if ($nicResult.Body) { $nicResult.Body } else { $nicResult }
+      $nicData = if ($raw.data) { $raw.data } else { $raw }
       $nicEtag = if ($nicResult.ETag) { $nicResult.ETag } else { $null }
 
       # Update subnet reference on existing NIC
@@ -993,7 +1008,9 @@ function Set-PrismVMNIC {
       else {
         $nicData.networkInfo = @{ subnet = @{ extId = $SubnetUUID } }
       }
-      Invoke-PrismAPI -Method "PUT" -Endpoint "$nicsEndpoint/$nicId" -Body $nicData -IfMatch $nicEtag
+      $putResult = Invoke-PrismAPI -Method "PUT" -Endpoint "$nicsEndpoint/$nicId" -Body $nicData -IfMatch $nicEtag
+      $taskId = _ExtractTaskId $putResult
+      if ($taskId) { Wait-PrismTask -TaskUUID $taskId -TimeoutSec 120 }
     }
 
     if ($nics.Count -eq 0) {
@@ -1002,7 +1019,9 @@ function Set-PrismVMNIC {
         backingInfo = @{ model = "VIRTIO"; isConnected = $true }
         networkInfo = @{ nicType = "NORMAL_NIC"; subnet = @{ extId = $SubnetUUID } }
       }
-      Invoke-PrismAPI -Method "POST" -Endpoint $nicsEndpoint -Body $newNic
+      $postResult = Invoke-PrismAPI -Method "POST" -Endpoint $nicsEndpoint -Body $newNic
+      $taskId = _ExtractTaskId $postResult
+      if ($taskId) { Wait-PrismTask -TaskUUID $taskId -TimeoutSec 120 }
     }
   }
   else {
@@ -1034,7 +1053,9 @@ function Set-PrismVMPowerState {
   if ($PrismApiVersion -eq "v4") {
     # v4: dedicated action endpoint per Nutanix VMM v4 SDK
     $action = if ($State -eq "OFF") { "power-off" } else { "power-on" }
-    Invoke-PrismAPI -Method "POST" -Endpoint "$($script:PrismEndpoints.VMs)/$UUID/`$actions/$action" -Body @{}
+    $result = Invoke-PrismAPI -Method "POST" -Endpoint "$($script:PrismEndpoints.VMs)/$UUID/`$actions/$action" -Body @{}
+    $taskId = _ExtractTaskId $result
+    if ($taskId) { Wait-PrismTask -TaskUUID $taskId -TimeoutSec 120 }
   }
   else {
     # v3: GET spec, modify power_state, PUT with spec_version
@@ -1109,7 +1130,7 @@ function Wait-PrismTask {
     }
     elseif ($status -eq "FAILED") {
       $errorMsg = if ($PrismApiVersion -eq "v4") {
-        if ($task.errorMessages) { ($task.errorMessages | ForEach-Object { if ($_.message) { $_.message } else { "$_" } }) -join "; " } else { "unknown" }
+        if ($task.errorMessages -and $task.errorMessages.Count -gt 0) { ($task.errorMessages | ForEach-Object { if ($_.message) { $_.message } else { "$_" } }) -join "; " } else { "unknown" }
       } else {
         if ($task.error_detail) { $task.error_detail } else { "unknown" }
       }
