@@ -33,10 +33,10 @@ Veeam SureBackup is available for VMware vSphere but **not for Nutanix AHV**. Or
 | Component | Version | Notes |
 |---|---|---|
 | PowerShell | 5.1+ (7.x recommended) | Cross-platform with PS 7 |
-| Veeam Backup & Replication | 12.3+ | With Nutanix AHV plugin installed |
+| Veeam Backup & Replication | 13.0.1+ | With Nutanix AHV plugin v9 installed |
 | Veeam PowerShell Module | `Veeam.Backup.PowerShell` | Installed with VBR Console |
-| Nutanix Prism Central | pc.2024.1+ | REST API v3 |
-| Nutanix AHV Plugin for Veeam | 5.0+ | Registered in VBR |
+| Nutanix Prism Central | pc.2024.1+ | REST API v3 or v4 |
+| Veeam Plug-in for Nutanix AHV | v9 (v8 supported) | Registered in VBR; REST API for FullRestore |
 
 ### Nutanix Setup: Isolated Network
 
@@ -115,6 +115,31 @@ $groups = @{
                                  -MaxConcurrentVMs 5
 ```
 
+### Full Restore with Network Selection (Zero Production Exposure)
+
+```powershell
+# Uses the Veeam Plug-in for Nutanix AHV REST API (v9) to perform a full VM restore
+# with native network adapter mapping — VM is created directly on the isolated network.
+# Slower than InstantRecovery (full disk copy) but inherently safer.
+# API Ref: https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints
+$vbrCred = Get-Credential   # VBR server credentials (required for REST API auth)
+.\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" `
+                                 -PrismCentral "pc01" `
+                                 -PrismCredential $cred `
+                                 -VBRCredential $vbrCred `
+                                 -RestoreMethod "FullRestore" `
+                                 -TestPorts @(22, 443)
+```
+
+### Skip Preflight Checks (Not Recommended)
+
+```powershell
+.\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" `
+                                 -PrismCentral "pc01" `
+                                 -PrismCredential $cred `
+                                 -SkipPreflight
+```
+
 ### Specific VMs Only
 
 ```powershell
@@ -183,10 +208,39 @@ $groups = @{
 | `-CleanupOnFailure` | No | `$true` | Clean up VMs even if tests fail |
 | `-DryRun` | No | `$false` | Simulate without recovering VMs |
 
+### Restore Method
+
+| Parameter | Required | Default | Description |
+|---|---|---|---|
+| `-RestoreMethod` | No | `InstantRecovery` | `InstantRecovery` (fast, NIC swap) or `FullRestore` (slower, native network mapping via [VBAHV REST API](https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints)) |
+| `-VBAHVApiVersion` | No | `v9` | Veeam AHV Plugin REST API version (`v8` or `v9`). Only `v8` and `v9` are supported by the plugin |
+
+### Preflight Health Checks
+
+| Parameter | Required | Default | Description |
+|---|---|---|---|
+| `-PreflightMaxAgeDays` | No | `7` | Max restore point age (days) before warning |
+| `-SkipPreflight` | No | `$false` | Skip all preflight checks (not recommended) |
+
 ## Verification Tests
 
+### Phase 0: Preflight Health Checks (NEW)
+Validates cluster health, capacity, network configuration, restore point integrity/recency, and backup job status before any recovery operations. Prevents wasting time on recoveries that are likely to fail.
+
 ### Phase 1: VM Recovery
-Veeam Instant VM Recovery mounts the backup as a live VM on the Nutanix cluster, connected to the isolated network. No production network exposure.
+
+**InstantRecovery (default):** Veeam Instant VM Recovery mounts the backup as a live VM via vPower NFS. The script powers the VM off, switches the NIC to the isolated network via Prism API, then powers it back on. Fast (~30s) but has a brief production network exposure window.
+
+**FullRestore:** Uses the [Veeam Plug-in for Nutanix AHV REST API v9](https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints) `POST /restorePoints/restore` with `networkAdapters` mapping. The VM is created directly on the isolated network — zero production exposure. Slower (full disk copy, minutes) but inherently safer.
+
+| Aspect | InstantRecovery | FullRestore |
+|--------|----------------|-------------|
+| Speed | Fast (~30s vPower mount) | Slow (minutes, full disk copy) |
+| Network safety | Power-off/NIC-swap workaround | Native network mapping — zero exposure |
+| Production exposure | Brief (~5-15s during VM discovery) | None |
+| Cleanup method | `Stop-VBRInstantRecovery` | Power off + delete VM from Prism |
+| VBR session | Yes (vPower NFS mount) | No (independent VM) |
+| Requires | VBR PowerShell cmdlets | VBR OAuth2 + AHV Plugin REST API (v8/v9) |
 
 ### Phase 2: Heartbeat (NGT)
 Checks VM power state and Nutanix Guest Tools (NGT) communication to verify the OS booted successfully.
@@ -483,7 +537,8 @@ If the script is interrupted or crashes, recovered VMs may be left running on th
 
 | Version | Date | Changes |
 |---|---|---|
-| 1.1.0 | 2026-02-28 | Network isolation hardening: power-off-before-NIC-switch, fatal NIC failure, XSS protection, application group dependency enforcement, expanded tests |
+| 1.2.0 | 2026-02-28 | Preflight health checks, Full Restore via [VBAHV Plugin REST API v9](https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints) with native network mapping, `-RestoreMethod` parameter, `-SkipPreflight` / `-PreflightMaxAgeDays` params |
+| 1.1.0 | 2026-02-22 | Network isolation hardening: power-off-before-NIC-switch, fatal NIC failure, XSS protection, application group dependency enforcement, expanded tests |
 | 1.0.0 | 2026-02-15 | Initial release - SureBackup for Nutanix AHV |
 
 ## License

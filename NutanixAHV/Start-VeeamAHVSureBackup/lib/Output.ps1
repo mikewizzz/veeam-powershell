@@ -88,7 +88,13 @@ function Invoke-Cleanup {
   foreach ($session in $script:RecoverySessions) {
     if ($session.Status -eq "Running" -or $session.Status -eq "Failed") {
       try {
-        Stop-AHVInstantRecovery -RecoveryInfo $session
+        # Dispatch cleanup based on restore method
+        if ($session.RestoreMethod -eq "FullRestore") {
+          Stop-AHVFullRestore -RecoveryInfo $session
+        }
+        else {
+          Stop-AHVInstantRecovery -RecoveryInfo $session
+        }
         $cleanedCount++
       }
       catch {

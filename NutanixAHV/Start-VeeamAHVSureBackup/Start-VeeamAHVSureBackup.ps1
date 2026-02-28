@@ -136,14 +136,36 @@
   .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -PrismCentral "pc01" -PrismCredential $cred -BackupJobNames "AHV-Tier1" -TestCustomScript "C:\Scripts\Verify-AppHealth.ps1"
   # Custom application-level verification script
 
+.PARAMETER RestoreMethod
+  Restore method: "InstantRecovery" (default) or "FullRestore".
+  - InstantRecovery: Uses Start-VBRInstantRecoveryToNutanixAHV (fast, vPower NFS mount).
+    The VM initially boots on the production network; the script powers it off, swaps
+    the NIC to the isolated network via Prism API, then powers it back on.
+  - FullRestore: Uses the Veeam Plug-in for Nutanix AHV REST API (v9) to perform a full
+    VM restore with native network adapter mapping via POST /restorePoints/restore. The
+    VM is created directly on the isolated network — zero production exposure. Slower
+    (full disk copy) but inherently safer for network isolation. Requires VBR credentials.
+    API Ref: https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints
+
+.PARAMETER VBAHVApiVersion
+  Veeam Plug-in for Nutanix AHV REST API version (default: "v9").
+  Only v8 and v9 are supported. Used when RestoreMethod is FullRestore.
+
+.PARAMETER PreflightMaxAgeDays
+  Maximum restore point age in days before preflight warns (default: 7).
+
+.PARAMETER SkipPreflight
+  Skip all preflight health checks. Not recommended for production.
+
 .NOTES
-  Version: 1.1.0
+  Version: 1.2.0
   Author: Community Contributors
-  Date: 2026-02-22
+  Date: 2026-02-28
   Requires: PowerShell 5.1+ (7.x recommended)
   Modules: Veeam.Backup.PowerShell (VBR Console), VeeamPSSnapin (legacy)
   Nutanix: Prism Central v4 API (pc.2024.3+ GA, default) or v3 (legacy)
-  VBR: Veeam Backup & Replication v12.3+ with Nutanix AHV plugin
+  VBR: Veeam Backup & Replication v13.0.1+ with Nutanix AHV Plugin v9 (for FullRestore)
+  AHV Plugin REST API: https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints
 #>
 
 [CmdletBinding(DefaultParameterSetName = "NetworkByName")]
@@ -206,7 +228,18 @@ param(
 
   # Behavior
   [bool]$CleanupOnFailure = $true,
-  [switch]$DryRun
+  [switch]$DryRun,
+
+  # Restore Method
+  [ValidateSet("InstantRecovery", "FullRestore")]
+  [string]$RestoreMethod = "InstantRecovery",
+  [ValidateSet("v8", "v9")]
+  [string]$VBAHVApiVersion = "v9",
+
+  # Preflight Health Checks
+  [ValidateRange(1, 365)]
+  [int]$PreflightMaxAgeDays = 7,
+  [switch]$SkipPreflight
 )
 
 $ErrorActionPreference = "Stop"
@@ -220,7 +253,7 @@ $script:LogEntries = New-Object System.Collections.Generic.List[object]
 $script:TestResults = New-Object System.Collections.Generic.List[object]
 $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
 $script:PrismHeaders = @{}
-$script:TotalSteps = 8
+$script:TotalSteps = 9
 $script:CurrentStep = 0
 
 # API version-aware base URL and endpoint mapping
@@ -256,7 +289,8 @@ if (-not $OutputPath) {
 $libPath = Join-Path $PSScriptRoot "lib"
 $requiredLibs = @(
   "Logging.ps1", "Helpers.ps1", "PrismAPI.ps1", "VeeamVBR.ps1",
-  "Verification.ps1", "Orchestration.ps1", "Reporting.ps1", "Output.ps1"
+  "Verification.ps1", "Orchestration.ps1", "Reporting.ps1", "Output.ps1",
+  "Preflight.ps1"
 )
 foreach ($lib in $requiredLibs) {
   $libFile = Join-Path $libPath $lib
@@ -305,11 +339,61 @@ try {
   Write-Log "" -Level "INFO"
   Write-Log "=== SureBackup Test Plan ===" -Level "INFO"
   Write-Log "VMs to test: $($restorePoints.Count)" -Level "INFO"
+  Write-Log "Restore method: $RestoreMethod" -Level "INFO"
   Write-Log "Isolated network: $($isolatedNet.Name) (VLAN $($isolatedNet.VlanId))" -Level "INFO"
   Write-Log "Tests: Heartbeat$(if($TestPing){', Ping'})$(if($TestPorts){', Ports: '+($TestPorts -join ',')})$(if($TestDNS){', DNS'})$(if($TestHttpEndpoints){', HTTP'})$(if($TestCustomScript){', Custom Script'})" -Level "INFO"
   Write-Log "" -Level "INFO"
 
-  # ---- Step 6: Execute SureBackup recovery and testing ----
+  # ---- Step 6: Preflight health checks ----
+  if ($SkipPreflight) {
+    Write-ProgressStep -Activity "Preflight Health Checks" -Status "SKIPPED (-SkipPreflight)"
+    Write-Log "Preflight health checks SKIPPED by user request" -Level "WARNING"
+  }
+  else {
+    Write-ProgressStep -Activity "Preflight Health Checks" -Status "Validating cluster, network, and backup health..."
+
+    # Get cluster info for preflight checks
+    $clusters = @()
+    try {
+      if ($PrismApiVersion -eq "v4") {
+        $clustersRaw = Invoke-PrismAPI -Method "GET" -Endpoint $script:PrismEndpoints.Clusters
+        $clustersBody = Resolve-PrismResponseBody $clustersRaw
+        $clusters = if ($clustersBody.data) { @($clustersBody.data) } else { @() }
+      }
+      else {
+        $listBody = @{ kind = "cluster"; length = 100 }
+        $clustersRaw = Invoke-PrismAPI -Method "POST" -Endpoint "$($script:PrismEndpoints.Clusters)/list" -Body $listBody
+        $clusters = if ($clustersRaw.entities) { @($clustersRaw.entities) } else { @() }
+      }
+    }
+    catch {
+      Write-Log "  Could not retrieve cluster info for preflight: $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    $preflightResult = Test-PreflightRequirements `
+      -Clusters $clusters `
+      -IsolatedNetwork $isolatedNet `
+      -RestorePoints $restorePoints `
+      -BackupJobs $ahvJobs `
+      -MaxConcurrentVMs $MaxConcurrentVMs `
+      -MaxAgeDays $PreflightMaxAgeDays `
+      -RestoreMethod $RestoreMethod
+
+    if (-not $preflightResult.Success) {
+      throw "Preflight health checks FAILED with $($preflightResult.Issues.Count) blocking issue(s). Fix the issues above and re-run, or use -SkipPreflight to bypass (not recommended)."
+    }
+  }
+
+  # ---- Step 7: Initialize VBAHV Plugin API (for FullRestore mode) ----
+  if ($RestoreMethod -eq "FullRestore") {
+    Write-ProgressStep -Activity "Connecting to VBAHV Plugin REST API" -Status "Authenticating via VBR OAuth2..."
+    Initialize-VBAHVPluginConnection
+  }
+  else {
+    $script:CurrentStep++  # Skip this step for InstantRecovery
+  }
+
+  # ---- Step 8: Execute SureBackup recovery and testing ----
   Write-ProgressStep -Activity "Executing SureBackup Verification" -Status "Recovering and testing VMs..."
 
   $bootOrder = Get-VMBootOrder -RestorePoints $restorePoints
@@ -338,10 +422,15 @@ try {
       foreach ($batch in $batches) {
         $recoveries = @()
 
-        # Start instant recovery for each VM in the batch
+        # Start recovery for each VM in the batch
         foreach ($rp in $batch) {
-          Write-Log "Recovering '$($rp.VMName)'..." -Level "INFO"
-          $recovery = Start-AHVInstantRecovery -RestorePointInfo $rp -IsolatedNetwork $isolatedNet
+          Write-Log "Recovering '$($rp.VMName)' via $RestoreMethod..." -Level "INFO"
+          if ($RestoreMethod -eq "FullRestore") {
+            $recovery = Start-AHVFullRestore -RestorePointInfo $rp -IsolatedNetwork $isolatedNet
+          }
+          else {
+            $recovery = Start-AHVInstantRecovery -RestorePointInfo $rp -IsolatedNetwork $isolatedNet
+          }
           $recoveries += $recovery
         }
 
@@ -366,7 +455,12 @@ try {
 
         # Cleanup this batch before moving to next
         foreach ($recovery in $recoveries) {
-          Stop-AHVInstantRecovery -RecoveryInfo $recovery
+          if ($recovery.RestoreMethod -eq "FullRestore") {
+            Stop-AHVFullRestore -RecoveryInfo $recovery
+          }
+          else {
+            Stop-AHVInstantRecovery -RecoveryInfo $recovery
+          }
         }
       }
     }
@@ -392,11 +486,11 @@ try {
     }
   }
 
-  # ---- Step 7: Generate reports ----
+  # ---- Step 9: Generate reports ----
   Write-ProgressStep -Activity "Generating Reports" -Status "Creating HTML report and CSVs..."
   Export-Results -TestResults $script:TestResults -RestorePoints $restorePoints -IsolatedNetwork $isolatedNet
 
-  # ---- Step 8: Final summary ----
+  # ---- Final summary ----
   Write-ProgressStep -Activity "Complete" -Status "SureBackup verification finished"
 
   $summary = _GetTestSummary -TestResults $script:TestResults

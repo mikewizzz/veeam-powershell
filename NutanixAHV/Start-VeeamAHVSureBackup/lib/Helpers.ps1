@@ -67,7 +67,9 @@ function _NewRecoveryInfo {
     [string]$RecoveryVMUUID,
     $VBRSession,
     [string]$Status,
-    [string]$Error
+    [string]$Error,
+    [ValidateSet("InstantRecovery", "FullRestore")]
+    [string]$RestoreMethod = "InstantRecovery"
   )
   [PSCustomObject]@{
     OriginalVMName = $OriginalVMName
@@ -77,6 +79,7 @@ function _NewRecoveryInfo {
     StartTime      = Get-Date
     Status         = $Status
     Error          = $Error
+    RestoreMethod  = $RestoreMethod
   }
 }
 
