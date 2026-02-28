@@ -2,6 +2,16 @@
 # HTML Report Generation
 # =============================
 
+function _EscapeHTML {
+  <#
+  .SYNOPSIS
+    Escape HTML special characters to prevent XSS in generated reports
+  #>
+  param([string]$Text)
+  if (-not $Text) { return "" }
+  return $Text -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;' -replace '"', '&quot;' -replace "'", '&#39;'
+}
+
 function New-HTMLReport {
   <#
   .SYNOPSIS
@@ -52,11 +62,15 @@ function New-HTMLReport {
     $rpDate = if ($rpInfo) { $rpInfo.CreationTime.ToString("yyyy-MM-dd HH:mm") } else { "N/A" }
     $rpJob = if ($rpInfo) { $rpInfo.JobName } else { "N/A" }
 
+    $safeVM = _EscapeHTML $vm
+    $safeJob = _EscapeHTML $rpJob
+    $safeDate = _EscapeHTML $rpDate
+
     $vmDetailRows += @"
     <tr>
-      <td><strong>$vm</strong></td>
-      <td>$rpJob</td>
-      <td>$rpDate</td>
+      <td><strong>$safeVM</strong></td>
+      <td>$safeJob</td>
+      <td>$safeDate</td>
       <td>$vmPassed / $vmTotal</td>
       <td><span class="$vmStatusClass">$vmStatus</span></td>
     </tr>
@@ -70,12 +84,16 @@ function New-HTMLReport {
     $statusText = if ($result.Passed) { "PASS" } else { "FAIL" }
     $durationText = "$([math]::Round($result.Duration, 1))s"
 
+    $safeVMName = _EscapeHTML $result.VMName
+    $safeTestName = _EscapeHTML $result.TestName
+    $safeDetails = _EscapeHTML $result.Details
+
     $testDetailRows += @"
     <tr>
-      <td>$($result.VMName)</td>
-      <td>$($result.TestName)</td>
+      <td>$safeVMName</td>
+      <td>$safeTestName</td>
       <td><span class="$statusClass">$statusText</span></td>
-      <td>$($result.Details)</td>
+      <td>$safeDetails</td>
       <td>$durationText</td>
     </tr>
 "@
@@ -92,7 +110,8 @@ function New-HTMLReport {
       "TEST-FAIL" { "log-error" }
       default     { "log-info" }
     }
-    $logRows += "    <tr class=`"$logClass`"><td>$($log.Timestamp)</td><td>$($log.Level)</td><td>$($log.Message)</td></tr>`n"
+    $safeMessage = _EscapeHTML $log.Message
+    $logRows += "    <tr class=`"$logClass`"><td>$($log.Timestamp)</td><td>$($log.Level)</td><td>$safeMessage</td></tr>`n"
   }
 
   $html = @"

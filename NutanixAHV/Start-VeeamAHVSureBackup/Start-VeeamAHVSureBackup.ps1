@@ -254,14 +254,17 @@ if (-not $OutputPath) {
 # Load Function Libraries
 # =============================
 $libPath = Join-Path $PSScriptRoot "lib"
-. "$libPath/Logging.ps1"
-. "$libPath/Helpers.ps1"
-. "$libPath/PrismAPI.ps1"
-. "$libPath/VeeamVBR.ps1"
-. "$libPath/Verification.ps1"
-. "$libPath/Orchestration.ps1"
-. "$libPath/Reporting.ps1"
-. "$libPath/Output.ps1"
+$requiredLibs = @(
+  "Logging.ps1", "Helpers.ps1", "PrismAPI.ps1", "VeeamVBR.ps1",
+  "Verification.ps1", "Orchestration.ps1", "Reporting.ps1", "Output.ps1"
+)
+foreach ($lib in $requiredLibs) {
+  $libFile = Join-Path $libPath $lib
+  if (-not (Test-Path $libFile)) {
+    throw "Required library not found: $libFile. Ensure all files in lib/ are present."
+  }
+  . $libFile
+}
 
 # =============================
 # Main Execution
@@ -342,8 +345,8 @@ try {
           $recoveries += $recovery
         }
 
-        # Wait for all VMs in batch to boot
-        Write-Log "Waiting for VMs to boot (timeout: ${TestBootTimeoutSec}s)..." -Level "INFO"
+        # Wait for all VMs in batch to finish booting on isolated network
+        Write-Log "Waiting for VMs to boot on isolated network (timeout: ${TestBootTimeoutSec}s)..." -Level "INFO"
         foreach ($recovery in $recoveries) {
           if ($recovery.RecoveryVMUUID) {
             $powered = Wait-PrismVMPowerState -UUID $recovery.RecoveryVMUUID -State "ON" -TimeoutSec $TestBootTimeoutSec
@@ -368,15 +371,20 @@ try {
       }
     }
 
-    # If using application groups, only proceed to next group if current group passed
+    # If using application groups, enforce dependency chain: stop if current group failed
     if ($ApplicationGroups -and $groupName -ne "Ungrouped") {
       $groupVMNames = $groupRPs | ForEach-Object { $_.VMName }
       $groupResults = $script:TestResults | Where-Object { $_.VMName -in $groupVMNames }
       $groupFailures = $groupResults | Where-Object { -not $_.Passed }
 
       if ($groupFailures.Count -gt 0 -and -not $DryRun) {
-        Write-Log "$groupName has $($groupFailures.Count) test failure(s) - subsequent groups depend on this group" -Level "WARNING"
-        Write-Log "Continuing with remaining groups (failures noted in report)..." -Level "WARNING"
+        Write-Log "$groupName FAILED: $($groupFailures.Count) test failure(s)" -Level "ERROR"
+        Write-Log "Halting subsequent application groups — downstream groups depend on $groupName" -Level "ERROR"
+        Write-Log "Failed tests:" -Level "ERROR"
+        foreach ($f in $groupFailures) {
+          Write-Log "  - $($f.VMName)/$($f.TestName): $($f.Details)" -Level "ERROR"
+        }
+        break
       }
       else {
         Write-Log "$groupName : All tests passed" -Level "SUCCESS"
@@ -431,9 +439,11 @@ catch {
   Write-Log "FATAL ERROR: $($_.Exception.Message)" -Level "ERROR"
   Write-Log "Stack trace: $($_.ScriptStackTrace)" -Level "ERROR"
 
-  # Emergency cleanup
-  if ($script:RecoverySessions.Count -gt 0 -and $CleanupOnFailure) {
-    Write-Log "Performing emergency cleanup..." -Level "WARNING"
+  # Emergency cleanup — always clean up recovered VMs to prevent production exposure.
+  # CleanupOnFailure controls whether test failures cause early abort, NOT
+  # whether recovered VMs are cleaned up (those must always be removed).
+  if ($script:RecoverySessions.Count -gt 0) {
+    Write-Log "Performing emergency cleanup of $($script:RecoverySessions.Count) recovery session(s)..." -Level "WARNING"
     Invoke-Cleanup
   }
 

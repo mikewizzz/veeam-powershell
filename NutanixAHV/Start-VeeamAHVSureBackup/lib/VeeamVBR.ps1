@@ -175,13 +175,12 @@ function Start-AHVInstantRecovery {
   #>
   param(
     [Parameter(Mandatory = $true)]$RestorePointInfo,
-    [Parameter(Mandatory = $true)]$IsolatedNetwork,
-    [string]$ClusterUUID,
-    [string]$ContainerName
+    [Parameter(Mandatory = $true)]$IsolatedNetwork
   )
 
   $vmName = $RestorePointInfo.VMName
-  $recoveryName = "SureBackup_${vmName}_$(Get-Date -Format 'HHmmss')"
+  $uniqueId = [guid]::NewGuid().ToString().Substring(0, 8)
+  $recoveryName = "SureBackup_${vmName}_$(Get-Date -Format 'HHmmss')_${uniqueId}"
 
   Write-Log "Starting Instant VM Recovery: $vmName -> $recoveryName" -Level "INFO"
 
@@ -211,32 +210,73 @@ function Start-AHVInstantRecovery {
     }
 
     # Start Instant VM Recovery to AHV
+    # NOTE: Start-VBRInstantRecoveryToNutanixAHV does not accept a network parameter,
+    # so the VM initially boots with its original production NIC configuration.
+    # We must immediately power it off and reconfigure the NIC before allowing it to run.
     $session = Start-VBRInstantRecoveryToNutanixAHV @irParams -ErrorAction Stop
 
     Write-Log "Instant recovery started for '$vmName' as '$recoveryName'" -Level "SUCCESS"
 
-    # Wait briefly for the VM to appear in Prism
-    Start-Sleep -Seconds 15
+    # Poll for the VM to appear in Prism Central (retry instead of fixed sleep)
+    $discoveryTimeout = 60
+    $discoveryInterval = 5
+    $elapsed = 0
+    $recoveredVM = $null
 
-    # Find the recovered VM in Prism Central to reconfigure its network
-    $recoveredVM = Get-PrismVMByName -Name $recoveryName
+    Write-Log "  Waiting for VM to appear in Prism Central (timeout: ${discoveryTimeout}s)..." -Level "INFO"
+    while ($elapsed -lt $discoveryTimeout) {
+      Start-Sleep -Seconds $discoveryInterval
+      $elapsed += $discoveryInterval
+      $recoveredVM = Get-PrismVMByName -Name $recoveryName
+      if ($recoveredVM) { break }
+    }
 
-    if ($recoveredVM) {
-      $vmUUID = if ($PrismApiVersion -eq "v4") { $recoveredVM[0].extId } else { $recoveredVM[0].metadata.uuid }
+    if (-not $recoveredVM) {
+      Write-Log "  CRITICAL: Recovered VM '$recoveryName' not found in Prism after ${discoveryTimeout}s" -Level "ERROR"
+      Write-Log "  Stopping VBR recovery session to prevent orphaned VM on production network" -Level "ERROR"
+      try { Stop-VBRInstantRecovery -InstantRecovery $session -ErrorAction Stop } catch { }
+      throw "Network isolation failure: VM '$recoveryName' not discoverable in Prism Central — cannot reconfigure NIC"
+    }
 
-      # Update VM NIC to use isolated network
-      try {
-        Set-PrismVMNIC -VMUUID $vmUUID -SubnetUUID $IsolatedNetwork.UUID
-        Write-Log "  NIC reconfigured to isolated network: $($IsolatedNetwork.Name)" -Level "INFO"
-      }
-      catch {
-        Write-Log "  Warning: Could not reconfigure NIC to isolated network: $($_.Exception.Message)" -Level "WARNING"
+    $vmUUID = if ($PrismApiVersion -eq "v4") { $recoveredVM[0].extId } else { $recoveredVM[0].metadata.uuid }
+
+    # Validate the isolated network is different from VM's original production network
+    Test-NetworkIsolation -VMUUID $vmUUID -IsolatedNetwork $IsolatedNetwork
+
+    # SAFETY: Immediately power off the VM to minimize production network exposure.
+    # The VM was recovered with its original production NIC config because
+    # Start-VBRInstantRecoveryToNutanixAHV does not accept a network parameter.
+    Write-Log "  Powering off VM to isolate from production network..." -Level "INFO"
+    try {
+      Set-PrismVMPowerState -UUID $vmUUID -State "OFF"
+      $isOff = Wait-PrismVMPowerState -UUID $vmUUID -State "OFF" -TimeoutSec 120
+      if (-not $isOff) {
+        throw "VM '$recoveryName' did not power off within 120s"
       }
     }
-    else {
-      Write-Log "  Recovered VM '$recoveryName' not yet visible in Prism Central" -Level "WARNING"
-      $vmUUID = $null
+    catch {
+      Write-Log "  CRITICAL: Cannot power off VM for network isolation: $($_.Exception.Message)" -Level "ERROR"
+      Write-Log "  Aborting recovery to prevent production network exposure" -Level "ERROR"
+      try { Stop-VBRInstantRecovery -InstantRecovery $session -ErrorAction Stop } catch { }
+      throw "Network isolation failure: could not power off VM. Recovery aborted."
     }
+
+    # Reconfigure NIC to isolated network while VM is powered off (safe)
+    try {
+      Set-PrismVMNIC -VMUUID $vmUUID -SubnetUUID $IsolatedNetwork.UUID
+      Write-Log "  NIC reconfigured to isolated network: $($IsolatedNetwork.Name)" -Level "SUCCESS"
+    }
+    catch {
+      # NIC reconfiguration failed — VM must NOT be powered back on with production NIC
+      Write-Log "  CRITICAL: NIC reconfiguration failed: $($_.Exception.Message)" -Level "ERROR"
+      Write-Log "  VM remains powered off. Aborting to prevent production exposure." -Level "ERROR"
+      try { Stop-VBRInstantRecovery -InstantRecovery $session -ErrorAction Stop } catch { }
+      throw "Network isolation failure: NIC reconfiguration failed. Recovery aborted."
+    }
+
+    # Power on the VM — it will now boot on the isolated network
+    Write-Log "  Powering on VM on isolated network..." -Level "INFO"
+    Set-PrismVMPowerState -UUID $vmUUID -State "ON"
 
     $recoveryInfo = _NewRecoveryInfo -OriginalVMName $vmName -RecoveryVMName $recoveryName -RecoveryVMUUID $vmUUID -VBRSession $session -Status "Running"
     $script:RecoverySessions.Add($recoveryInfo)

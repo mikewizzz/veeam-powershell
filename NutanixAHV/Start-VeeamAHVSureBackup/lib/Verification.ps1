@@ -96,6 +96,7 @@ function Test-VMPort {
   $testName = "TCP Port $Port"
   $startTime = Get-Date
 
+  $tcpClient = $null
   try {
     $tcpClient = New-Object System.Net.Sockets.TcpClient
     $connectTask = $tcpClient.ConnectAsync($IPAddress, $Port)
@@ -110,17 +111,16 @@ function Test-VMPort {
       $details = "Port $Port connection timed out on $IPAddress"
     }
 
-    $tcpClient.Close()
-    $tcpClient.Dispose()
-
     _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
   }
   catch {
     $passed = $false
     $details = "Port $Port refused/unreachable on ${IPAddress}: $($_.Exception.Message)"
     _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
-
+  }
+  finally {
     if ($tcpClient) {
+      try { $tcpClient.Close() } catch { }
       $tcpClient.Dispose()
     }
   }
