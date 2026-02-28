@@ -88,7 +88,7 @@ $groups = @{ 1 = @("dc01","dns01"); 2 = @("sql01"); 3 = @("app01","web01") }
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `-DryRun` | No | `$false` | Simulate without recovering VMs |
-| `-Interactive` | No | `$false` | Interactively select VMs |
+| `-Interactive` | No | `$false` | Search/filter VMs by name, then select interactively |
 | `-CleanupOnFailure` | No | `$true` | Clean up VMs even if tests fail |
 | `-SkipPreflight` | No | `$false` | Skip preflight health checks |
 | `-OutputPath` | No | Auto-generated | Output folder for reports |

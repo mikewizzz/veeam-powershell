@@ -125,8 +125,8 @@
   Restore VM categories/tags during recovery. Default: false.
 
 .PARAMETER Interactive
-  Enable interactive VM selection after restore point discovery. Displays a numbered
-  list and prompts for selection (comma-separated numbers or 'A' for all).
+  Enable interactive VM selection with search/filter after restore point discovery.
+  Type a partial name to filter, select by number, 'A' for all shown, or 'B' to re-filter.
 
 .PARAMETER PreflightMaxAgeDays
   Maximum restore point age in days before preflight warns (default: 7).
@@ -154,7 +154,7 @@
 
 .EXAMPLE
   .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -VBRCredential $vbrCred -PrismCentral "pc01" -PrismCredential $cred -Interactive
-  # Interactive mode - select which VMs to test after discovering restore points
+  # Interactive mode - search/filter VMs by name, then select which to test
 
 .NOTES
   Version: 1.0.0
@@ -365,37 +365,84 @@ try {
 
   Write-Log "Discovered $($restorePoints.Count) VM restore point(s)" -Level "SUCCESS"
 
-  # ---- Interactive VM selection ----
+  # Tip for large VM lists when not using interactive mode
+  if ($restorePoints.Count -gt 10 -and -not $Interactive) {
+    Write-Log "Tip: Use -Interactive to search and select specific VMs from the list" -Level "INFO"
+  }
+
+  # ---- Interactive VM selection with search/filter ----
   if ($Interactive -and -not $DryRun) {
-    Write-Log "" -Level "INFO"
-    Write-Log "=== Available VMs for SureBackup Testing ===" -Level "INFO"
-    for ($i = 0; $i -lt $restorePoints.Count; $i++) {
-      $rp = $restorePoints[$i]
-      $consistent = if ($rp.IsConsistent) { "App-Consistent" } else { "Crash-Consistent" }
-      Write-Log "  [$($i + 1)] $($rp.VMName) | Job: $($rp.JobName) | Date: $($rp.CreationTime.ToString('yyyy-MM-dd HH:mm')) | $consistent" -Level "INFO"
-    }
-    Write-Log "" -Level "INFO"
-    Write-Log "Enter VM numbers (comma-separated) or 'A' for all:" -Level "INFO"
+    $totalVMs = $restorePoints.Count
+    $selectedRPs = $null
 
-    $selection = Read-Host "Selection"
+    do {
+      Write-Log "" -Level "INFO"
+      Write-Log "=== Available VMs for SureBackup Testing ($totalVMs found) ===" -Level "INFO"
+      Write-Log "" -Level "INFO"
+      Write-Log "Filter VMs by name, or press Enter to show all:" -Level "INFO"
 
-    if ($selection -and $selection.Trim().ToUpper() -ne "A") {
-      $indices = @()
-      foreach ($part in ($selection -split ",")) {
-        $idx = 0
-        if ([int]::TryParse($part.Trim(), [ref]$idx) -and $idx -ge 1 -and $idx -le $restorePoints.Count) {
-          $indices += ($idx - 1)
-        }
-      }
+      $filter = Read-Host "  Filter"
+      $filter = if ($filter) { $filter.Trim() } else { "" }
 
-      if ($indices.Count -gt 0) {
-        $restorePoints = @($indices | ForEach-Object { $restorePoints[$_] })
-        Write-Log "Selected $($restorePoints.Count) VM(s) for testing" -Level "INFO"
+      # Apply wildcard filter or show all
+      if ($filter -ne "") {
+        $filteredRPs = @($restorePoints | Where-Object { $_.VMName -like "*$filter*" })
       }
       else {
-        Write-Log "Invalid selection — testing all VMs" -Level "WARNING"
+        $filteredRPs = @($restorePoints)
       }
-    }
+
+      if ($filteredRPs.Count -eq 0) {
+        Write-Log "No VMs match filter '$filter'. Try a different search term." -Level "WARNING"
+        continue
+      }
+
+      # Display matching VMs with relative time
+      $matchLabel = if ($filter -ne "") { "Matching VMs ($($filteredRPs.Count) of $totalVMs)" } else { "All VMs ($totalVMs)" }
+      Write-Log "" -Level "INFO"
+      Write-Log "${matchLabel}:" -Level "INFO"
+      for ($i = 0; $i -lt $filteredRPs.Count; $i++) {
+        $rp = $filteredRPs[$i]
+        $age = _FormatTimeAgo -DateTime $rp.CreationTime
+        $consistent = if ($rp.IsConsistent) { "App-Consistent" } else { "Crash-Consistent" }
+        $line = "  [{0}] {1,-15} | Job: {2,-20} | {3,-15} | {4}" -f ($i + 1), $rp.VMName, $rp.JobName, $age, $consistent
+        Write-Log $line -Level "INFO"
+      }
+
+      Write-Log "" -Level "INFO"
+      Write-Log "Enter VM numbers (comma-separated), 'A' for all shown, or 'B' to re-filter:" -Level "INFO"
+
+      $selection = Read-Host "  Selection"
+      $selection = if ($selection) { $selection.Trim().ToUpper() } else { "" }
+
+      if ($selection -eq "B" -or $selection -eq "") {
+        continue
+      }
+
+      if ($selection -eq "A") {
+        $selectedRPs = $filteredRPs
+      }
+      else {
+        $indices = @()
+        foreach ($part in ($selection -split ",")) {
+          $idx = 0
+          if ([int]::TryParse($part.Trim(), [ref]$idx) -and $idx -ge 1 -and $idx -le $filteredRPs.Count) {
+            $indices += ($idx - 1)
+          }
+        }
+
+        if ($indices.Count -gt 0) {
+          $selectedRPs = @($indices | ForEach-Object { $filteredRPs[$_] })
+        }
+        else {
+          Write-Log "Invalid selection. Enter numbers from the list, 'A' for all, or 'B' to re-filter." -Level "WARNING"
+          continue
+        }
+      }
+    } while ($null -eq $selectedRPs)
+
+    $restorePoints = $selectedRPs
+    Write-Log "Selected $($restorePoints.Count) VM(s) for testing" -Level "INFO"
   }
 
   Write-Log "" -Level "INFO"
