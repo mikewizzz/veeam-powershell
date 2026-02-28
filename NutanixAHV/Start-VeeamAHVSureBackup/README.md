@@ -33,10 +33,10 @@ Veeam SureBackup is available for VMware vSphere but **not for Nutanix AHV**. Or
 | Component | Version | Notes |
 |---|---|---|
 | PowerShell | 5.1+ (7.x recommended) | Cross-platform with PS 7 |
-| Veeam Backup & Replication | 12.3+ | With Nutanix AHV plugin installed |
+| Veeam Backup & Replication | 13.0.1+ | With Nutanix AHV plugin v9 installed |
 | Veeam PowerShell Module | `Veeam.Backup.PowerShell` | Installed with VBR Console |
-| Nutanix Prism Central | pc.2024.1+ | REST API v3 |
-| Nutanix AHV Plugin for Veeam | 5.0+ | Registered in VBR |
+| Nutanix Prism Central | pc.2024.1+ | REST API v3 or v4 |
+| Veeam Plug-in for Nutanix AHV | v9 (v8 supported) | Registered in VBR; REST API for FullRestore |
 
 ### Nutanix Setup: Isolated Network
 
@@ -115,6 +115,31 @@ $groups = @{
                                  -MaxConcurrentVMs 5
 ```
 
+### Full Restore with Network Selection (Zero Production Exposure)
+
+```powershell
+# Uses the Veeam Plug-in for Nutanix AHV REST API (v9) to perform a full VM restore
+# with native network adapter mapping — VM is created directly on the isolated network.
+# Slower than InstantRecovery (full disk copy) but inherently safer.
+# API Ref: https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints
+$vbrCred = Get-Credential   # VBR server credentials (required for REST API auth)
+.\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" `
+                                 -PrismCentral "pc01" `
+                                 -PrismCredential $cred `
+                                 -VBRCredential $vbrCred `
+                                 -RestoreMethod "FullRestore" `
+                                 -TestPorts @(22, 443)
+```
+
+### Skip Preflight Checks (Not Recommended)
+
+```powershell
+.\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" `
+                                 -PrismCentral "pc01" `
+                                 -PrismCredential $cred `
+                                 -SkipPreflight
+```
+
 ### Specific VMs Only
 
 ```powershell
@@ -183,10 +208,39 @@ $groups = @{
 | `-CleanupOnFailure` | No | `$true` | Clean up VMs even if tests fail |
 | `-DryRun` | No | `$false` | Simulate without recovering VMs |
 
+### Restore Method
+
+| Parameter | Required | Default | Description |
+|---|---|---|---|
+| `-RestoreMethod` | No | `InstantRecovery` | `InstantRecovery` (fast, NIC swap) or `FullRestore` (slower, native network mapping via [VBAHV REST API](https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints)) |
+| `-VBAHVApiVersion` | No | `v9` | Veeam AHV Plugin REST API version (`v8` or `v9`). Only `v8` and `v9` are supported by the plugin |
+
+### Preflight Health Checks
+
+| Parameter | Required | Default | Description |
+|---|---|---|---|
+| `-PreflightMaxAgeDays` | No | `7` | Max restore point age (days) before warning |
+| `-SkipPreflight` | No | `$false` | Skip all preflight checks (not recommended) |
+
 ## Verification Tests
 
+### Phase 0: Preflight Health Checks (NEW)
+Validates cluster health, capacity, network configuration, restore point integrity/recency, and backup job status before any recovery operations. Prevents wasting time on recoveries that are likely to fail.
+
 ### Phase 1: VM Recovery
-Veeam Instant VM Recovery mounts the backup as a live VM on the Nutanix cluster, connected to the isolated network. No production network exposure.
+
+**InstantRecovery (default):** Veeam Instant VM Recovery mounts the backup as a live VM via vPower NFS. The script powers the VM off, switches the NIC to the isolated network via Prism API, then powers it back on. Fast (~30s) but has a brief production network exposure window.
+
+**FullRestore:** Uses the [Veeam Plug-in for Nutanix AHV REST API v9](https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints) `POST /restorePoints/restore` with `networkAdapters` mapping. The VM is created directly on the isolated network — zero production exposure. Slower (full disk copy, minutes) but inherently safer.
+
+| Aspect | InstantRecovery | FullRestore |
+|--------|----------------|-------------|
+| Speed | Fast (~30s vPower mount) | Slow (minutes, full disk copy) |
+| Network safety | Power-off/NIC-swap workaround | Native network mapping — zero exposure |
+| Production exposure | Brief (~5-15s during VM discovery) | None |
+| Cleanup method | `Stop-VBRInstantRecovery` | Power off + delete VM from Prism |
+| VBR session | Yes (vPower NFS mount) | No (independent VM) |
+| Requires | VBR PowerShell cmdlets | VBR OAuth2 + AHV Plugin REST API (v8/v9) |
 
 ### Phase 2: Heartbeat (NGT)
 Checks VM power state and Nutanix Guest Tools (NGT) communication to verify the OS booted successfully.
@@ -346,18 +400,145 @@ Register-ScheduledTask -TaskName "Veeam-AHV-SureBackup" -Action $action -Trigger
 - Check Windows firewall rules on VBR server
 - Use `-VBRCredential` if running from a non-domain machine
 
+### "VM failed to power off within 120s"
+- The script powers off recovered VMs before switching NICs (network isolation safety)
+- If this times out, the VM may have a guest OS issue or Nutanix cluster contention
+- Check Prism Central for task failures: **Settings > Tasks > Filter by VM name**
+- Ensure the Prism user has VM power management permissions
+
+### "Network isolation failure: NIC reconfiguration failed"
+- The isolated network subnet UUID may have changed since the script started
+- Verify the isolated network still exists: `GET /api/networking/v4.0/config/subnets`
+- Check that the Prism user has VM NIC update permissions (`VM Admin` or `Cluster Admin`)
+- If using Nutanix Flow microsegmentation, ensure the policy allows NIC changes
+
+### "Custom script errors"
+- Custom scripts must be `.ps1` PowerShell files executed on the VBR server (not the recovered VM)
+- Scripts receive `-VMName`, `-VMIPAddress`, and `-VMUuid` parameters
+- Check execution policy: `Get-ExecutionPolicy` (must be `RemoteSigned` or `Unrestricted`)
+- Scripts must return `$true` (pass) or `$false` (fail)
+
+### "Script hangs at a particular step"
+- Check the log file in the output directory for the last message
+- Common hang points: Prism API timeouts, DHCP lease exhaustion, VM discovery delays
+- Use `Ctrl+C` to interrupt, then check for orphaned VMs in Prism Central
+- Recovered VM names start with `SureBackup_` — delete any orphans manually
+
 ## Security Considerations
 
-- Prism credentials are passed as `[PSCredential]` (encrypted in memory)
+### Network Isolation (Critical)
 - The isolated network **must not** route to production to prevent backup-based lateral movement
-- Use `-SkipCertificateCheck` only in lab environments
-- Custom scripts run in the context of the user executing this tool
-- Consider using a dedicated service account with minimal Prism Central permissions
+- **How it works:** Veeam's `Start-VBRInstantRecoveryToNutanixAHV` does not accept a network parameter, so recovered VMs initially boot on the production network. The script immediately powers them off, switches the NIC to the isolated network, then powers them back on. The production exposure window is minimized to the VM discovery time (~5-15 seconds)
+- **Recommended setup:** Create a dedicated VLAN with no default gateway, no routing to production subnets, and a DHCP scope for test IPs only
+- **Validation:** The script warns if the isolated network UUID matches the VM's original production NIC — this indicates a misconfiguration
+
+### Credentials
+- Prism credentials are passed as `[PSCredential]` (encrypted in memory by PowerShell)
+- For scheduled tasks, store credentials securely:
+  ```powershell
+  # Export encrypted credential (user-specific, machine-specific)
+  Get-Credential | Export-Clixml -Path "C:\SecureStore\prism-cred.xml"
+  # Import in scheduled task
+  $cred = Import-Clixml -Path "C:\SecureStore\prism-cred.xml"
+  ```
+- Use a dedicated service account with minimum required permissions
+
+### Minimum Required Permissions
+
+| System | Role / Permission | Purpose |
+|--------|-------------------|---------|
+| Prism Central | `Prism Central Admin` or custom role with VM CRUD + Subnet Read | VM discovery, NIC reconfiguration, power management |
+| Veeam VBR | `Veeam Restore Operator` | Instant recovery, restore point access |
+| Windows (VBR host) | Local administrator or Veeam service account | PowerShell module loading, remote connection |
+
+### TLS Certificates
+- Use `-SkipCertificateCheck` only in lab environments with self-signed certificates
+- On PowerShell 5.1, the TLS bypass is applied globally to the entire session
+- On PowerShell 7+, the bypass is scoped per-request
+- For production, install a trusted CA certificate on Prism Central
+
+### Custom Script Security
+- Custom scripts (`-TestCustomScript`) run in the context of the executing user on the VBR server
+- Ensure script paths are read-only for non-admin users to prevent tampering
+- Scripts have network access to the isolated network — verify they cannot exfiltrate data
+
+### Report Security
+- HTML reports contain VM names, IP addresses, test results, and log entries
+- All values are HTML-escaped to prevent XSS (cross-site scripting)
+- Store reports in access-controlled directories if they contain sensitive infrastructure details
+
+## Performance & Capacity Planning
+
+| Parameter | Default | Impact | Guidance |
+|-----------|---------|--------|----------|
+| `MaxConcurrentVMs` | 3 | Higher = more cluster resources consumed during recovery | Start with 3, increase to 5-10 on large clusters (>16 nodes) |
+| `TestBootTimeoutSec` | 300s | Higher = longer wait for slow VMs before timeout | Set to 600-900s for VMs with slow storage or large OS |
+| `TestPorts` | none | Each port test adds ~5s per VM | Limit to 3-5 critical ports |
+| `TestHttpEndpoints` | none | Each HTTP test adds ~15s per VM (with timeout) | Test 1-2 key endpoints per application |
+
+### Expected Runtime
+
+| VMs | MaxConcurrent | Tests | Estimated Time |
+|-----|---------------|-------|---------------|
+| 5 | 3 | Heartbeat + Ping | 5-10 min |
+| 10 | 5 | Heartbeat + Ping + Ports | 15-25 min |
+| 50 | 5 | Full verification | 60-120 min |
+| 100+ | 10 | Full verification | 2-4 hours |
+
+### Cluster Resource Impact
+- Each recovered VM consumes CPU, memory, and storage I/O on the target AHV cluster
+- Instant recovery uses Veeam's vPower NFS datastore — ensure the VBR server has sufficient disk I/O
+- Recovery operations are serial within a batch; batches run sequentially
+
+## Dry Run Mode
+
+Use `-DryRun` to validate configuration without recovering any VMs:
+
+```powershell
+.\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" `
+  -PrismCentral "pc01" -PrismCredential $cred `
+  -DryRun
+```
+
+**What DryRun validates:**
+- Prism Central connectivity and credentials
+- Isolated network resolution
+- VBR connectivity and module loading
+- Backup job discovery and restore point availability
+- Application group configuration
+
+**What DryRun does NOT validate:**
+- Actual VM recovery (no VMs are powered on)
+- Network connectivity tests (no NICs to test)
+- Custom script execution
+
+## Emergency Cleanup
+
+If the script is interrupted or crashes, recovered VMs may be left running on the isolated network. To clean up:
+
+1. **Check for orphaned VMs** in Prism Central:
+   - Filter by name prefix: `SureBackup_`
+   - These are safe to delete — they are instant recovery mounts
+
+2. **Stop Veeam instant recovery sessions:**
+   ```powershell
+   # List active instant recovery sessions
+   Get-VBRInstantRecovery | Where-Object { $_.VMName -like "SureBackup_*" }
+   # Stop a specific session
+   Get-VBRInstantRecovery | Where-Object { $_.VMName -like "SureBackup_*" } | Stop-VBRInstantRecovery
+   ```
+
+3. **Force-delete VMs from Prism** (if Veeam cleanup fails):
+   ```
+   Prism Central > VMs > Filter "SureBackup_" > Power Off > Delete
+   ```
 
 ## Version History
 
 | Version | Date | Changes |
 |---|---|---|
+| 1.2.0 | 2026-02-28 | Preflight health checks, Full Restore via [VBAHV Plugin REST API v9](https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints) with native network mapping, `-RestoreMethod` parameter, `-SkipPreflight` / `-PreflightMaxAgeDays` params |
+| 1.1.0 | 2026-02-22 | Network isolation hardening: power-off-before-NIC-switch, fatal NIC failure, XSS protection, application group dependency enforcement, expanded tests |
 | 1.0.0 | 2026-02-15 | Initial release - SureBackup for Nutanix AHV |
 
 ## License
