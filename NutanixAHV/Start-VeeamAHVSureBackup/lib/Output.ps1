@@ -77,15 +77,28 @@ function Invoke-Cleanup {
   <#
   .SYNOPSIS
     Clean up all instant recovery sessions and temporary resources
+  .DESCRIPTION
+    Iterates over all tracked recovery sessions and stops any that are still
+    running or in a failed state. Each session is cleaned up independently
+    so a failure in one does not block cleanup of others.
   #>
   Write-Log "Starting cleanup of $($script:RecoverySessions.Count) recovery session(s)..." -Level "INFO"
 
+  $cleanedCount = 0
   foreach ($session in $script:RecoverySessions) {
     if ($session.Status -eq "Running" -or $session.Status -eq "Failed") {
-      Stop-AHVInstantRecovery -RecoveryInfo $session
+      try {
+        Stop-AHVInstantRecovery -RecoveryInfo $session
+        $cleanedCount++
+      }
+      catch {
+        Write-Log "  Cleanup failed for '$($session.OriginalVMName)': $($_.Exception.Message)" -Level "ERROR"
+      }
+    }
+    elseif ($session.Status -eq "CleanedUp") {
+      $cleanedCount++
     }
   }
 
-  $cleanedCount = ($script:RecoverySessions | Where-Object { $_.Status -eq "CleanedUp" }).Count
-  Write-Log "Cleanup complete: $cleanedCount session(s) cleaned up" -Level "SUCCESS"
+  Write-Log "Cleanup complete: $cleanedCount / $($script:RecoverySessions.Count) session(s) cleaned up" -Level "SUCCESS"
 }

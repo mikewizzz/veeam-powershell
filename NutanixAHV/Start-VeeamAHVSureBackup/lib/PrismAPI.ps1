@@ -74,12 +74,12 @@ function Invoke-PrismAPI {
     Otherwise returns the parsed response body.
   #>
   param(
-    [Parameter(Mandatory = $true)][string]$Method,
-    [Parameter(Mandatory = $true)][string]$Endpoint,
+    [Parameter(Mandatory = $true)][ValidateSet("GET", "POST", "PUT", "DELETE")][string]$Method,
+    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$Endpoint,
     [hashtable]$Body,
     [string]$IfMatch,
-    [int]$RetryCount = 3,
-    [int]$TimeoutSec = 30
+    [ValidateRange(0, 10)][int]$RetryCount = 3,
+    [ValidateRange(1, 300)][int]$TimeoutSec = 30
   )
 
   $url = "$($script:PrismBaseUrl)/$Endpoint"
@@ -396,6 +396,54 @@ function Resolve-IsolatedNetwork {
 
   Write-Log "Isolated network resolved: $($networkInfo.Name) [VLAN $($networkInfo.VlanId)] on cluster $($networkInfo.ClusterRef)" -Level "SUCCESS"
   return $networkInfo
+}
+
+function Test-NetworkIsolation {
+  <#
+  .SYNOPSIS
+    Validate that the isolated network differs from the VM's production NIC subnet(s)
+  .DESCRIPTION
+    Checks the recovered VM's current NIC subnet(s) against the target isolated network.
+    Warns if the isolated network UUID matches a production NIC — this indicates a
+    misconfiguration where the "isolated" network is actually a production network.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$VMUUID,
+    [Parameter(Mandatory = $true)]$IsolatedNetwork
+  )
+
+  try {
+    if ($PrismApiVersion -eq "v4") {
+      $nicsEndpoint = "$($script:PrismEndpoints.VMs)/$VMUUID/nics"
+      $nicsRaw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $nicsEndpoint)
+      $nics = if ($nicsRaw.data) { $nicsRaw.data } else { @() }
+
+      foreach ($nic in $nics) {
+        $nicSubnetId = $null
+        if ($nic.networkInfo -and $nic.networkInfo.subnet) {
+          $nicSubnetId = $nic.networkInfo.subnet.extId
+        }
+        if ($nicSubnetId -and $nicSubnetId -eq $IsolatedNetwork.UUID) {
+          Write-Log "  WARNING: VM's production NIC is already on the 'isolated' network ($($IsolatedNetwork.Name)). Verify network isolation is correctly configured." -Level "WARNING"
+        }
+      }
+    }
+    else {
+      $vmSpec = Get-PrismVMByUUID -UUID $VMUUID
+      $nicList = $vmSpec.spec.resources.nic_list
+      if ($nicList) {
+        foreach ($nic in $nicList) {
+          $nicSubnetId = $nic.subnet_reference.uuid
+          if ($nicSubnetId -and $nicSubnetId -eq $IsolatedNetwork.UUID) {
+            Write-Log "  WARNING: VM's production NIC is already on the 'isolated' network ($($IsolatedNetwork.Name)). Verify network isolation is correctly configured." -Level "WARNING"
+          }
+        }
+      }
+    }
+  }
+  catch {
+    Write-Log "  Could not validate network isolation: $($_.Exception.Message)" -Level "WARNING"
+  }
 }
 
 function Get-PrismVMByName {

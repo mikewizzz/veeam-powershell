@@ -1014,4 +1014,216 @@ Describe "Smoke test - script integrity" {
     $script:PrismEndpoints.Clusters | Should -Match "clustermgmt/v4"
     $script:PrismEndpoints.Tasks | Should -Match "prism/v4"
   }
+
+  It "all library files parse without syntax errors" {
+    $libPath = Join-Path $PSScriptRoot "lib"
+    $libFiles = Get-ChildItem -Path $libPath -Filter "*.ps1" -ErrorAction SilentlyContinue
+    foreach ($file in $libFiles) {
+      $tokens = $null; $errors = $null
+      [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+      $errors.Count | Should -Be 0 -Because "$($file.Name) should have no syntax errors"
+    }
+  }
+
+  It "defines Test-NetworkIsolation function" {
+    Get-Command "Test-NetworkIsolation" -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+  }
+
+  It "defines _EscapeHTML function" {
+    Get-Command "_EscapeHTML" -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+  }
+}
+
+# ============================================================
+Describe "Network Isolation Safety" {
+
+  BeforeEach {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+    $script:PrismApiVersion = "v4"
+  }
+
+  It "Test-NetworkIsolation warns when VM NIC matches isolated network UUID" {
+    $isolatedNet = [PSCustomObject]@{ Name = "SureBackup-Isolated"; UUID = "net-abc-123" }
+
+    Mock Invoke-PrismAPI {
+      return @{ data = @(
+        @{ extId = "nic1"; networkInfo = @{ subnet = @{ extId = "net-abc-123" } } }
+      ) }
+    }
+    Mock Resolve-PrismResponseBody { param($r) return $r }
+
+    Test-NetworkIsolation -VMUUID "vm-uuid-1" -IsolatedNetwork $isolatedNet
+
+    $warnings = $script:LogEntries | Where-Object { $_.Level -eq "WARNING" -and $_.Message -match "already on the 'isolated' network" }
+    $warnings.Count | Should -BeGreaterThan 0
+  }
+
+  It "Test-NetworkIsolation does not warn when VM NIC is on different subnet" {
+    $isolatedNet = [PSCustomObject]@{ Name = "SureBackup-Isolated"; UUID = "net-abc-123" }
+
+    Mock Invoke-PrismAPI {
+      return @{ data = @(
+        @{ extId = "nic1"; networkInfo = @{ subnet = @{ extId = "net-production-456" } } }
+      ) }
+    }
+    Mock Resolve-PrismResponseBody { param($r) return $r }
+
+    Test-NetworkIsolation -VMUUID "vm-uuid-1" -IsolatedNetwork $isolatedNet
+
+    $warnings = $script:LogEntries | Where-Object { $_.Level -eq "WARNING" -and $_.Message -match "already on the 'isolated' network" }
+    $warnings.Count | Should -Be 0
+  }
+
+  It "Test-NetworkIsolation handles API errors gracefully" {
+    $isolatedNet = [PSCustomObject]@{ Name = "SureBackup-Isolated"; UUID = "net-abc-123" }
+
+    Mock Invoke-PrismAPI { throw "API connection refused" }
+    Mock Resolve-PrismResponseBody { param($r) return $r }
+
+    # Should not throw — just log a warning
+    { Test-NetworkIsolation -VMUUID "vm-uuid-1" -IsolatedNetwork $isolatedNet } | Should -Not -Throw
+
+    $warnings = $script:LogEntries | Where-Object { $_.Level -eq "WARNING" -and $_.Message -match "Could not validate" }
+    $warnings.Count | Should -BeGreaterThan 0
+  }
+}
+
+# ============================================================
+Describe "HTML Report XSS Protection" {
+
+  It "_EscapeHTML escapes all dangerous HTML characters" {
+    _EscapeHTML '<script>alert("xss")</script>' | Should -Be '&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;'
+  }
+
+  It "_EscapeHTML handles ampersands" {
+    _EscapeHTML 'foo & bar' | Should -Be 'foo &amp; bar'
+  }
+
+  It "_EscapeHTML handles single quotes" {
+    _EscapeHTML "it's" | Should -Be "it&#39;s"
+  }
+
+  It "_EscapeHTML returns empty string for null input" {
+    _EscapeHTML $null | Should -Be ""
+  }
+
+  It "_EscapeHTML returns empty string for empty input" {
+    _EscapeHTML "" | Should -Be ""
+  }
+}
+
+# ============================================================
+Describe "Invoke-PrismAPI Parameter Validation" {
+
+  It "rejects invalid HTTP method" {
+    { Invoke-PrismAPI -Method "PATCH" -Endpoint "test" } | Should -Throw
+  }
+
+  It "rejects empty endpoint" {
+    { Invoke-PrismAPI -Method "GET" -Endpoint "" } | Should -Throw
+  }
+
+  It "rejects RetryCount above 10" {
+    { Invoke-PrismAPI -Method "GET" -Endpoint "test" -RetryCount 11 } | Should -Throw
+  }
+
+  It "rejects negative TimeoutSec" {
+    { Invoke-PrismAPI -Method "GET" -Endpoint "test" -TimeoutSec 0 } | Should -Throw
+  }
+}
+
+# ============================================================
+Describe "Boot Order and Application Groups" {
+
+  BeforeEach {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+    $script:PrismApiVersion = "v4"
+  }
+
+  It "returns ordered groups when ApplicationGroups is defined" {
+    $script:ApplicationGroups = @{
+      1 = @("dc01")
+      2 = @("sql01", "web01")
+    }
+
+    $restorePoints = @(
+      [PSCustomObject]@{ VMName = "dc01"; JobName = "Job1"; RestorePoint = @{}; CreationTime = (Get-Date); BackupSize = 100; IsConsistent = $true }
+      [PSCustomObject]@{ VMName = "sql01"; JobName = "Job1"; RestorePoint = @{}; CreationTime = (Get-Date); BackupSize = 200; IsConsistent = $true }
+      [PSCustomObject]@{ VMName = "web01"; JobName = "Job1"; RestorePoint = @{}; CreationTime = (Get-Date); BackupSize = 300; IsConsistent = $true }
+    )
+
+    $order = Get-VMBootOrder -RestorePoints $restorePoints
+    $keys = @($order.Keys)
+    $keys.Count | Should -BeGreaterOrEqual 2
+    # First group should contain dc01
+    $order[$keys[0]] | ForEach-Object { $_.VMName } | Should -Contain "dc01"
+  }
+
+  It "puts ungrouped VMs in a catch-all group" {
+    $script:ApplicationGroups = @{
+      1 = @("dc01")
+    }
+
+    $restorePoints = @(
+      [PSCustomObject]@{ VMName = "dc01"; JobName = "Job1"; RestorePoint = @{}; CreationTime = (Get-Date); BackupSize = 100; IsConsistent = $true }
+      [PSCustomObject]@{ VMName = "orphan01"; JobName = "Job1"; RestorePoint = @{}; CreationTime = (Get-Date); BackupSize = 200; IsConsistent = $true }
+    )
+
+    $order = Get-VMBootOrder -RestorePoints $restorePoints
+    $allVMs = $order.Values | ForEach-Object { $_ | ForEach-Object { $_.VMName } }
+    $allVMs | Should -Contain "orphan01"
+  }
+
+  It "returns single group when no ApplicationGroups defined" {
+    $script:ApplicationGroups = $null
+
+    $restorePoints = @(
+      [PSCustomObject]@{ VMName = "vm1"; JobName = "Job1"; RestorePoint = @{}; CreationTime = (Get-Date); BackupSize = 100; IsConsistent = $true }
+      [PSCustomObject]@{ VMName = "vm2"; JobName = "Job1"; RestorePoint = @{}; CreationTime = (Get-Date); BackupSize = 200; IsConsistent = $true }
+    )
+
+    $order = Get-VMBootOrder -RestorePoints $restorePoints
+    $order.Count | Should -Be 1
+  }
+}
+
+# ============================================================
+Describe "Cleanup Idempotency" {
+
+  BeforeEach {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+    $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
+  }
+
+  It "only cleans up Running or Failed sessions" {
+    $cleanedUpSession = [PSCustomObject]@{ OriginalVMName = "vm1"; Status = "CleanedUp"; VBRSession = $null; RecoveryVMUUID = $null }
+    $runningSession = [PSCustomObject]@{ OriginalVMName = "vm2"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid2" }
+    $script:RecoverySessions.Add($cleanedUpSession)
+    $script:RecoverySessions.Add($runningSession)
+
+    Mock Stop-AHVInstantRecovery {}
+
+    Invoke-Cleanup
+
+    # Stop-AHVInstantRecovery should only be called for the Running session
+    Should -Invoke Stop-AHVInstantRecovery -Times 1 -Exactly
+  }
+
+  It "continues cleanup after individual session failure" {
+    $session1 = [PSCustomObject]@{ OriginalVMName = "vm1"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid1" }
+    $session2 = [PSCustomObject]@{ OriginalVMName = "vm2"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid2" }
+    $script:RecoverySessions.Add($session1)
+    $script:RecoverySessions.Add($session2)
+
+    $callCount = 0
+    Mock Stop-AHVInstantRecovery {
+      $callCount++
+      if ($callCount -eq 1) { throw "Cleanup failed for first session" }
+    }
+
+    Invoke-Cleanup
+
+    # Both sessions should have been attempted
+    Should -Invoke Stop-AHVInstantRecovery -Times 2 -Exactly
+  }
 }
