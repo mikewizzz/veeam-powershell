@@ -444,6 +444,19 @@ function Invoke-PrismAPI {
         $params.ResponseHeadersVariable = "respHeaders"
       }
 
+      if ($captureHeaders -and $PSVersionTable.PSVersion.Major -lt 7) {
+        # PS 5.1 fallback: use Invoke-WebRequest to access response headers for ETag
+        $webParams = $params.Clone()
+        $webParams.UseBasicParsing = $true
+        $webResponse = Invoke-WebRequest @webParams -ErrorAction Stop
+        $response = $webResponse.Content | ConvertFrom-Json
+        $etag = $webResponse.Headers["ETag"]
+        if ($etag) {
+          return [PSCustomObject]@{ Body = $response; ETag = $etag }
+        }
+        return $response
+      }
+
       $response = Invoke-RestMethod @params -ErrorAction Stop
 
       # Return ETag alongside body for v4 so callers can do updates
@@ -886,7 +899,7 @@ function Get-PrismTaskStatus {
 
   if ($PrismApiVersion -eq "v4") {
     $raw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint "$($script:PrismEndpoints.Tasks)/$TaskUUID")
-    return if ($raw.data) { $raw.data } else { $raw }
+    return $(if ($raw.data) { $raw.data } else { $raw })
   }
   return Invoke-PrismAPI -Method "GET" -Endpoint "tasks/$TaskUUID"
 }
@@ -1399,9 +1412,10 @@ function Test-VMPing {
     $passed = $pingResult
 
     if ($passed) {
-      # Get latency details
+      # Get latency details (PS 7 uses 'Latency', PS 5.1 uses 'ResponseTime')
       $pingDetail = Test-Connection -ComputerName $IPAddress -Count 2 -ErrorAction SilentlyContinue
-      $avgLatency = ($pingDetail | Measure-Object -Property ResponseTime -Average).Average
+      $latencyProp = if ($pingDetail[0].PSObject.Properties['Latency']) { 'Latency' } else { 'ResponseTime' }
+      $avgLatency = ($pingDetail | Measure-Object -Property $latencyProp -Average).Average
       $details = "Reply from $IPAddress - Avg latency: $([math]::Round($avgLatency, 1))ms"
     }
     else {
@@ -1537,7 +1551,16 @@ function Test-VMHttpEndpoint {
   $startTime = Get-Date
 
   try {
-    $response = Invoke-WebRequest -Uri $testUrl -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
+    $webParams = @{
+      Uri            = $testUrl
+      TimeoutSec     = 15
+      UseBasicParsing = $true
+      ErrorAction    = "Stop"
+    }
+    if ($script:SkipCert -and $PSVersionTable.PSVersion.Major -ge 7) {
+      $webParams.SkipCertificateCheck = $true
+    }
+    $response = Invoke-WebRequest @webParams
     $passed = ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400)
     $details = "HTTP $($response.StatusCode) - Content-Length: $($response.Headers.'Content-Length')"
 
@@ -2245,8 +2268,8 @@ $logRows
   </div>
 
   <div class="footer">
-    <p>Veeam SureBackup for Nutanix AHV v1.0.0 | Report generated on $reportDate</p>
-    <p>Veeam Backup & Replication + Nutanix Prism Central REST API v3</p>
+    <p>Veeam SureBackup for Nutanix AHV v1.1.0 | Report generated on $reportDate</p>
+    <p>Veeam Backup & Replication + Nutanix Prism Central REST API $PrismApiVersion</p>
   </div>
 </div>
 </body>
@@ -2325,7 +2348,7 @@ function Export-Results {
   if ($ZipOutput) {
     $zipPath = "$OutputPath.zip"
     try {
-      Compress-Archive -Path "$OutputPath\*" -DestinationPath $zipPath -Force
+      Compress-Archive -Path (Join-Path $OutputPath "*") -DestinationPath $zipPath -Force
       Write-Log "  ZIP archive: $zipPath" -Level "SUCCESS"
     }
     catch {
