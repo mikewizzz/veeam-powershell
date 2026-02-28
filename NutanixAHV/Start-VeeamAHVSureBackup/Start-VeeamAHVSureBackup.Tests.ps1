@@ -23,12 +23,14 @@
 #>
 
 BeforeAll {
-  $scriptPath = Join-Path $PSScriptRoot "Start-VeeamAHVSureBackup.ps1"
-
-  # Parse the script AST to extract function definitions without executing main
-  $tokens = $null
-  $parseErrors = $null
-  $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
+  # Collect all script files: main entry point + lib files
+  $libPath = Join-Path $PSScriptRoot "lib"
+  $scriptFiles = @(
+    (Join-Path $PSScriptRoot "Start-VeeamAHVSureBackup.ps1")
+  )
+  if (Test-Path $libPath) {
+    $scriptFiles += Get-ChildItem -Path $libPath -Filter "*.ps1" | Select-Object -ExpandProperty FullName
+  }
 
   # Set up script-scoped variables that functions depend on
   $script:PrismApiVersion = "v4"
@@ -53,10 +55,15 @@ BeforeAll {
   $script:TotalSteps = 8
   $script:CurrentStep = 0
 
-  # Extract and define all functions from the script in test scope
-  $functionDefs = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
-  foreach ($funcDef in $functionDefs) {
-    Invoke-Expression $funcDef.Extent.Text
+  # Parse AST from all script files and extract function definitions without executing main
+  foreach ($scriptFile in $scriptFiles) {
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptFile, [ref]$tokens, [ref]$parseErrors)
+    $functionDefs = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
+    foreach ($funcDef in $functionDefs) {
+      Invoke-Expression $funcDef.Extent.Text
+    }
   }
 
   # Helper to create mock HTTP exceptions with proper Response.StatusCode
