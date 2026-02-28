@@ -311,6 +311,101 @@ function Write-Banner {
   }
 }
 
+function _NewTestResult {
+  <#
+  .SYNOPSIS
+    Factory for SureBackup test result objects (DRY helper)
+  #>
+  param(
+    [string]$VMName,
+    [string]$TestName,
+    [bool]$Passed,
+    [string]$Details,
+    [datetime]$StartTime
+  )
+  [PSCustomObject]@{
+    VMName    = $VMName
+    TestName  = $TestName
+    Passed    = $Passed
+    Details   = $Details
+    Duration  = ((Get-Date) - $StartTime).TotalSeconds
+    Timestamp = Get-Date
+  }
+}
+
+function _WriteTestLog {
+  <#
+  .SYNOPSIS
+    Consistent test pass/fail log entry (DRY helper)
+  #>
+  param(
+    [string]$VMName,
+    [string]$TestName,
+    [bool]$Passed,
+    [string]$Details
+  )
+  $level = if ($Passed) { "TEST-PASS" } else { "TEST-FAIL" }
+  Write-Log "  [$VMName] $TestName : $(if($Passed){'PASS'}else{'FAIL'}) - $Details" -Level $level
+}
+
+function _GetTestSummary {
+  <#
+  .SYNOPSIS
+    Calculate test pass/fail/rate summary from results collection (DRY helper)
+  #>
+  param($TestResults)
+  $total = $TestResults.Count
+  $passed = ($TestResults | Where-Object { $_.Passed }).Count
+  $failed = $total - $passed
+  [PSCustomObject]@{
+    TotalTests  = $total
+    PassedTests = $passed
+    FailedTests = $failed
+    PassRate    = if ($total -gt 0) { [math]::Round(($passed / $total) * 100, 1) } else { 0 }
+  }
+}
+
+function _NewRecoveryInfo {
+  <#
+  .SYNOPSIS
+    Factory for recovery session tracking objects (DRY helper)
+  #>
+  param(
+    [string]$OriginalVMName,
+    [string]$RecoveryVMName,
+    [string]$RecoveryVMUUID,
+    $VBRSession,
+    [string]$Status,
+    [string]$Error
+  )
+  [PSCustomObject]@{
+    OriginalVMName = $OriginalVMName
+    RecoveryVMName = $RecoveryVMName
+    RecoveryVMUUID = $RecoveryVMUUID
+    VBRSession     = $VBRSession
+    StartTime      = Get-Date
+    Status         = $Status
+    Error          = $Error
+  }
+}
+
+function _GetNGTStatus {
+  <#
+  .SYNOPSIS
+    Extract Nutanix Guest Tools status from a VM object (v3/v4 abstraction)
+  #>
+  param($VMData)
+  if ($PrismApiVersion -eq "v4") {
+    $ngt = $VMData.guestTools
+    if ($ngt) { return [PSCustomObject]@{ Installed = $true; Enabled = [bool]$ngt.isEnabled } }
+  }
+  else {
+    $ngt = $VMData.status.resources.guest_tools
+    if ($ngt) { return [PSCustomObject]@{ Installed = $true; Enabled = ($ngt.nutanix_guest_tools.state -eq "ENABLED") } }
+  }
+  return [PSCustomObject]@{ Installed = $false; Enabled = $false }
+}
+
 #endregion
 
 #region Nutanix Prism Central REST API
@@ -722,7 +817,8 @@ function Get-PrismVMByName {
   param([Parameter(Mandatory = $true)][string]$Name)
 
   if ($PrismApiVersion -eq "v4") {
-    $endpoint = "$($script:PrismEndpoints.VMs)?`$filter=name eq '$Name'"
+    $escapedName = $Name -replace "'", "''"
+    $endpoint = "$($script:PrismEndpoints.VMs)?`$filter=name eq '$escapedName'"
     $raw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $endpoint)
     return $raw.data | Where-Object { $_.name -eq $Name }
   }
@@ -771,9 +867,10 @@ function Get-PrismVMIPAddress {
       $vm = $vmResult.VM
       $nics = $vm.nics
       foreach ($nic in $nics) {
-        # v4 NIC IP endpoints
+        # v4 NIC IP endpoints - try multiple response structure paths
         $ipEndpoints = $nic.networkInfo.ipv4Info.learnedIpAddresses
         if (-not $ipEndpoints) { $ipEndpoints = $nic.networkInfo.ipv4Info.ipAddresses }
+        if (-not $ipEndpoints) { $ipEndpoints = $nic.ipAddresses }
         foreach ($ip in $ipEndpoints) {
           $addr = if ($ip.value) { $ip.value } else { "$ip" }
           if ($addr -and $addr -notmatch "^169\.254") { return $addr }
@@ -864,6 +961,93 @@ function Wait-PrismVMIPAddress {
   return $null
 }
 
+function Set-PrismVMNIC {
+  <#
+  .SYNOPSIS
+    Update all VM NICs to use a specific subnet (v3/v4).
+    v4: uses dedicated NIC sub-resource endpoints per Nutanix VMM v4 SDK.
+    v3: updates nic_list in VM spec via PUT.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$VMUUID,
+    [Parameter(Mandatory = $true)][string]$SubnetUUID
+  )
+
+  if ($PrismApiVersion -eq "v4") {
+    # v4: list NICs, then update each NIC's subnet via dedicated endpoint
+    $nicsEndpoint = "$($script:PrismEndpoints.VMs)/$VMUUID/nics"
+    $nicsRaw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $nicsEndpoint)
+    $nics = if ($nicsRaw.data) { $nicsRaw.data } else { @() }
+
+    foreach ($nic in $nics) {
+      $nicId = $nic.extId
+      $nicResult = Invoke-PrismAPI -Method "GET" -Endpoint "$nicsEndpoint/$nicId"
+      $nicData = if ($nicResult.Body) { $nicResult.Body } else { $nicResult }
+      $nicData = if ($nicData.data) { $nicData.data } else { $nicData }
+      $nicEtag = if ($nicResult.ETag) { $nicResult.ETag } else { $null }
+
+      # Update subnet reference on existing NIC
+      if ($nicData.networkInfo) {
+        $nicData.networkInfo.subnet = @{ extId = $SubnetUUID }
+      }
+      else {
+        $nicData.networkInfo = @{ subnet = @{ extId = $SubnetUUID } }
+      }
+      Invoke-PrismAPI -Method "PUT" -Endpoint "$nicsEndpoint/$nicId" -Body $nicData -IfMatch $nicEtag
+    }
+
+    if ($nics.Count -eq 0) {
+      # No existing NICs - create one on the isolated network
+      $newNic = @{
+        backingInfo = @{ model = "VIRTIO"; isConnected = $true }
+        networkInfo = @{ nicType = "NORMAL_NIC"; subnet = @{ extId = $SubnetUUID } }
+      }
+      Invoke-PrismAPI -Method "POST" -Endpoint $nicsEndpoint -Body $newNic
+    }
+  }
+  else {
+    # v3: update nic_list in VM spec
+    $vmSpec = Get-PrismVMByUUID -UUID $VMUUID
+    $vmSpec.spec.resources.nic_list = @(
+      @{ subnet_reference = @{ kind = "subnet"; uuid = $SubnetUUID }; is_connected = $true }
+    )
+    $body = @{
+      metadata = @{ kind = "vm"; uuid = $VMUUID; spec_version = $vmSpec.metadata.spec_version }
+      spec     = $vmSpec.spec
+    }
+    Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$VMUUID" -Body $body
+  }
+}
+
+function Set-PrismVMPowerState {
+  <#
+  .SYNOPSIS
+    Change VM power state (v3/v4).
+    v4: uses POST $actions/power-off or power-on endpoint.
+    v3: updates power_state in VM spec via PUT.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$UUID,
+    [Parameter(Mandatory = $true)][ValidateSet("ON", "OFF")][string]$State
+  )
+
+  if ($PrismApiVersion -eq "v4") {
+    # v4: dedicated action endpoint per Nutanix VMM v4 SDK
+    $action = if ($State -eq "OFF") { "power-off" } else { "power-on" }
+    Invoke-PrismAPI -Method "POST" -Endpoint "$($script:PrismEndpoints.VMs)/$UUID/`$actions/$action" -Body @{}
+  }
+  else {
+    # v3: GET spec, modify power_state, PUT with spec_version
+    $vmSpec = Get-PrismVMByUUID -UUID $UUID
+    $vmSpec.spec.resources.power_state = $State
+    $body = @{
+      metadata = @{ kind = "vm"; uuid = $UUID; spec_version = $vmSpec.metadata.spec_version }
+      spec     = $vmSpec.spec
+    }
+    Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$UUID" -Body $body
+  }
+}
+
 function Remove-PrismVM {
   <#
   .SYNOPSIS
@@ -924,7 +1108,11 @@ function Wait-PrismTask {
       return $task
     }
     elseif ($status -eq "FAILED") {
-      $errorMsg = if ($task.error_detail) { $task.error_detail } elseif ($task.errorMessages) { $task.errorMessages -join "; " } else { "unknown" }
+      $errorMsg = if ($PrismApiVersion -eq "v4") {
+        if ($task.errorMessages) { ($task.errorMessages | ForEach-Object { if ($_.message) { $_.message } else { "$_" } }) -join "; " } else { "unknown" }
+      } else {
+        if ($task.error_detail) { $task.error_detail } else { "unknown" }
+      }
       throw "Prism task $TaskUUID failed: $errorMsg"
     }
 
@@ -1161,66 +1349,11 @@ function Start-AHVInstantRecovery {
     $recoveredVM = Get-PrismVMByName -Name $recoveryName
 
     if ($recoveredVM) {
-      if ($PrismApiVersion -eq "v4") {
-        $vmUUID = $recoveredVM[0].extId
-      }
-      else {
-        $vmUUID = $recoveredVM[0].metadata.uuid
-      }
+      $vmUUID = if ($PrismApiVersion -eq "v4") { $recoveredVM[0].extId } else { $recoveredVM[0].metadata.uuid }
 
       # Update VM NIC to use isolated network
       try {
-        if ($PrismApiVersion -eq "v4") {
-          # v4: GET VM with ETag, then PUT with If-Match and NTNX-Request-Id
-          $vmResult = Get-PrismVMByUUID -UUID $vmUUID
-          $vmData = $vmResult.VM
-          $etag = $vmResult.ETag
-
-          # Replace NIC list with isolated network reference
-          $vmData.nics = @(
-            @{
-              backingInfo = @{
-                model = "VIRTIO"
-                isConnected = $true
-              }
-              networkInfo = @{
-                subnet = @{
-                  extId = $IsolatedNetwork.UUID
-                }
-              }
-            }
-          )
-
-          $updateBody = $vmData
-          Invoke-PrismAPI -Method "PUT" -Endpoint "$($script:PrismEndpoints.VMs)/$vmUUID" -Body $updateBody -IfMatch $etag
-        }
-        else {
-          # v3: spec_version based concurrency
-          $vmSpec = Get-PrismVMByUUID -UUID $vmUUID
-          $specVersion = $vmSpec.metadata.spec_version
-
-          $nicList = @(
-            @{
-              subnet_reference = @{
-                kind = "subnet"
-                uuid = $IsolatedNetwork.UUID
-              }
-              is_connected     = $true
-            }
-          )
-
-          $updateBody = @{
-            metadata = @{
-              kind         = "vm"
-              uuid         = $vmUUID
-              spec_version = $specVersion
-            }
-            spec     = $vmSpec.spec
-          }
-          $updateBody.spec.resources.nic_list = $nicList
-
-          Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$vmUUID" -Body $updateBody
-        }
+        Set-PrismVMNIC -VMUUID $vmUUID -SubnetUUID $IsolatedNetwork.UUID
         Write-Log "  NIC reconfigured to isolated network: $($IsolatedNetwork.Name)" -Level "INFO"
       }
       catch {
@@ -1232,31 +1365,14 @@ function Start-AHVInstantRecovery {
       $vmUUID = $null
     }
 
-    $recoveryInfo = [PSCustomObject]@{
-      OriginalVMName = $vmName
-      RecoveryVMName = $recoveryName
-      RecoveryVMUUID = $vmUUID
-      VBRSession     = $session
-      StartTime      = Get-Date
-      Status         = "Running"
-    }
-
+    $recoveryInfo = _NewRecoveryInfo -OriginalVMName $vmName -RecoveryVMName $recoveryName -RecoveryVMUUID $vmUUID -VBRSession $session -Status "Running"
     $script:RecoverySessions.Add($recoveryInfo)
     return $recoveryInfo
   }
   catch {
     Write-Log "Instant recovery failed for '$vmName': $($_.Exception.Message)" -Level "ERROR"
 
-    $recoveryInfo = [PSCustomObject]@{
-      OriginalVMName = $vmName
-      RecoveryVMName = $recoveryName
-      RecoveryVMUUID = $null
-      VBRSession     = $null
-      StartTime      = Get-Date
-      Status         = "Failed"
-      Error          = $_.Exception.Message
-    }
-
+    $recoveryInfo = _NewRecoveryInfo -OriginalVMName $vmName -RecoveryVMName $recoveryName -Status "Failed" -Error $_.Exception.Message
     $script:RecoverySessions.Add($recoveryInfo)
     return $recoveryInfo
   }
@@ -1292,22 +1408,7 @@ function Stop-AHVInstantRecovery {
         # Power off first if still running, then delete
         Write-Log "  Force powering off lingering VM: $($RecoveryInfo.RecoveryVMName)" -Level "WARNING"
         try {
-          $vmUUID = $RecoveryInfo.RecoveryVMUUID
-          if ($PrismApiVersion -eq "v4") {
-            $vmResult = Get-PrismVMByUUID -UUID $vmUUID
-            $vmData = $vmResult.VM
-            $vmData.powerState = "OFF"
-            Invoke-PrismAPI -Method "PUT" -Endpoint "$($script:PrismEndpoints.VMs)/$vmUUID" -Body $vmData -IfMatch $vmResult.ETag
-          }
-          else {
-            $vmSpec = Get-PrismVMByUUID -UUID $vmUUID
-            $vmSpec.spec.resources.power_state = "OFF"
-            $powerBody = @{
-              metadata = @{ kind = "vm"; uuid = $vmUUID; spec_version = $vmSpec.metadata.spec_version }
-              spec     = $vmSpec.spec
-            }
-            Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$vmUUID" -Body $powerBody
-          }
+          Set-PrismVMPowerState -UUID $RecoveryInfo.RecoveryVMUUID -State "OFF"
           Start-Sleep -Seconds 10
         }
         catch { }
@@ -1351,47 +1452,25 @@ function Test-VMHeartbeat {
     $passed = ($powerState -eq "ON")
     $details = "Power: $powerState"
 
-    if ($PrismApiVersion -eq "v4") {
-      $vm = $vmResult.VM
-      $ngtEnabled = $vm.guestTools
-      if ($ngtEnabled) {
-        $details += ", NGT: $($ngtEnabled.isEnabled)"
-        if ($ngtEnabled.isEnabled) { $details += " (Guest tools communicating)" }
-      }
-      else {
-        $details += ", NGT: Not installed"
-      }
+    $vm = if ($PrismApiVersion -eq "v4") { $vmResult.VM } else { $vmResult }
+    $ngtStatus = _GetNGTStatus -VMData $vm
+    if ($ngtStatus.Installed) {
+      $details += ", NGT: $($ngtStatus.Enabled)"
+      if ($ngtStatus.Enabled) { $details += " (Guest tools communicating)" }
     }
     else {
-      $vm = $vmResult
-      $ngtEnabled = $vm.status.resources.guest_tools
-      if ($ngtEnabled) {
-        $ngtStatus = $ngtEnabled.nutanix_guest_tools.state
-        $details += ", NGT: $ngtStatus"
-        if ($ngtStatus -eq "ENABLED") { $details += " (Guest tools communicating)" }
-      }
-      else {
-        $details += ", NGT: Not installed"
-      }
+      $details += ", NGT: Not installed"
     }
 
-    $level = if ($passed) { "TEST-PASS" } else { "TEST-FAIL" }
-    Write-Log "  [$VMName] $testName : $(if($passed){'PASS'}else{'FAIL'}) - $details" -Level $level
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
   }
   catch {
     $passed = $false
     $details = "Error: $($_.Exception.Message)"
-    Write-Log "  [$VMName] $testName : FAIL - $details" -Level "TEST-FAIL"
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
   }
 
-  return [PSCustomObject]@{
-    VMName    = $VMName
-    TestName  = $testName
-    Passed    = $passed
-    Details   = $details
-    Duration  = ((Get-Date) - $startTime).TotalSeconds
-    Timestamp = Get-Date
-  }
+  return (_NewTestResult -VMName $VMName -TestName $testName -Passed $passed -Details $details -StartTime $startTime)
 }
 
 function Test-VMPing {
@@ -1422,23 +1501,15 @@ function Test-VMPing {
       $details = "No reply from $IPAddress (4 packets sent, 0 received)"
     }
 
-    $level = if ($passed) { "TEST-PASS" } else { "TEST-FAIL" }
-    Write-Log "  [$VMName] $testName : $(if($passed){'PASS'}else{'FAIL'}) - $details" -Level $level
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
   }
   catch {
     $passed = $false
     $details = "Error: $($_.Exception.Message)"
-    Write-Log "  [$VMName] $testName : FAIL - $details" -Level "TEST-FAIL"
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
   }
 
-  return [PSCustomObject]@{
-    VMName    = $VMName
-    TestName  = $testName
-    Passed    = $passed
-    Details   = $details
-    Duration  = ((Get-Date) - $startTime).TotalSeconds
-    Timestamp = Get-Date
-  }
+  return (_NewTestResult -VMName $VMName -TestName $testName -Passed $passed -Details $details -StartTime $startTime)
 }
 
 function Test-VMPort {
@@ -1472,27 +1543,19 @@ function Test-VMPort {
     $tcpClient.Close()
     $tcpClient.Dispose()
 
-    $level = if ($passed) { "TEST-PASS" } else { "TEST-FAIL" }
-    Write-Log "  [$VMName] $testName : $(if($passed){'PASS'}else{'FAIL'}) - $details" -Level $level
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
   }
   catch {
     $passed = $false
     $details = "Port $Port refused/unreachable on ${IPAddress}: $($_.Exception.Message)"
-    Write-Log "  [$VMName] $testName : FAIL - $details" -Level "TEST-FAIL"
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
 
     if ($tcpClient) {
       $tcpClient.Dispose()
     }
   }
 
-  return [PSCustomObject]@{
-    VMName    = $VMName
-    TestName  = $testName
-    Passed    = $passed
-    Details   = $details
-    Duration  = ((Get-Date) - $startTime).TotalSeconds
-    Timestamp = Get-Date
-  }
+  return (_NewTestResult -VMName $VMName -TestName $testName -Passed $passed -Details $details -StartTime $startTime)
 }
 
 function Test-VMDNS {
@@ -1514,23 +1577,15 @@ function Test-VMDNS {
     $passed = ($null -ne $resolved)
     $details = "Reverse DNS: $($resolved.HostName)"
 
-    $level = if ($passed) { "TEST-PASS" } else { "TEST-FAIL" }
-    Write-Log "  [$VMName] $testName : $(if($passed){'PASS'}else{'FAIL'}) - $details" -Level $level
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
   }
   catch {
     $passed = $false
     $details = "DNS resolution failed for ${IPAddress}: $($_.Exception.Message)"
-    Write-Log "  [$VMName] $testName : FAIL - $details" -Level "TEST-FAIL"
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
   }
 
-  return [PSCustomObject]@{
-    VMName    = $VMName
-    TestName  = $testName
-    Passed    = $passed
-    Details   = $details
-    Duration  = ((Get-Date) - $startTime).TotalSeconds
-    Timestamp = Get-Date
-  }
+  return (_NewTestResult -VMName $VMName -TestName $testName -Passed $passed -Details $details -StartTime $startTime)
 }
 
 function Test-VMHttpEndpoint {
@@ -1564,23 +1619,15 @@ function Test-VMHttpEndpoint {
     $passed = ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400)
     $details = "HTTP $($response.StatusCode) - Content-Length: $($response.Headers.'Content-Length')"
 
-    $level = if ($passed) { "TEST-PASS" } else { "TEST-FAIL" }
-    Write-Log "  [$VMName] $testName : $(if($passed){'PASS'}else{'FAIL'}) - $details" -Level $level
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
   }
   catch {
     $passed = $false
     $details = "HTTP request failed: $($_.Exception.Message)"
-    Write-Log "  [$VMName] $testName : FAIL - $details" -Level "TEST-FAIL"
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
   }
 
-  return [PSCustomObject]@{
-    VMName    = $VMName
-    TestName  = $testName
-    Passed    = $passed
-    Details   = $details
-    Duration  = ((Get-Date) - $startTime).TotalSeconds
-    Timestamp = Get-Date
-  }
+  return (_NewTestResult -VMName $VMName -TestName $testName -Passed $passed -Details $details -StartTime $startTime)
 }
 
 function Test-VMCustomScript {
@@ -1600,15 +1647,8 @@ function Test-VMCustomScript {
 
   if (-not (Test-Path $ScriptPath)) {
     $details = "Script not found: $ScriptPath"
-    Write-Log "  [$VMName] $testName : FAIL - $details" -Level "TEST-FAIL"
-    return [PSCustomObject]@{
-      VMName    = $VMName
-      TestName  = $testName
-      Passed    = $false
-      Details   = $details
-      Duration  = ((Get-Date) - $startTime).TotalSeconds
-      Timestamp = Get-Date
-    }
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
+    return (_NewTestResult -VMName $VMName -TestName $testName -Passed $false -Details $details -StartTime $startTime)
   }
 
   try {
@@ -1616,23 +1656,15 @@ function Test-VMCustomScript {
     $passed = ($result -eq $true)
     $details = if ($passed) { "Custom script returned success" } else { "Custom script returned failure: $result" }
 
-    $level = if ($passed) { "TEST-PASS" } else { "TEST-FAIL" }
-    Write-Log "  [$VMName] $testName : $(if($passed){'PASS'}else{'FAIL'}) - $details" -Level $level
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
   }
   catch {
     $passed = $false
     $details = "Custom script error: $($_.Exception.Message)"
-    Write-Log "  [$VMName] $testName : FAIL - $details" -Level "TEST-FAIL"
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
   }
 
-  return [PSCustomObject]@{
-    VMName    = $VMName
-    TestName  = $testName
-    Passed    = $passed
-    Details   = $details
-    Duration  = ((Get-Date) - $startTime).TotalSeconds
-    Timestamp = Get-Date
-  }
+  return (_NewTestResult -VMName $VMName -TestName $testName -Passed $passed -Details $details -StartTime $startTime)
 }
 
 function Invoke-VMVerificationTests {
@@ -1652,14 +1684,8 @@ function Invoke-VMVerificationTests {
   $vmResults = @()
 
   if (-not $vmUUID) {
-    $vmResults += [PSCustomObject]@{
-      VMName    = $vmName
-      TestName  = "VM Recovery"
-      Passed    = $false
-      Details   = "VM not recovered - $($RecoveryInfo.Error)"
-      Duration  = 0
-      Timestamp = Get-Date
-    }
+    $now = Get-Date
+    $vmResults += (_NewTestResult -VMName $vmName -TestName "VM Recovery" -Passed $false -Details "VM not recovered - $($RecoveryInfo.Error)" -StartTime $now)
     return $vmResults
   }
 
@@ -1668,30 +1694,17 @@ function Invoke-VMVerificationTests {
 
   # Test 2: Wait for IP address
   Write-Log "  [$vmName] Waiting for IP address (timeout: ${TestBootTimeoutSec}s)..." -Level "INFO"
+  $ipWaitStart = Get-Date
   $ipAddress = Wait-PrismVMIPAddress -UUID $vmUUID -TimeoutSec $TestBootTimeoutSec
 
   if (-not $ipAddress) {
-    $vmResults += [PSCustomObject]@{
-      VMName    = $vmName
-      TestName  = "IP Address Assignment"
-      Passed    = $false
-      Details   = "VM did not obtain IP within ${TestBootTimeoutSec}s timeout"
-      Duration  = $TestBootTimeoutSec
-      Timestamp = Get-Date
-    }
+    $vmResults += (_NewTestResult -VMName $vmName -TestName "IP Address Assignment" -Passed $false -Details "VM did not obtain IP within ${TestBootTimeoutSec}s timeout" -StartTime $ipWaitStart)
     Write-Log "  [$vmName] No IP address obtained - skipping network tests" -Level "TEST-FAIL"
     $script:TestResults.AddRange([object[]]$vmResults)
     return $vmResults
   }
 
-  $vmResults += [PSCustomObject]@{
-    VMName    = $vmName
-    TestName  = "IP Address Assignment"
-    Passed    = $true
-    Details   = "VM obtained IP: $ipAddress"
-    Duration  = 0
-    Timestamp = Get-Date
-  }
+  $vmResults += (_NewTestResult -VMName $vmName -TestName "IP Address Assignment" -Passed $true -Details "VM obtained IP: $ipAddress" -StartTime $ipWaitStart)
   Write-Log "  [$vmName] IP address obtained: $ipAddress" -Level "TEST-PASS"
 
   # Test 3: ICMP Ping
@@ -1815,10 +1828,11 @@ function New-HTMLReport {
   $durationStr = "{0:hh\:mm\:ss}" -f $duration
 
   # Calculate summary stats
-  $totalTests = $TestResults.Count
-  $passedTests = ($TestResults | Where-Object { $_.Passed }).Count
-  $failedTests = $totalTests - $passedTests
-  $passRate = if ($totalTests -gt 0) { [math]::Round(($passedTests / $totalTests) * 100, 1) } else { 0 }
+  $summary = _GetTestSummary -TestResults $TestResults
+  $totalTests = $summary.TotalTests
+  $passedTests = $summary.PassedTests
+  $failedTests = $summary.FailedTests
+  $passRate = $summary.PassRate
 
   $uniqueVMs = ($TestResults | Select-Object -ExpandProperty VMName -Unique)
   $totalVMs = $uniqueVMs.Count
@@ -2434,14 +2448,8 @@ try {
       foreach ($rp in $groupRPs) {
         Write-Log "  [DRY RUN] Would recover '$($rp.VMName)' from $($rp.CreationTime.ToString('yyyy-MM-dd HH:mm')) to isolated network '$($isolatedNet.Name)'" -Level "INFO"
 
-        $script:TestResults.Add([PSCustomObject]@{
-          VMName    = $rp.VMName
-          TestName  = "Dry Run - Recovery Plan"
-          Passed    = $true
-          Details   = "Restore point: $($rp.CreationTime.ToString('yyyy-MM-dd HH:mm')), Job: $($rp.JobName), Consistent: $($rp.IsConsistent)"
-          Duration  = 0
-          Timestamp = Get-Date
-        })
+        $now = Get-Date
+        $script:TestResults.Add((_NewTestResult -VMName $rp.VMName -TestName "Dry Run - Recovery Plan" -Passed $true -Details "Restore point: $($rp.CreationTime.ToString('yyyy-MM-dd HH:mm')), Job: $($rp.JobName), Consistent: $($rp.IsConsistent)" -StartTime $now))
       }
     }
     else {
@@ -2511,39 +2519,36 @@ try {
   # ---- Step 8: Final summary ----
   Write-ProgressStep -Activity "Complete" -Status "SureBackup verification finished"
 
-  $totalTests = $script:TestResults.Count
-  $passedTests = ($script:TestResults | Where-Object { $_.Passed }).Count
-  $failedTests = $totalTests - $passedTests
-  $passRate = if ($totalTests -gt 0) { [math]::Round(($passedTests / $totalTests) * 100, 1) } else { 0 }
+  $summary = _GetTestSummary -TestResults $script:TestResults
 
   Write-Log "" -Level "INFO"
   Write-Log "========================================" -Level "INFO"
   Write-Log "  SUREBACKUP VERIFICATION COMPLETE" -Level "SUCCESS"
   Write-Log "========================================" -Level "INFO"
   Write-Log "  VMs Tested:   $($restorePoints.Count)" -Level "INFO"
-  Write-Log "  Total Tests:  $totalTests" -Level "INFO"
-  Write-Log "  Passed:       $passedTests" -Level "SUCCESS"
+  Write-Log "  Total Tests:  $($summary.TotalTests)" -Level "INFO"
+  Write-Log "  Passed:       $($summary.PassedTests)" -Level "SUCCESS"
 
-  if ($failedTests -gt 0) {
-    Write-Log "  Failed:       $failedTests" -Level "ERROR"
+  if ($summary.FailedTests -gt 0) {
+    Write-Log "  Failed:       $($summary.FailedTests)" -Level "ERROR"
   }
   else {
     Write-Log "  Failed:       0" -Level "SUCCESS"
   }
 
-  Write-Log "  Pass Rate:    $passRate%" -Level $(if ($failedTests -eq 0) { "SUCCESS" } else { "WARNING" })
+  Write-Log "  Pass Rate:    $($summary.PassRate)%" -Level $(if ($summary.FailedTests -eq 0) { "SUCCESS" } else { "WARNING" })
   Write-Log "  Duration:     $((Get-Date) - $script:StartTime)" -Level "INFO"
   Write-Log "  Report:       $OutputPath" -Level "INFO"
   Write-Log "========================================" -Level "INFO"
 
   # Return structured result for pipeline use
   [PSCustomObject]@{
-    Success     = ($failedTests -eq 0)
+    Success     = ($summary.FailedTests -eq 0)
     TotalVMs    = $restorePoints.Count
-    TotalTests  = $totalTests
-    Passed      = $passedTests
-    Failed      = $failedTests
-    PassRate    = $passRate
+    TotalTests  = $summary.TotalTests
+    Passed      = $summary.PassedTests
+    Failed      = $summary.FailedTests
+    PassRate    = $summary.PassRate
     Duration    = ((Get-Date) - $script:StartTime).ToString()
     OutputPath  = (Resolve-Path $OutputPath -ErrorAction SilentlyContinue)
     DryRun      = [bool]$DryRun
