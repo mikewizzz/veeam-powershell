@@ -4,36 +4,35 @@
 
 .DESCRIPTION
   Bridges the gap between Veeam's VMware SureBackup and Nutanix AHV by providing automated
-  backup recoverability verification using Veeam Backup & Replication and Nutanix Prism Central
-  REST APIs.
+  backup recoverability verification using the Veeam Plug-in for Nutanix AHV REST API (v9)
+  and Nutanix Prism Central REST API.
 
   WHAT THIS SCRIPT DOES:
-  1. Connects to Veeam Backup & Replication server (PowerShell cmdlets)
-  2. Connects to Nutanix Prism Central via REST API v3
-  3. Discovers AHV backup jobs and latest restore points
-  4. Performs Instant VM Recovery to an isolated AHV network (virtual lab)
+  1. Authenticates to Veeam AHV Plugin REST API via VBR OAuth2
+  2. Connects to Nutanix Prism Central via REST API v3/v4
+  3. Discovers AHV backup jobs and latest restore points via VBAHV REST API
+  4. Performs Full VM Restore to an isolated AHV network (zero production exposure)
   5. Runs configurable verification tests (heartbeat, ping, port, DNS, custom scripts)
   6. Generates professional HTML report with pass/fail results
-  7. Cleans up all recovered VMs and temporary resources
+  7. Cleans up all recovered VMs via Prism API
 
   SUREBACKUP TEST PHASES:
-  Phase 1 - VM Recovery:    Instant VM Recovery from Veeam backup to isolated AHV network
+  Phase 1 - VM Recovery:    Full VM Restore via VBAHV REST API to isolated AHV network
   Phase 2 - Boot Test:      Verify VM powers on and gets heartbeat via Nutanix Guest Tools
   Phase 3 - Network Test:   ICMP ping and TCP port connectivity checks
   Phase 4 - Application:    DNS resolution, HTTP endpoint, custom PowerShell script tests
-  Phase 5 - Cleanup:        Stop instant recovery sessions, remove temporary resources
+  Phase 5 - Cleanup:        Power off + delete restored VMs via Prism API
 
   QUICK START:
-  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01.lab.local" -PrismCentral "pc01.lab.local" -PrismCredential (Get-Credential)
+  $vbrCred = Get-Credential   # VBR server credentials
+  $pcCred  = Get-Credential   # Prism Central credentials
+  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01.lab.local" -VBRCredential $vbrCred -PrismCentral "pc01.lab.local" -PrismCredential $pcCred
 
 .PARAMETER VBRServer
   Veeam Backup & Replication server hostname or IP address.
 
-.PARAMETER VBRPort
-  VBR server port (default: 9419).
-
 .PARAMETER VBRCredential
-  PSCredential for VBR server authentication. If omitted, uses current Windows session.
+  PSCredential for VBR server authentication (required for REST API OAuth2).
 
 .PARAMETER PrismCentral
   Nutanix Prism Central hostname or IP address for REST API calls.
@@ -50,7 +49,7 @@
   NTNX-Request-Id idempotency, and OData filtering. Use "v3" for older Prism Central.
 
 .PARAMETER SkipCertificateCheck
-  Skip TLS certificate validation for self-signed Prism certificates (lab environments).
+  Skip TLS certificate validation for self-signed certificates (lab environments).
 
 .PARAMETER BackupJobNames
   One or more Veeam backup job names to test. If omitted, discovers all AHV backup jobs.
@@ -115,41 +114,19 @@
   Simulate the entire SureBackup process without performing actual recovery.
   Validates connectivity, discovers backups, and shows what would be tested.
 
-.EXAMPLE
-  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -PrismCentral "pc01" -PrismCredential (Get-Credential)
-  # Quick start - tests all AHV backup jobs with default settings
-
-.EXAMPLE
-  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -PrismCentral "pc01" -PrismCredential $cred -BackupJobNames "AHV-Production" -TestPorts @(22,443,3389) -SkipCertificateCheck
-  # Test specific backup job with port checks, skip self-signed cert warnings
-
-.EXAMPLE
-  $groups = @{ 1 = @("dc01"); 2 = @("sql01"); 3 = @("app01","web01") }
-  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -PrismCentral "pc01" -PrismCredential $cred -ApplicationGroups $groups -TestPorts @(53,1433,443)
-  # Application-group ordered testing with dependency boot order
-
-.EXAMPLE
-  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -PrismCentral "pc01" -PrismCredential $cred -DryRun
-  # Dry run - validate connectivity and show what would be tested without recovering VMs
-
-.EXAMPLE
-  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -PrismCentral "pc01" -PrismCredential $cred -BackupJobNames "AHV-Tier1" -TestCustomScript "C:\Scripts\Verify-AppHealth.ps1"
-  # Custom application-level verification script
-
-.PARAMETER RestoreMethod
-  Restore method: "InstantRecovery" (default) or "FullRestore".
-  - InstantRecovery: Uses Start-VBRInstantRecoveryToNutanixAHV (fast, vPower NFS mount).
-    The VM initially boots on the production network; the script powers it off, swaps
-    the NIC to the isolated network via Prism API, then powers it back on.
-  - FullRestore: Uses the Veeam Plug-in for Nutanix AHV REST API (v9) to perform a full
-    VM restore with native network adapter mapping via POST /restorePoints/restore. The
-    VM is created directly on the isolated network — zero production exposure. Slower
-    (full disk copy) but inherently safer for network isolation. Requires VBR credentials.
-    API Ref: https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints
-
 .PARAMETER VBAHVApiVersion
   Veeam Plug-in for Nutanix AHV REST API version (default: "v9").
-  Only v8 and v9 are supported. Used when RestoreMethod is FullRestore.
+  Only v8 and v9 are supported by the plugin.
+
+.PARAMETER RestoreToOriginal
+  Restore VMs to their original location. Default: false (SureBackup uses isolated network).
+
+.PARAMETER RestoreVmCategories
+  Restore VM categories/tags during recovery. Default: false.
+
+.PARAMETER Interactive
+  Enable interactive VM selection after restore point discovery. Displays a numbered
+  list and prompts for selection (comma-separated numbers or 'A' for all).
 
 .PARAMETER PreflightMaxAgeDays
   Maximum restore point age in days before preflight warns (default: 7).
@@ -157,25 +134,46 @@
 .PARAMETER SkipPreflight
   Skip all preflight health checks. Not recommended for production.
 
+.EXAMPLE
+  $vbrCred = Get-Credential
+  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -VBRCredential $vbrCred -PrismCentral "pc01" -PrismCredential $cred
+  # Quick start - tests all AHV backup jobs with default settings
+
+.EXAMPLE
+  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -VBRCredential $vbrCred -PrismCentral "pc01" -PrismCredential $cred -BackupJobNames "AHV-Production" -TestPorts @(22,443,3389) -SkipCertificateCheck
+  # Test specific backup job with port checks, skip self-signed cert warnings
+
+.EXAMPLE
+  $groups = @{ 1 = @("dc01"); 2 = @("sql01"); 3 = @("app01","web01") }
+  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -VBRCredential $vbrCred -PrismCentral "pc01" -PrismCredential $cred -ApplicationGroups $groups -TestPorts @(53,1433,443)
+  # Application-group ordered testing with dependency boot order
+
+.EXAMPLE
+  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -VBRCredential $vbrCred -PrismCentral "pc01" -PrismCredential $cred -DryRun
+  # Dry run - validate connectivity and show what would be tested without recovering VMs
+
+.EXAMPLE
+  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -VBRCredential $vbrCred -PrismCentral "pc01" -PrismCredential $cred -Interactive
+  # Interactive mode - select which VMs to test after discovering restore points
+
 .NOTES
-  Version: 1.2.0
+  Version: 1.0.0
   Author: Community Contributors
   Date: 2026-02-28
   Requires: PowerShell 5.1+ (7.x recommended)
-  Modules: Veeam.Backup.PowerShell (VBR Console), VeeamPSSnapin (legacy)
+  Modules: None
   Nutanix: Prism Central v4 API (pc.2024.3+ GA, default) or v3 (legacy)
-  VBR: Veeam Backup & Replication v13.0.1+ with Nutanix AHV Plugin v9 (for FullRestore)
-  AHV Plugin REST API: https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints
+  VBR: Veeam Backup & Replication v13.0.1+ with Nutanix AHV Plugin v9
+  AHV Plugin REST API: https://helpcenter.veeam.com/references/vbahv/9/rest/
 #>
 
 [CmdletBinding(DefaultParameterSetName = "NetworkByName")]
 param(
-  # VBR Connection
+  # VBR Connection (REST API only — no PowerShell module needed)
   [Parameter(Mandatory = $true)]
   [ValidateNotNullOrEmpty()]
   [string]$VBRServer,
-  [ValidateRange(1, 65535)]
-  [int]$VBRPort = 9419,
+  [Parameter(Mandatory = $true)]
   [PSCredential]$VBRCredential,
 
   # Nutanix Prism Central Connection
@@ -230,11 +228,14 @@ param(
   [bool]$CleanupOnFailure = $true,
   [switch]$DryRun,
 
-  # Restore Method
-  [ValidateSet("InstantRecovery", "FullRestore")]
-  [string]$RestoreMethod = "InstantRecovery",
+  # VBAHV Plugin REST API
   [ValidateSet("v8", "v9")]
   [string]$VBAHVApiVersion = "v9",
+
+  # Restore Options
+  [switch]$RestoreToOriginal,
+  [switch]$RestoreVmCategories,
+  [switch]$Interactive,
 
   # Preflight Health Checks
   [ValidateRange(1, 365)]
@@ -314,6 +315,7 @@ try {
   }
   Write-Log "Output directory: $OutputPath" -Level "INFO"
   Write-Log "Mode: $(if($DryRun){'DRY RUN (simulation only)'}else{'LIVE - VMs will be recovered'})" -Level $(if($DryRun){"WARNING"}else{"INFO"})
+  Write-Log "Architecture: VBAHV Plugin REST API v9 + Prism Central REST API" -Level "INFO"
 
   # ---- Step 2: Connect to Prism Central ----
   Write-ProgressStep -Activity "Connecting to Nutanix Prism Central" -Status "$PrismCentral`:$PrismPort"
@@ -327,19 +329,79 @@ try {
   Write-ProgressStep -Activity "Resolving Isolated Network" -Status "Finding SureBackup virtual lab network..."
   $isolatedNet = Resolve-IsolatedNetwork
 
-  # ---- Step 4: Connect to VBR ----
-  Write-ProgressStep -Activity "Connecting to Veeam Backup & Replication" -Status "$VBRServer`:$VBRPort"
-  Connect-VBRSession
+  # ---- Step 4: Authenticate to VBAHV Plugin REST API ----
+  Write-ProgressStep -Activity "Connecting to VBAHV Plugin REST API" -Status "Authenticating via VBR OAuth2..."
+  Initialize-VBAHVPluginConnection
 
   # ---- Step 5: Discover AHV backup jobs and restore points ----
   Write-ProgressStep -Activity "Discovering AHV Backups" -Status "Scanning backup jobs and restore points..."
-  $ahvJobs = Get-AHVBackupJobs
-  $restorePoints = Get-AHVRestorePoints -BackupJobs $ahvJobs
+  $ahvJobs = Get-VBAHVJobs -JobNames $BackupJobNames
+
+  # Get restore points via REST API and build info objects
+  $allPluginRPs = Get-VBAHVRestorePoints -VMNames $VMNames
+  $restorePoints = @()
+
+  if ($allPluginRPs -and @($allPluginRPs).Count -gt 0) {
+    # Group by VM name and take the latest restore point per VM
+    $grouped = $allPluginRPs | Group-Object { $_.vmName }
+    foreach ($group in $grouped) {
+      $latestRP = $group.Group | Sort-Object { [datetime]$_.creationTime } -Descending | Select-Object -First 1
+      $rpInfo = [PSCustomObject]@{
+        VMName       = $latestRP.vmName
+        JobName      = if ($latestRP.jobName) { $latestRP.jobName } else { "N/A" }
+        RestorePointId = $latestRP.id
+        CreationTime = [datetime]$latestRP.creationTime
+        BackupSize   = if ($latestRP.backupSize) { $latestRP.backupSize } else { 0 }
+        IsConsistent = if ($null -ne $latestRP.isConsistent) { $latestRP.isConsistent } else { $true }
+      }
+      $restorePoints += $rpInfo
+      Write-Log "  Found restore point for '$($rpInfo.VMName)' from $($rpInfo.CreationTime.ToString('yyyy-MM-dd HH:mm'))" -Level "INFO"
+    }
+  }
+
+  if ($restorePoints.Count -eq 0) {
+    throw "No restore points found for any AHV VMs. Ensure backups have completed successfully."
+  }
+
+  Write-Log "Discovered $($restorePoints.Count) VM restore point(s)" -Level "SUCCESS"
+
+  # ---- Interactive VM selection ----
+  if ($Interactive -and -not $DryRun) {
+    Write-Log "" -Level "INFO"
+    Write-Log "=== Available VMs for SureBackup Testing ===" -Level "INFO"
+    for ($i = 0; $i -lt $restorePoints.Count; $i++) {
+      $rp = $restorePoints[$i]
+      $consistent = if ($rp.IsConsistent) { "App-Consistent" } else { "Crash-Consistent" }
+      Write-Log "  [$($i + 1)] $($rp.VMName) | Job: $($rp.JobName) | Date: $($rp.CreationTime.ToString('yyyy-MM-dd HH:mm')) | $consistent" -Level "INFO"
+    }
+    Write-Log "" -Level "INFO"
+    Write-Log "Enter VM numbers (comma-separated) or 'A' for all:" -Level "INFO"
+
+    $selection = Read-Host "Selection"
+
+    if ($selection -and $selection.Trim().ToUpper() -ne "A") {
+      $indices = @()
+      foreach ($part in ($selection -split ",")) {
+        $idx = 0
+        if ([int]::TryParse($part.Trim(), [ref]$idx) -and $idx -ge 1 -and $idx -le $restorePoints.Count) {
+          $indices += ($idx - 1)
+        }
+      }
+
+      if ($indices.Count -gt 0) {
+        $restorePoints = @($indices | ForEach-Object { $restorePoints[$_] })
+        Write-Log "Selected $($restorePoints.Count) VM(s) for testing" -Level "INFO"
+      }
+      else {
+        Write-Log "Invalid selection — testing all VMs" -Level "WARNING"
+      }
+    }
+  }
 
   Write-Log "" -Level "INFO"
   Write-Log "=== SureBackup Test Plan ===" -Level "INFO"
   Write-Log "VMs to test: $($restorePoints.Count)" -Level "INFO"
-  Write-Log "Restore method: $RestoreMethod" -Level "INFO"
+  Write-Log "Restore method: Full VM Restore (VBAHV REST API)" -Level "INFO"
   Write-Log "Isolated network: $($isolatedNet.Name) (VLAN $($isolatedNet.VlanId))" -Level "INFO"
   Write-Log "Tests: Heartbeat$(if($TestPing){', Ping'})$(if($TestPorts){', Ports: '+($TestPorts -join ',')})$(if($TestDNS){', DNS'})$(if($TestHttpEndpoints){', HTTP'})$(if($TestCustomScript){', Custom Script'})" -Level "INFO"
   Write-Log "" -Level "INFO"
@@ -376,22 +438,15 @@ try {
       -RestorePoints $restorePoints `
       -BackupJobs $ahvJobs `
       -MaxConcurrentVMs $MaxConcurrentVMs `
-      -MaxAgeDays $PreflightMaxAgeDays `
-      -RestoreMethod $RestoreMethod
+      -MaxAgeDays $PreflightMaxAgeDays
 
     if (-not $preflightResult.Success) {
       throw "Preflight health checks FAILED with $($preflightResult.Issues.Count) blocking issue(s). Fix the issues above and re-run, or use -SkipPreflight to bypass (not recommended)."
     }
   }
 
-  # ---- Step 7: Initialize VBAHV Plugin API (for FullRestore mode) ----
-  if ($RestoreMethod -eq "FullRestore") {
-    Write-ProgressStep -Activity "Connecting to VBAHV Plugin REST API" -Status "Authenticating via VBR OAuth2..."
-    Initialize-VBAHVPluginConnection
-  }
-  else {
-    $script:CurrentStep++  # Skip this step for InstantRecovery
-  }
+  # ---- Step 7: (Reserved — VBAHV Plugin already authenticated in Step 4) ----
+  $script:CurrentStep++
 
   # ---- Step 8: Execute SureBackup recovery and testing ----
   Write-ProgressStep -Activity "Executing SureBackup Verification" -Status "Recovering and testing VMs..."
@@ -424,13 +479,9 @@ try {
 
         # Start recovery for each VM in the batch
         foreach ($rp in $batch) {
-          Write-Log "Recovering '$($rp.VMName)' via $RestoreMethod..." -Level "INFO"
-          if ($RestoreMethod -eq "FullRestore") {
-            $recovery = Start-AHVFullRestore -RestorePointInfo $rp -IsolatedNetwork $isolatedNet
-          }
-          else {
-            $recovery = Start-AHVInstantRecovery -RestorePointInfo $rp -IsolatedNetwork $isolatedNet
-          }
+          Write-Log "Recovering '$($rp.VMName)' via Full VM Restore..." -Level "INFO"
+          $recovery = Start-AHVFullRestore -RestorePointInfo $rp -IsolatedNetwork $isolatedNet `
+            -RestoreToOriginal:$RestoreToOriginal -RestoreVmCategories:$RestoreVmCategories
           $recoveries += $recovery
         }
 
@@ -455,12 +506,7 @@ try {
 
         # Cleanup this batch before moving to next
         foreach ($recovery in $recoveries) {
-          if ($recovery.RestoreMethod -eq "FullRestore") {
-            Stop-AHVFullRestore -RecoveryInfo $recovery
-          }
-          else {
-            Stop-AHVInstantRecovery -RecoveryInfo $recovery
-          }
+          Stop-AHVFullRestore -RecoveryInfo $recovery
         }
       }
     }
@@ -534,8 +580,6 @@ catch {
   Write-Log "Stack trace: $($_.ScriptStackTrace)" -Level "ERROR"
 
   # Emergency cleanup — always clean up recovered VMs to prevent production exposure.
-  # CleanupOnFailure controls whether test failures cause early abort, NOT
-  # whether recovered VMs are cleaned up (those must always be removed).
   if ($script:RecoverySessions.Count -gt 0) {
     Write-Log "Performing emergency cleanup of $($script:RecoverySessions.Count) recovery session(s)..." -Level "WARNING"
     Invoke-Cleanup
@@ -544,9 +588,6 @@ catch {
   throw
 }
 finally {
-  # Always disconnect from VBR
-  Disconnect-VBRSession
-
   # Close progress bar
   Write-Progress -Activity "Veeam AHV SureBackup" -Completed
 }
