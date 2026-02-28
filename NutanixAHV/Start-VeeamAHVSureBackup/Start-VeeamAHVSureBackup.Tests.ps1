@@ -11,9 +11,10 @@
   - Pagination behaviour
   - Idempotency checks (NTNX-Request-Id)
   - Output contract/schema validation
+  - VBAHV Plugin REST API functions
   - Smoke tests (no real AHV credentials needed)
 
-  All external calls (Invoke-RestMethod, Veeam cmdlets) are mocked.
+  All external calls (Invoke-RestMethod) are mocked.
   No destructive live calls are made in default test runs.
 
 .NOTES
@@ -925,7 +926,7 @@ Describe "Wait-PrismTask" {
 
   It "throws on FAILED status with error detail" {
     Mock Get-PrismTaskStatus {
-      return @{ status = "FAILED"; error_detail = "disk full" }
+      return @{ status = "FAILED"; errorMessages = @(@{ message = "disk full" }) }
     }
 
     { Wait-PrismTask -TaskUUID "task1" -TimeoutSec 10 } | Should -Throw "*disk full*"
@@ -1036,18 +1037,20 @@ Describe "Smoke test - script integrity" {
   It "defines preflight functions" {
     foreach ($fn in @("Test-PreflightRequirements", "Test-ClusterHealth", "Test-ClusterCapacity",
         "Test-IsolatedNetworkHealth", "Test-RestorePointConsistency", "Test-RestorePointRecency",
-        "Test-BackupJobStatus", "Test-AHVProxyConnectivity")) {
+        "Test-BackupJobStatus", "Test-VBRConnectivity")) {
       Get-Command $fn -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty -Because "function $fn should be defined"
     }
   }
 
   It "defines VBAHV Plugin REST API functions" {
     foreach ($fn in @("Initialize-VBAHVPluginConnection", "Invoke-VBAHVPluginAPI",
-        "Get-VBAHVRestorePoints", "Get-VBAHVNetworkAdapters",
+        "Get-VBAHVRestorePoints", "Get-VBAHVRestorePointMetadata",
+        "Get-VBAHVJobs", "Get-VBAHVClusters", "Get-VBAHVStorageContainers",
         "Start-AHVFullRestore", "Stop-AHVFullRestore")) {
       Get-Command $fn -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty -Because "function $fn should be defined"
     }
   }
+
 }
 
 # ============================================================
@@ -1061,12 +1064,15 @@ Describe "Network Isolation Safety" {
   It "Test-NetworkIsolation warns when VM NIC matches isolated network UUID" {
     $isolatedNet = [PSCustomObject]@{ Name = "SureBackup-Isolated"; UUID = "net-abc-123" }
 
+    # Return Body/ETag wrapper so Resolve-PrismResponseBody can unwrap it
     Mock Invoke-PrismAPI {
-      return @{ data = @(
-        @{ extId = "nic1"; networkInfo = @{ subnet = @{ extId = "net-abc-123" } } }
-      ) }
+      return [PSCustomObject]@{
+        Body = @{ data = @(
+          @{ extId = "nic1"; networkInfo = @{ subnet = @{ extId = "net-abc-123" } } }
+        ) }
+        ETag = "e1"
+      }
     }
-    Mock Resolve-PrismResponseBody { param($r) return $r }
 
     Test-NetworkIsolation -VMUUID "vm-uuid-1" -IsolatedNetwork $isolatedNet
 
@@ -1078,11 +1084,13 @@ Describe "Network Isolation Safety" {
     $isolatedNet = [PSCustomObject]@{ Name = "SureBackup-Isolated"; UUID = "net-abc-123" }
 
     Mock Invoke-PrismAPI {
-      return @{ data = @(
-        @{ extId = "nic1"; networkInfo = @{ subnet = @{ extId = "net-production-456" } } }
-      ) }
+      return [PSCustomObject]@{
+        Body = @{ data = @(
+          @{ extId = "nic1"; networkInfo = @{ subnet = @{ extId = "net-production-456" } } }
+        ) }
+        ETag = "e1"
+      }
     }
-    Mock Resolve-PrismResponseBody { param($r) return $r }
 
     Test-NetworkIsolation -VMUUID "vm-uuid-1" -IsolatedNetwork $isolatedNet
 
@@ -1094,7 +1102,6 @@ Describe "Network Isolation Safety" {
     $isolatedNet = [PSCustomObject]@{ Name = "SureBackup-Isolated"; UUID = "net-abc-123" }
 
     Mock Invoke-PrismAPI { throw "API connection refused" }
-    Mock Resolve-PrismResponseBody { param($r) return $r }
 
     # Should not throw — just log a warning
     { Test-NetworkIsolation -VMUUID "vm-uuid-1" -IsolatedNetwork $isolatedNet } | Should -Not -Throw
@@ -1212,46 +1219,44 @@ Describe "Cleanup Idempotency" {
   }
 
   It "only cleans up Running or Failed sessions" {
-    $cleanedUpSession = [PSCustomObject]@{ OriginalVMName = "vm1"; Status = "CleanedUp"; VBRSession = $null; RecoveryVMUUID = $null; RestoreMethod = "InstantRecovery" }
-    $runningSession = [PSCustomObject]@{ OriginalVMName = "vm2"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid2"; RestoreMethod = "InstantRecovery" }
+    $cleanedUpSession = [PSCustomObject]@{ OriginalVMName = "vm1"; Status = "CleanedUp"; RecoveryVMUUID = $null; RestoreMethod = "FullRestore" }
+    $runningSession = [PSCustomObject]@{ OriginalVMName = "vm2"; Status = "Running"; RecoveryVMUUID = "uuid2"; RestoreMethod = "FullRestore" }
     $script:RecoverySessions.Add($cleanedUpSession)
     $script:RecoverySessions.Add($runningSession)
 
-    Mock Stop-AHVInstantRecovery {}
+    Mock Stop-AHVFullRestore {}
 
     Invoke-Cleanup
 
-    Should -Invoke Stop-AHVInstantRecovery -Times 1 -Exactly
+    Should -Invoke Stop-AHVFullRestore -Times 1 -Exactly
   }
 
   It "continues cleanup after individual session failure" {
-    $session1 = [PSCustomObject]@{ OriginalVMName = "vm1"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid1"; RestoreMethod = "InstantRecovery" }
-    $session2 = [PSCustomObject]@{ OriginalVMName = "vm2"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid2"; RestoreMethod = "InstantRecovery" }
+    $session1 = [PSCustomObject]@{ OriginalVMName = "vm1"; Status = "Running"; RecoveryVMUUID = "uuid1"; RestoreMethod = "FullRestore" }
+    $session2 = [PSCustomObject]@{ OriginalVMName = "vm2"; Status = "Running"; RecoveryVMUUID = "uuid2"; RestoreMethod = "FullRestore" }
     $script:RecoverySessions.Add($session1)
     $script:RecoverySessions.Add($session2)
 
     $callCount = 0
-    Mock Stop-AHVInstantRecovery {
+    Mock Stop-AHVFullRestore {
       $callCount++
       if ($callCount -eq 1) { throw "Cleanup failed for first session" }
     }
 
     Invoke-Cleanup
 
-    Should -Invoke Stop-AHVInstantRecovery -Times 2 -Exactly
+    Should -Invoke Stop-AHVFullRestore -Times 2 -Exactly
   }
 
-  It "dispatches to Stop-AHVFullRestore for FullRestore sessions" {
-    $session = [PSCustomObject]@{ OriginalVMName = "vm-full"; Status = "Running"; VBRSession = $null; RecoveryVMUUID = "uuid-full"; RestoreMethod = "FullRestore" }
+  It "calls Stop-AHVFullRestore for running sessions" {
+    $session = [PSCustomObject]@{ OriginalVMName = "vm-full"; Status = "Running"; RecoveryVMUUID = "uuid-full"; RestoreMethod = "FullRestore" }
     $script:RecoverySessions.Add($session)
 
     Mock Stop-AHVFullRestore {}
-    Mock Stop-AHVInstantRecovery {}
 
     Invoke-Cleanup
 
     Should -Invoke Stop-AHVFullRestore -Times 1 -Exactly
-    Should -Invoke Stop-AHVInstantRecovery -Times 0 -Exactly
   }
 }
 
@@ -1353,9 +1358,9 @@ Describe "Preflight Health Checks" {
     }
   }
 
-  Context "Test-AHVProxyConnectivity" {
-    It "reports blocking issue when proxy is unreachable" {
-      $result = Test-AHVProxyConnectivity -ProxyServer "192.168.255.254" -ProxyPort 8100
+  Context "Test-VBRConnectivity" {
+    It "reports blocking issue when VBR is unreachable" {
+      $result = Test-VBRConnectivity -VBRHost "192.168.255.254" -VBRPort 9419
       $result.Issues.Count | Should -BeGreaterThan 0
     }
   }
@@ -1381,20 +1386,6 @@ Describe "Preflight Health Checks" {
 
       $result = Test-PreflightRequirements -Clusters $clusters -IsolatedNetwork $net -RestorePoints $rps -BackupJobs @(@{}) -MaxConcurrentVMs 3 -MaxAgeDays 7
       $result.Success | Should -Be $false
-    }
-
-    It "checks proxy connectivity when RestoreMethod is FullRestore" {
-      $clusters = @(@{ name = "cluster1"; status = "NORMAL"; nodes = @{ nodeList = @(1, 2) } })
-      $net = [PSCustomObject]@{ UUID = "net-123"; Name = "surebackup-lab"; VlanId = 999 }
-      $rps = @([PSCustomObject]@{ VMName = "vm1"; IsConsistent = $true; CreationTime = (Get-Date); JobName = "Job1" })
-
-      Mock Test-BackupJobStatus { return [PSCustomObject]@{ Issues = @(); Warnings = @() } }
-
-      # FullRestore without ProxyServer should add an issue
-      $result = Test-PreflightRequirements -Clusters $clusters -IsolatedNetwork $net -RestorePoints $rps -BackupJobs @(@{}) -RestoreMethod "FullRestore"
-      # It should note that -AHVProxyServer is not needed (we use VBR server now)
-      # but the check may still pass or fail based on network
-      $result | Should -Not -BeNullOrEmpty
     }
   }
 }
@@ -1438,10 +1429,9 @@ Describe "VBAHV Plugin REST API" {
         return @{ id = "session-1" }
       }
 
-      Invoke-VBAHVPluginAPI -Method "POST" -Endpoint "restorePoints/restore" -Body @{ restorePointId = "rp1"; sourceVmId = "vm1" }
+      Invoke-VBAHVPluginAPI -Method "POST" -Endpoint "restorePoints/restore" -Body @{ restorePointId = "rp1" }
       $parsed = $script:capturedBody | ConvertFrom-Json
       $parsed.restorePointId | Should -Be "rp1"
-      $parsed.sourceVmId | Should -Be "vm1"
     }
 
     It "retries on 5xx errors" {
@@ -1468,15 +1458,195 @@ Describe "VBAHV Plugin REST API" {
     }
   }
 
-  Context "_NewRecoveryInfo RestoreMethod" {
-    It "defaults to InstantRecovery" {
-      $info = _NewRecoveryInfo -OriginalVMName "vm1" -RecoveryVMName "rec1" -Status "Running"
-      $info.RestoreMethod | Should -Be "InstantRecovery"
+  Context "Get-VBAHVJobs" {
+    It "returns all jobs from REST API" {
+      Mock Invoke-VBAHVPluginAPI {
+        return @(
+          @{ name = "AHV-Job1"; id = "j1" },
+          @{ name = "AHV-Job2"; id = "j2" }
+        )
+      }
+
+      $result = Get-VBAHVJobs
+      @($result).Count | Should -Be 2
     }
 
-    It "accepts FullRestore" {
-      $info = _NewRecoveryInfo -OriginalVMName "vm1" -RecoveryVMName "rec1" -Status "Running" -RestoreMethod "FullRestore"
+    It "filters by job names" {
+      Mock Invoke-VBAHVPluginAPI {
+        return @(
+          @{ name = "AHV-Job1"; id = "j1" },
+          @{ name = "AHV-Job2"; id = "j2" }
+        )
+      }
+
+      $result = @(Get-VBAHVJobs -JobNames @("AHV-Job1"))
+      $result.Count | Should -Be 1
+      $result[0].name | Should -Be "AHV-Job1"
+    }
+
+    It "throws when no jobs found" {
+      Mock Invoke-VBAHVPluginAPI { return @() }
+
+      { Get-VBAHVJobs } | Should -Throw "*No Nutanix AHV backup jobs found*"
+    }
+  }
+
+  Context "Get-VBAHVRestorePointMetadata" {
+    It "calls correct endpoint" {
+      $script:capturedEndpoint = $null
+      Mock Invoke-VBAHVPluginAPI {
+        $script:capturedEndpoint = $Endpoint
+        return @{
+          id = "rp1"
+          clusterId = "c1"
+          networkAdapters = @(@{ macAddress = "aa:bb:cc:dd:ee:ff"; networkId = "net1"; networkName = "prod" })
+          disks = @(@{ id = "d1"; size = 100 })
+        }
+      }
+
+      $result = Get-VBAHVRestorePointMetadata -RestorePointId "rp1"
+      $script:capturedEndpoint | Should -Be "restorePoints/rp1/metadata"
+      $result.clusterId | Should -Be "c1"
+      $result.networkAdapters.Count | Should -Be 1
+    }
+  }
+
+  Context "Get-VBAHVClusters" {
+    It "calls clusters endpoint" {
+      Mock Invoke-VBAHVPluginAPI {
+        return @(
+          @{ id = "c1"; name = "NX-Cluster-01" }
+        )
+      }
+
+      $result = @(Get-VBAHVClusters)
+      $result.Count | Should -Be 1
+      $result[0].name | Should -Be "NX-Cluster-01"
+    }
+  }
+
+  Context "Get-VBAHVStorageContainers" {
+    It "calls correct cluster-scoped endpoint" {
+      $script:capturedEndpoint = $null
+      Mock Invoke-VBAHVPluginAPI {
+        $script:capturedEndpoint = $Endpoint
+        return @(
+          @{ id = "sc1"; name = "default-container" }
+        )
+      }
+
+      $result = Get-VBAHVStorageContainers -ClusterId "c1"
+      $script:capturedEndpoint | Should -Be "clusters/c1/storageContainers"
+      @($result).Count | Should -Be 1
+    }
+  }
+
+  Context "Start-AHVFullRestore NIC remap" {
+    It "uses originalMacAddress (not macAddress) in network adapter remap" {
+      $script:capturedBody = $null
+
+      Mock Get-VBAHVRestorePoints {
+        return @(@{
+          id = "rp1"
+          vmName = "test-vm"
+          vmId = "vm-src-1"
+          creationTime = (Get-Date).ToString("o")
+        })
+      }
+
+      Mock Get-VBAHVRestorePointMetadata {
+        return @{
+          clusterId = "c1"
+          networkAdapters = @(
+            @{ macAddress = "aa:bb:cc:dd:ee:ff"; networkId = "net-prod"; networkName = "production" }
+          )
+        }
+      }
+
+      Mock Invoke-VBAHVPluginAPI {
+        param($Method, $Endpoint, $Body)
+        if ($Method -eq "POST" -and $Endpoint -eq "restorePoints/restore") {
+          $script:capturedBody = $Body
+          return @{ id = "session-1" }
+        }
+        if ($Endpoint -match "sessions/") {
+          return @{ state = "Success" }
+        }
+        return @()
+      }
+
+      Mock Get-PrismVMByName { return @(@{ extId = "vm-uuid-1"; name = "SureBackup_test-vm_123456_abc" }) }
+      Mock Set-PrismVMPowerState {}
+      Mock Start-Sleep {}
+
+      $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
+      $rpInfo = [PSCustomObject]@{ VMName = "test-vm"; CreationTime = Get-Date; JobName = "Job1" }
+      $isolatedNet = [PSCustomObject]@{ UUID = "net-iso-1"; Name = "isolated-lab" }
+
+      Start-AHVFullRestore -RestorePointInfo $rpInfo -IsolatedNetwork $isolatedNet
+
+      $script:capturedBody | Should -Not -BeNullOrEmpty
+      $script:capturedBody.networkAdapters[0].originalMacAddress | Should -Be "aa:bb:cc:dd:ee:ff"
+      # Should NOT have 'macAddress' key at the top level of the remap
+      $script:capturedBody.networkAdapters[0].Keys | Should -Not -Contain "macAddress"
+    }
+
+    It "always sends required fields in restore body" {
+      $script:capturedBody = $null
+
+      Mock Get-VBAHVRestorePoints {
+        return @(@{
+          id = "rp1"
+          vmName = "test-vm"
+          creationTime = (Get-Date).ToString("o")
+        })
+      }
+
+      Mock Get-VBAHVRestorePointMetadata {
+        return @{ clusterId = "c1"; networkAdapters = @() }
+      }
+
+      Mock Invoke-VBAHVPluginAPI {
+        param($Method, $Endpoint, $Body)
+        if ($Method -eq "POST" -and $Endpoint -eq "restorePoints/restore") {
+          $script:capturedBody = $Body
+          return @{ id = "session-1" }
+        }
+        if ($Endpoint -match "sessions/") {
+          return @{ state = "Success" }
+        }
+        return @()
+      }
+
+      Mock Get-PrismVMByName { return @(@{ extId = "vm-uuid-1" }) }
+      Mock Set-PrismVMPowerState {}
+      Mock Start-Sleep {}
+
+      $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
+      $rpInfo = [PSCustomObject]@{ VMName = "test-vm"; CreationTime = Get-Date; JobName = "Job1" }
+      $isolatedNet = [PSCustomObject]@{ UUID = "net-iso-1"; Name = "isolated-lab" }
+
+      Start-AHVFullRestore -RestorePointInfo $rpInfo -IsolatedNetwork $isolatedNet
+
+      $script:capturedBody | Should -Not -BeNullOrEmpty
+      $script:capturedBody.Keys | Should -Contain "restoreToOriginal"
+      $script:capturedBody.Keys | Should -Contain "powerOnVmAfterRestore"
+      $script:capturedBody.Keys | Should -Contain "restoreVmCategories"
+      $script:capturedBody.restoreToOriginal | Should -Be $false
+      $script:capturedBody.powerOnVmAfterRestore | Should -Be $false
+      $script:capturedBody.restoreVmCategories | Should -Be $false
+    }
+  }
+
+  Context "_NewRecoveryInfo" {
+    It "defaults to FullRestore" {
+      $info = _NewRecoveryInfo -OriginalVMName "vm1" -RecoveryVMName "rec1" -Status "Running"
       $info.RestoreMethod | Should -Be "FullRestore"
+    }
+
+    It "does not have VBRSession property" {
+      $info = _NewRecoveryInfo -OriginalVMName "vm1" -RecoveryVMName "rec1" -Status "Running"
+      $info.PSObject.Properties.Name | Should -Not -Contain "VBRSession"
     }
   }
 }

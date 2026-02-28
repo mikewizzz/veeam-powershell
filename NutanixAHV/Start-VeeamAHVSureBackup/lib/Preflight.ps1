@@ -1,8 +1,8 @@
 # =============================
 # Preflight Health Checks
 # =============================
-# Validates cluster health, capacity, network readiness, restore point
-# integrity, and AHV proxy connectivity before recovery operations.
+# Validates cluster health, capacity, network readiness, and restore point
+# integrity before recovery operations.
 # Pattern follows ONPREM/New-VeeamSureBackupSetup Test-Configuration.
 
 function Test-ClusterHealth {
@@ -174,10 +174,10 @@ function Test-RestorePointRecency {
 function Test-BackupJobStatus {
   <#
   .SYNOPSIS
-    Check last run status of backup jobs
+    Check backup job status via VBAHV Plugin REST API
   .DESCRIPTION
-    Warns if the last backup job run failed or is currently running. Failed
-    jobs may indicate infrastructure issues that could affect recovery.
+    Checks backup job objects from the VBAHV REST API for any indicators
+    of failure or in-progress state.
   #>
   param(
     [Parameter(Mandatory = $true)]$BackupJobs
@@ -188,35 +188,36 @@ function Test-BackupJobStatus {
 
   foreach ($job in $BackupJobs) {
     try {
-      $lastResult = $job.GetLastResult()
-      $isRunning = $job.IsRunning
+      $jobName = if ($job.name) { $job.name } else { "$job" }
+      $lastResult = $job.lastResult
+      $isRunning = $job.isRunning
 
       if ($isRunning) {
-        $warnings += "Backup job '$($job.Name)' is currently running — restore points may be in-progress"
+        $warnings += "Backup job '$jobName' is currently running — restore points may be in-progress"
       }
       elseif ($lastResult -and "$lastResult" -imatch "Failed") {
-        $warnings += "Backup job '$($job.Name)' last run failed — verify backup integrity"
+        $warnings += "Backup job '$jobName' last run failed — verify backup integrity"
       }
     }
     catch {
-      # Some job types may not support GetLastResult
+      # Job objects from REST API may have varying schema
     }
   }
 
   return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
 }
 
-function Test-AHVProxyConnectivity {
+function Test-VBRConnectivity {
   <#
   .SYNOPSIS
-    Verify the AHV Backup Proxy REST API is reachable (for FullRestore mode)
+    Verify the VBR REST API is reachable on port 9419
   .DESCRIPTION
-    Attempts to reach the AHV proxy's API endpoint. Only runs when
-    RestoreMethod is FullRestore since InstantRecovery uses VBR cmdlets.
+    Attempts TCP connection to the VBR server's REST API port. This is
+    required for OAuth2 authentication and VBAHV Plugin access.
   #>
   param(
-    [Parameter(Mandatory = $true)][string]$ProxyServer,
-    [Parameter(Mandatory = $true)][int]$ProxyPort
+    [Parameter(Mandatory = $true)][string]$VBRHost,
+    [int]$VBRPort = 9419
   )
 
   $issues = @()
@@ -224,15 +225,15 @@ function Test-AHVProxyConnectivity {
 
   try {
     $tcpClient = New-Object System.Net.Sockets.TcpClient
-    $connectTask = $tcpClient.ConnectAsync($ProxyServer, $ProxyPort)
+    $connectTask = $tcpClient.ConnectAsync($VBRHost, $VBRPort)
     $connected = $connectTask.Wait(10000)
 
     if (-not $connected -or -not $tcpClient.Connected) {
-      $issues += "AHV Backup Proxy at ${ProxyServer}:${ProxyPort} is not reachable — FullRestore requires proxy REST API access"
+      $issues += "VBR REST API at ${VBRHost}:${VBRPort} is not reachable — required for VBAHV Plugin authentication"
     }
   }
   catch {
-    $issues += "AHV Backup Proxy at ${ProxyServer}:${ProxyPort} connection failed: $($_.Exception.Message)"
+    $issues += "VBR REST API at ${VBRHost}:${VBRPort} connection failed: $($_.Exception.Message)"
   }
   finally {
     if ($tcpClient) {
@@ -249,9 +250,9 @@ function Test-PreflightRequirements {
   .SYNOPSIS
     Orchestrator: run all preflight checks and report results
   .DESCRIPTION
-    Runs cluster health, capacity, network, restore point, and proxy
+    Runs cluster health, capacity, network, restore point, and VBR
     connectivity checks. Returns a result object with Success, Issues,
-    and Warnings. Throws if any blocking issues are found.
+    and Warnings.
   .PARAMETER Clusters
     Nutanix cluster objects from Prism API
   .PARAMETER IsolatedNetwork
@@ -259,17 +260,11 @@ function Test-PreflightRequirements {
   .PARAMETER RestorePoints
     Discovered restore point objects
   .PARAMETER BackupJobs
-    Veeam AHV backup job objects
+    VBAHV backup job objects from REST API
   .PARAMETER MaxConcurrentVMs
     Maximum concurrent recovery VMs
   .PARAMETER MaxAgeDays
     Maximum restore point age in days before warning
-  .PARAMETER RestoreMethod
-    Current restore method (InstantRecovery or FullRestore)
-  .PARAMETER ProxyServer
-    AHV Backup Proxy hostname (required for FullRestore)
-  .PARAMETER ProxyPort
-    AHV Backup Proxy port (required for FullRestore)
   #>
   param(
     [Parameter(Mandatory = $true)]$Clusters,
@@ -277,10 +272,7 @@ function Test-PreflightRequirements {
     [Parameter(Mandatory = $true)]$RestorePoints,
     [Parameter(Mandatory = $true)]$BackupJobs,
     [int]$MaxConcurrentVMs = 3,
-    [int]$MaxAgeDays = 7,
-    [string]$RestoreMethod = "InstantRecovery",
-    [string]$ProxyServer,
-    [int]$ProxyPort = 8100
+    [int]$MaxAgeDays = 7
   )
 
   $startTime = Get-Date
@@ -325,24 +317,11 @@ function Test-PreflightRequirements {
   $allIssues += $result.Issues
   $allWarnings += $result.Warnings
 
-  # 7. AHV Proxy connectivity (only for FullRestore)
-  if ($RestoreMethod -eq "FullRestore") {
-    if (-not $ProxyServer) {
-      $allIssues += "FullRestore requires -AHVProxyServer parameter"
-    }
-    else {
-      Write-Log "  [Preflight] Checking AHV Proxy connectivity (${ProxyServer}:${ProxyPort})..." -Level "INFO"
-      $result = Test-AHVProxyConnectivity -ProxyServer $ProxyServer -ProxyPort $ProxyPort
-      $allIssues += $result.Issues
-      $allWarnings += $result.Warnings
-    }
-  }
-
   # Report results
   $durationSec = ((Get-Date) - $startTime).TotalSeconds
 
   if ($allWarnings.Count -gt 0) {
-    Write-Log "" -Level "INFO"
+    Write-Log " " -Level "INFO"
     Write-Log "  PREFLIGHT WARNINGS ($($allWarnings.Count)):" -Level "WARNING"
     foreach ($w in $allWarnings) {
       Write-Log "    - $w" -Level "WARNING"
@@ -350,7 +329,7 @@ function Test-PreflightRequirements {
   }
 
   if ($allIssues.Count -gt 0) {
-    Write-Log "" -Level "INFO"
+    Write-Log " " -Level "INFO"
     Write-Log "  PREFLIGHT ERRORS ($($allIssues.Count)):" -Level "ERROR"
     foreach ($i in $allIssues) {
       Write-Log "    [X] $i" -Level "ERROR"

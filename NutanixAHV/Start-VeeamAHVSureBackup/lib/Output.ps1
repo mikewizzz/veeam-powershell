@@ -76,11 +76,12 @@ function Export-Results {
 function Invoke-Cleanup {
   <#
   .SYNOPSIS
-    Clean up all instant recovery sessions and temporary resources
+    Clean up all restored VMs and temporary resources
   .DESCRIPTION
     Iterates over all tracked recovery sessions and stops any that are still
     running or in a failed state. Each session is cleaned up independently
     so a failure in one does not block cleanup of others.
+    All sessions use Stop-AHVFullRestore (power off + delete via Prism API).
   #>
   Write-Log "Starting cleanup of $($script:RecoverySessions.Count) recovery session(s)..." -Level "INFO"
 
@@ -88,13 +89,7 @@ function Invoke-Cleanup {
   foreach ($session in $script:RecoverySessions) {
     if ($session.Status -eq "Running" -or $session.Status -eq "Failed") {
       try {
-        # Dispatch cleanup based on restore method
-        if ($session.RestoreMethod -eq "FullRestore") {
-          Stop-AHVFullRestore -RecoveryInfo $session
-        }
-        else {
-          Stop-AHVInstantRecovery -RecoveryInfo $session
-        }
+        Stop-AHVFullRestore -RecoveryInfo $session
         $cleanedCount++
       }
       catch {
