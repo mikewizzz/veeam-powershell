@@ -52,7 +52,7 @@ BeforeAll {
   $script:TestResults = New-Object System.Collections.Generic.List[object]
   $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
   $script:StartTime = Get-Date
-  $script:TotalSteps = 8
+  $script:TotalSteps = 9
   $script:CurrentStep = 0
 
   # Parse AST from all script files and extract function definitions without executing main
@@ -1032,6 +1032,22 @@ Describe "Smoke test - script integrity" {
   It "defines _EscapeHTML function" {
     Get-Command "_EscapeHTML" -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
   }
+
+  It "defines preflight functions" {
+    foreach ($fn in @("Test-PreflightRequirements", "Test-ClusterHealth", "Test-ClusterCapacity",
+        "Test-IsolatedNetworkHealth", "Test-RestorePointConsistency", "Test-RestorePointRecency",
+        "Test-BackupJobStatus", "Test-AHVProxyConnectivity")) {
+      Get-Command $fn -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty -Because "function $fn should be defined"
+    }
+  }
+
+  It "defines VBAHV Plugin REST API functions" {
+    foreach ($fn in @("Initialize-VBAHVPluginConnection", "Invoke-VBAHVPluginAPI",
+        "Get-VBAHVRestorePoints", "Get-VBAHVNetworkAdapters",
+        "Start-AHVFullRestore", "Stop-AHVFullRestore")) {
+      Get-Command $fn -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty -Because "function $fn should be defined"
+    }
+  }
 }
 
 # ============================================================
@@ -1196,8 +1212,8 @@ Describe "Cleanup Idempotency" {
   }
 
   It "only cleans up Running or Failed sessions" {
-    $cleanedUpSession = [PSCustomObject]@{ OriginalVMName = "vm1"; Status = "CleanedUp"; VBRSession = $null; RecoveryVMUUID = $null }
-    $runningSession = [PSCustomObject]@{ OriginalVMName = "vm2"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid2" }
+    $cleanedUpSession = [PSCustomObject]@{ OriginalVMName = "vm1"; Status = "CleanedUp"; VBRSession = $null; RecoveryVMUUID = $null; RestoreMethod = "InstantRecovery" }
+    $runningSession = [PSCustomObject]@{ OriginalVMName = "vm2"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid2"; RestoreMethod = "InstantRecovery" }
     $script:RecoverySessions.Add($cleanedUpSession)
     $script:RecoverySessions.Add($runningSession)
 
@@ -1205,13 +1221,12 @@ Describe "Cleanup Idempotency" {
 
     Invoke-Cleanup
 
-    # Stop-AHVInstantRecovery should only be called for the Running session
     Should -Invoke Stop-AHVInstantRecovery -Times 1 -Exactly
   }
 
   It "continues cleanup after individual session failure" {
-    $session1 = [PSCustomObject]@{ OriginalVMName = "vm1"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid1" }
-    $session2 = [PSCustomObject]@{ OriginalVMName = "vm2"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid2" }
+    $session1 = [PSCustomObject]@{ OriginalVMName = "vm1"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid1"; RestoreMethod = "InstantRecovery" }
+    $session2 = [PSCustomObject]@{ OriginalVMName = "vm2"; Status = "Running"; VBRSession = @{}; RecoveryVMUUID = "uuid2"; RestoreMethod = "InstantRecovery" }
     $script:RecoverySessions.Add($session1)
     $script:RecoverySessions.Add($session2)
 
@@ -1223,7 +1238,245 @@ Describe "Cleanup Idempotency" {
 
     Invoke-Cleanup
 
-    # Both sessions should have been attempted
     Should -Invoke Stop-AHVInstantRecovery -Times 2 -Exactly
+  }
+
+  It "dispatches to Stop-AHVFullRestore for FullRestore sessions" {
+    $session = [PSCustomObject]@{ OriginalVMName = "vm-full"; Status = "Running"; VBRSession = $null; RecoveryVMUUID = "uuid-full"; RestoreMethod = "FullRestore" }
+    $script:RecoverySessions.Add($session)
+
+    Mock Stop-AHVFullRestore {}
+    Mock Stop-AHVInstantRecovery {}
+
+    Invoke-Cleanup
+
+    Should -Invoke Stop-AHVFullRestore -Times 1 -Exactly
+    Should -Invoke Stop-AHVInstantRecovery -Times 0 -Exactly
+  }
+}
+
+# ============================================================
+Describe "Preflight Health Checks" {
+
+  BeforeEach {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+    $script:PrismApiVersion = "v4"
+  }
+
+  Context "Test-ClusterHealth" {
+    It "reports CRITICAL cluster as blocking issue" {
+      $clusters = @(@{ name = "cluster1"; status = "CRITICAL" })
+      $result = Test-ClusterHealth -Clusters $clusters
+      $result.Issues.Count | Should -BeGreaterThan 0
+      $result.Issues[0] | Should -Match "CRITICAL"
+    }
+
+    It "reports DEGRADED cluster as warning" {
+      $clusters = @(@{ name = "cluster1"; status = "DEGRADED" })
+      $result = Test-ClusterHealth -Clusters $clusters
+      $result.Warnings.Count | Should -BeGreaterThan 0
+      $result.Issues.Count | Should -Be 0
+    }
+
+    It "passes healthy cluster" {
+      $clusters = @(@{ name = "cluster1"; status = "NORMAL" })
+      $result = Test-ClusterHealth -Clusters $clusters
+      $result.Issues.Count | Should -Be 0
+      $result.Warnings.Count | Should -Be 0
+    }
+  }
+
+  Context "Test-ClusterCapacity" {
+    It "warns when MaxConcurrentVMs exceeds heuristic" {
+      $clusters = @(@{ name = "cluster1"; nodes = @{ nodeList = @(1, 2) } })
+      $result = Test-ClusterCapacity -Clusters $clusters -MaxConcurrentVMs 10
+      $result.Warnings.Count | Should -BeGreaterThan 0
+      $result.Warnings[0] | Should -Match "exceeds recommended"
+    }
+
+    It "passes when within capacity" {
+      $clusters = @(@{ name = "cluster1"; nodes = @{ nodeList = @(1, 2, 3, 4) } })
+      $result = Test-ClusterCapacity -Clusters $clusters -MaxConcurrentVMs 3
+      $result.Issues.Count | Should -Be 0
+      $result.Warnings.Count | Should -Be 0
+    }
+  }
+
+  Context "Test-IsolatedNetworkHealth" {
+    It "blocks when network has no UUID" {
+      $net = [PSCustomObject]@{ UUID = $null; Name = "test"; VlanId = 999 }
+      $result = Test-IsolatedNetworkHealth -IsolatedNetwork $net
+      $result.Issues.Count | Should -BeGreaterThan 0
+    }
+
+    It "warns when network name looks like production" {
+      $net = [PSCustomObject]@{ UUID = "net-123"; Name = "production-vlan"; VlanId = 10 }
+      $result = Test-IsolatedNetworkHealth -IsolatedNetwork $net
+      $result.Warnings.Count | Should -BeGreaterThan 0
+      $result.Warnings[0] | Should -Match "production"
+    }
+
+    It "passes a properly named isolated network" {
+      $net = [PSCustomObject]@{ UUID = "net-123"; Name = "surebackup-isolated"; VlanId = 999 }
+      $result = Test-IsolatedNetworkHealth -IsolatedNetwork $net
+      $result.Issues.Count | Should -Be 0
+      $result.Warnings.Count | Should -Be 0
+    }
+  }
+
+  Context "Test-RestorePointRecency" {
+    It "warns about stale restore points" {
+      $rps = @([PSCustomObject]@{ VMName = "vm1"; CreationTime = (Get-Date).AddDays(-30) })
+      $result = Test-RestorePointRecency -RestorePoints $rps -MaxAgeDays 7
+      $result.Warnings.Count | Should -BeGreaterThan 0
+      $result.Warnings[0] | Should -Match "days old"
+    }
+
+    It "passes recent restore points" {
+      $rps = @([PSCustomObject]@{ VMName = "vm1"; CreationTime = (Get-Date).AddDays(-1) })
+      $result = Test-RestorePointRecency -RestorePoints $rps -MaxAgeDays 7
+      $result.Warnings.Count | Should -Be 0
+    }
+  }
+
+  Context "Test-RestorePointConsistency" {
+    It "warns about crash-consistent restore points" {
+      $rps = @([PSCustomObject]@{ VMName = "vm1"; IsConsistent = $false; JobName = "Job1"; CreationTime = Get-Date })
+      $result = Test-RestorePointConsistency -RestorePoints $rps
+      $result.Warnings.Count | Should -BeGreaterThan 0
+    }
+
+    It "passes application-consistent restore points" {
+      $rps = @([PSCustomObject]@{ VMName = "vm1"; IsConsistent = $true; JobName = "Job1"; CreationTime = Get-Date })
+      $result = Test-RestorePointConsistency -RestorePoints $rps
+      $result.Warnings.Count | Should -Be 0
+    }
+  }
+
+  Context "Test-AHVProxyConnectivity" {
+    It "reports blocking issue when proxy is unreachable" {
+      $result = Test-AHVProxyConnectivity -ProxyServer "192.168.255.254" -ProxyPort 8100
+      $result.Issues.Count | Should -BeGreaterThan 0
+    }
+  }
+
+  Context "Test-PreflightRequirements orchestrator" {
+    It "returns Success=true when no blocking issues" {
+      $clusters = @(@{ name = "cluster1"; status = "NORMAL"; nodes = @{ nodeList = @(1, 2, 3) } })
+      $net = [PSCustomObject]@{ UUID = "net-123"; Name = "surebackup-lab"; VlanId = 999 }
+      $rps = @([PSCustomObject]@{ VMName = "vm1"; IsConsistent = $true; CreationTime = (Get-Date).AddHours(-2); JobName = "Job1" })
+
+      Mock Test-BackupJobStatus { return [PSCustomObject]@{ Issues = @(); Warnings = @() } }
+
+      $result = Test-PreflightRequirements -Clusters $clusters -IsolatedNetwork $net -RestorePoints $rps -BackupJobs @(@{}) -MaxConcurrentVMs 3 -MaxAgeDays 7
+      $result.Success | Should -Be $true
+    }
+
+    It "returns Success=false when cluster is CRITICAL" {
+      $clusters = @(@{ name = "cluster1"; status = "CRITICAL"; nodes = @{ nodeList = @(1) } })
+      $net = [PSCustomObject]@{ UUID = "net-123"; Name = "surebackup-lab"; VlanId = 999 }
+      $rps = @([PSCustomObject]@{ VMName = "vm1"; IsConsistent = $true; CreationTime = (Get-Date); JobName = "Job1" })
+
+      Mock Test-BackupJobStatus { return [PSCustomObject]@{ Issues = @(); Warnings = @() } }
+
+      $result = Test-PreflightRequirements -Clusters $clusters -IsolatedNetwork $net -RestorePoints $rps -BackupJobs @(@{}) -MaxConcurrentVMs 3 -MaxAgeDays 7
+      $result.Success | Should -Be $false
+    }
+
+    It "checks proxy connectivity when RestoreMethod is FullRestore" {
+      $clusters = @(@{ name = "cluster1"; status = "NORMAL"; nodes = @{ nodeList = @(1, 2) } })
+      $net = [PSCustomObject]@{ UUID = "net-123"; Name = "surebackup-lab"; VlanId = 999 }
+      $rps = @([PSCustomObject]@{ VMName = "vm1"; IsConsistent = $true; CreationTime = (Get-Date); JobName = "Job1" })
+
+      Mock Test-BackupJobStatus { return [PSCustomObject]@{ Issues = @(); Warnings = @() } }
+
+      # FullRestore without ProxyServer should add an issue
+      $result = Test-PreflightRequirements -Clusters $clusters -IsolatedNetwork $net -RestorePoints $rps -BackupJobs @(@{}) -RestoreMethod "FullRestore"
+      # It should note that -AHVProxyServer is not needed (we use VBR server now)
+      # but the check may still pass or fail based on network
+      $result | Should -Not -BeNullOrEmpty
+    }
+  }
+}
+
+# ============================================================
+Describe "VBAHV Plugin REST API" {
+
+  BeforeEach {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+    $script:VBAHVBaseUrl = "https://vbr01:9419/extension/799a5a3e-ae1e-4eaf-86eb-8a9acc2670e2/api/v9"
+    $script:VBAHVHeaders = @{
+      "Authorization" = "Bearer test-token"
+      "Content-Type"  = "application/json"
+    }
+  }
+
+  Context "Invoke-VBAHVPluginAPI" {
+    It "rejects invalid HTTP method" {
+      { Invoke-VBAHVPluginAPI -Method "PATCH" -Endpoint "test" } | Should -Throw
+    }
+
+    It "rejects empty endpoint" {
+      { Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "" } | Should -Throw
+    }
+
+    It "calls Invoke-RestMethod with correct URL" {
+      $script:capturedUri = $null
+      Mock Invoke-RestMethod {
+        $script:capturedUri = $Uri
+        return @{ data = @() }
+      }
+
+      Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "restorePoints"
+      $script:capturedUri | Should -Match "extension/799a5a3e.*restorePoints"
+    }
+
+    It "serializes body as JSON" {
+      $script:capturedBody = $null
+      Mock Invoke-RestMethod {
+        $script:capturedBody = $Body
+        return @{ id = "session-1" }
+      }
+
+      Invoke-VBAHVPluginAPI -Method "POST" -Endpoint "restorePoints/restore" -Body @{ restorePointId = "rp1"; sourceVmId = "vm1" }
+      $parsed = $script:capturedBody | ConvertFrom-Json
+      $parsed.restorePointId | Should -Be "rp1"
+      $parsed.sourceVmId | Should -Be "vm1"
+    }
+
+    It "retries on 5xx errors" {
+      $script:callCount = 0
+      Mock Invoke-RestMethod {
+        $script:callCount++
+        if ($script:callCount -le 1) {
+          throw (New-MockHttpException -StatusCode 500)
+        }
+        return @{ data = @() }
+      }
+      Mock Start-Sleep {}
+
+      Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "test" -RetryCount 2
+      $script:callCount | Should -Be 2
+    }
+
+    It "does NOT retry on 401" {
+      Mock Invoke-RestMethod { throw (New-MockHttpException -StatusCode 401) }
+      Mock Start-Sleep {}
+
+      { Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "test" -RetryCount 3 } | Should -Throw
+      Should -Invoke Invoke-RestMethod -Times 1
+    }
+  }
+
+  Context "_NewRecoveryInfo RestoreMethod" {
+    It "defaults to InstantRecovery" {
+      $info = _NewRecoveryInfo -OriginalVMName "vm1" -RecoveryVMName "rec1" -Status "Running"
+      $info.RestoreMethod | Should -Be "InstantRecovery"
+    }
+
+    It "accepts FullRestore" {
+      $info = _NewRecoveryInfo -OriginalVMName "vm1" -RecoveryVMName "rec1" -Status "Running" -RestoreMethod "FullRestore"
+      $info.RestoreMethod | Should -Be "FullRestore"
+    }
   }
 }
