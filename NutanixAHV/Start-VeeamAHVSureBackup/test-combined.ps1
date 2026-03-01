@@ -229,20 +229,19 @@ $null = Invoke-TestStep -Step 2 -Total 8 -Description "Authenticate to Prism Cen
 }
 
 # =============================
-# Step 3: Find Restore Point for Target VM
+# Step 3: Find Target VM via Prism Central Discovery
 # =============================
-$targetRP = Invoke-TestStep -Step 3 -Total 8 -Description "Find restore point for '$TargetVMName'" -Action {
-  $rps = Get-VBAHVRestorePoints -VMNames @($TargetVMName)
-  $items = @($rps)
-  if ($items.Count -lt 1) { throw "No restore points found for VM '$TargetVMName' in VBAHV Plugin" }
+$targetRP = Invoke-TestStep -Step 3 -Total 8 -Description "Find '$TargetVMName' via VBAHV Plugin Prism Central discovery" -Action {
+  $vms = Get-VBAHVProtectedVMs -VMNames @($TargetVMName)
+  $items = @($vms)
+  if ($items.Count -lt 1) { throw "VM '$TargetVMName' not found in any VBAHV Plugin Prism Central" }
 
-  # Pick the latest by creation time
-  $latest = $items | Sort-Object { [datetime]$_.creationTime } -Descending | Select-Object -First 1
-  Write-Host "  Found $($items.Count) restore point(s), using latest:" -ForegroundColor Gray
-  Write-Host "    RP ID:      $($latest.id)" -ForegroundColor Gray
-  Write-Host "    VM Name:    $($latest.vmName)" -ForegroundColor Gray
-  Write-Host "    Created:    $($latest.creationTime)" -ForegroundColor Gray
-  return $latest
+  $targetVM = $items[0]
+  Write-Host "  Found VM in VBAHV Plugin:" -ForegroundColor Gray
+  Write-Host "    VM ID:      $($targetVM.id)" -ForegroundColor Gray
+  Write-Host "    VM Name:    $($targetVM.name)" -ForegroundColor Gray
+  Write-Host "    Cluster:    $($targetVM.clusterName)" -ForegroundColor Gray
+  return $targetVM
 }
 
 # =============================
@@ -250,6 +249,7 @@ $targetRP = Invoke-TestStep -Step 3 -Total 8 -Description "Find restore point fo
 # =============================
 $metadata = Invoke-TestStep -Step 4 -Total 8 -Description "Get restore point metadata (NICs, cluster, disks)" -Action {
   $md = Get-VBAHVRestorePointMetadata -RestorePointId $targetRP.id
+  Write-Host "  Using VM ID as restore point ID: $($targetRP.id)" -ForegroundColor Gray
 
   $nicCount = if ($md.networkAdapters) { @($md.networkAdapters).Count } else { 0 }
   Write-Host "  Cluster ID:     $(if ($md.clusterId) { $md.clusterId } else { 'not set' })" -ForegroundColor Gray

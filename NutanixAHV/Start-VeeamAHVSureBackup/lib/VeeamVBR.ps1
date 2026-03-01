@@ -40,6 +40,7 @@ function Initialize-VBAHVPluginConnection {
   $tokenParams = @{
     Method      = "POST"
     Uri         = $tokenUrl
+    Headers     = @{ "x-api-version" = "1.3-rev1" }
     Body        = $tokenBody
     ContentType = "application/x-www-form-urlencoded"
     TimeoutSec  = 30
@@ -53,7 +54,8 @@ function Initialize-VBAHVPluginConnection {
   try {
     $tokenResponse = Invoke-RestMethod @tokenParams
     $apiVersion = if ($VBAHVApiVersion) { $VBAHVApiVersion } else { "v9" }
-    $script:VBAHVBaseUrl = "https://${vbrHost}:${vbrApiPort}/extension/$($script:VBAHV_EXTENSION_GUID)/api/$apiVersion"
+    # Extension API is served on port 443 (default HTTPS), not the VBR API port
+    $script:VBAHVBaseUrl = "https://${vbrHost}/extension/$($script:VBAHV_EXTENSION_GUID)/api/$apiVersion"
     $script:VBAHVHeaders = @{
       "Authorization" = "Bearer $($tokenResponse.access_token)"
       "Content-Type"  = "application/json"
@@ -96,6 +98,7 @@ function Refresh-VBAHVToken {
   $refreshParams = @{
     Method      = "POST"
     Uri         = $script:VBAHVTokenUrl
+    Headers     = @{ "x-api-version" = "1.3-rev1" }
     Body        = $refreshBody
     ContentType = "application/x-www-form-urlencoded"
     TimeoutSec  = 30
@@ -212,7 +215,89 @@ function Invoke-VBAHVPluginAPI {
 }
 
 # ============================================================================
-# VBAHV Plugin REST API — Job & Restore Point Discovery
+# VBAHV Plugin REST API — Prism Central & VM Discovery
+# ============================================================================
+
+function Get-VBAHVPrismCentrals {
+  <#
+  .SYNOPSIS
+    List Prism Centrals registered in the VBAHV Plugin
+  .DESCRIPTION
+    GET /prismCentrals — retrieves all Prism Centrals to which the AHV plugin has access.
+    Each Prism Central has an ID used to discover VMs via /prismCentrals/{id}/vms.
+  #>
+  Write-Log "Discovering Prism Centrals via VBAHV Plugin REST API..." -Level "INFO"
+  $result = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "prismCentrals"
+
+  if (-not $result -or @($result).Count -eq 0) {
+    throw "No Prism Centrals found in VBAHV Plugin. Ensure at least one Prism Central is registered."
+  }
+
+  $count = @($result).Count
+  Write-Log "Found $count Prism Central(s) in VBAHV Plugin" -Level "SUCCESS"
+  return $result
+}
+
+function Get-VBAHVPrismCentralVMs {
+  <#
+  .SYNOPSIS
+    List VMs from a Prism Central via the VBAHV Plugin with pagination
+  .DESCRIPTION
+    GET /prismCentrals/{id}/vms — retrieves all VMs known to the plugin from the
+    specified Prism Central. Supports pagination (offset/limit) and optional name filter.
+
+    Each VirtualMachine object has: id, name, clusterId, clusterName, disks,
+    networkAdapters, vmSize, protectionDomain, consistencyGroup, guestOsVersion.
+  .PARAMETER PrismCentralId
+    ID of the Prism Central (from Get-VBAHVPrismCentrals)
+  .PARAMETER VMNames
+    Optional filter: only return VMs matching these names
+  .PARAMETER PageSize
+    Number of VMs per page (default: 100)
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$PrismCentralId,
+    [string[]]$VMNames,
+    [ValidateRange(1, 500)][int]$PageSize = 100
+  )
+
+  $allVMs = New-Object System.Collections.Generic.List[object]
+  $offset = 0
+
+  do {
+    $endpoint = "prismCentrals/$PrismCentralId/vms?limit=$PageSize&offset=$offset"
+    $page = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint $endpoint
+
+    # PageOfVirtualMachine response: { results, totalCount, offset, limit }
+    $results = $page.results
+    if (-not $results -or @($results).Count -eq 0) { break }
+
+    foreach ($vm in $results) {
+      $allVMs.Add($vm)
+    }
+
+    $offset += @($results).Count
+    $totalCount = if ($page.totalCount) { [int]$page.totalCount } else { $offset }
+  } while ($offset -lt $totalCount)
+
+  # Apply VM name filter if specified
+  if ($VMNames -and $VMNames.Count -gt 0) {
+    $filtered = @($allVMs | Where-Object { $_.name -in $VMNames })
+
+    foreach ($vmName in $VMNames) {
+      if ($vmName -notin @($filtered | ForEach-Object { $_.name })) {
+        Write-Log "VM '$vmName' not found in Prism Central $PrismCentralId" -Level "WARNING"
+      }
+    }
+
+    return $filtered
+  }
+
+  return @($allVMs)
+}
+
+# ============================================================================
+# VBAHV Plugin REST API — Job Discovery
 # ============================================================================
 
 function Get-VBAHVJobs {
@@ -229,7 +314,9 @@ function Get-VBAHVJobs {
   )
 
   Write-Log "Discovering AHV backup jobs via VBAHV Plugin REST API..." -Level "INFO"
-  $allJobs = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "jobs"
+  $response = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "jobs"
+  # GET /jobs returns PageOfJob { results[] } — extract .results with flat-array fallback
+  $allJobs = if ($response.results) { @($response.results) } else { @($response) }
 
   if ($JobNames -and $JobNames.Count -gt 0) {
     $filtered = @($allJobs | Where-Object { $_.name -in $JobNames })
@@ -254,34 +341,74 @@ function Get-VBAHVJobs {
   return $allJobs
 }
 
-function Get-VBAHVRestorePoints {
+function Get-VBAHVProtectedVMs {
   <#
   .SYNOPSIS
-    List restore points from the Veeam AHV Plugin REST API
+    Discover protected VMs across all Prism Centrals via VBAHV Plugin REST API
   .DESCRIPTION
-    GET /restorePoints — retrieves all restore points available in the plugin.
-    Optionally filters by VM name(s) and returns the latest restore point per VM.
+    The v9 API has no flat GET /restorePoints endpoint. VM discovery goes through:
+    1. GET /prismCentrals — list all registered Prism Centrals
+    2. GET /prismCentrals/{id}/vms — paginated VM list per Prism Central
+
+    Each VirtualMachine object includes id, name, clusterId, clusterName, disks,
+    networkAdapters. The VM id is the Nutanix environment UUID. For restore operations,
+    the restorePointId required by POST /restorePoints/restore comes from the VBR core
+    REST API (GET /api/v1/backupObjects/{id}/restorePoints), not from this endpoint.
+
+    NOTE: The VM id from this endpoint may work directly as restorePointId for
+    /restorePoints/{id}/metadata — verify against real infrastructure.
   .PARAMETER VMNames
-    Optional filter: only return restore points for these VM names
+    Optional filter: only return VMs matching these names
   #>
   param(
     [string[]]$VMNames
   )
 
-  $allRPs = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "restorePoints"
+  Write-Log "Discovering protected VMs via VBAHV Plugin (prismCentrals -> VMs)..." -Level "INFO"
 
-  if (-not $allRPs) {
+  $prismCentrals = Get-VBAHVPrismCentrals
+  $allVMs = New-Object System.Collections.Generic.List[object]
+
+  foreach ($pc in @($prismCentrals)) {
+    # PrismCentral objects may expose id directly or via settings
+    $pcId = $pc.id
+    if (-not $pcId) {
+      # Some API versions nest the ID differently
+      $pcId = $pc.settings.id
+    }
+    if (-not $pcId) {
+      Write-Log "  Skipping Prism Central with no ID (address: $($pc.settings.address))" -Level "WARNING"
+      continue
+    }
+
+    $pcAddress = if ($pc.settings.address) { $pc.settings.address } else { $pcId }
+    Write-Log "  Querying Prism Central: $pcAddress ($pcId)" -Level "INFO"
+
+    try {
+      $vms = Get-VBAHVPrismCentralVMs -PrismCentralId $pcId -VMNames $VMNames
+      if ($vms -and @($vms).Count -gt 0) {
+        foreach ($vm in @($vms)) {
+          $allVMs.Add($vm)
+        }
+        Write-Log "    Found $(@($vms).Count) VM(s) from $pcAddress" -Level "INFO"
+      }
+      else {
+        Write-Log "    No VMs found in $pcAddress$(if ($VMNames) { " matching filter" })" -Level "WARNING"
+      }
+    }
+    catch {
+      Write-Log "    Failed to query VMs from $pcAddress`: $($_.Exception.Message)" -Level "WARNING"
+    }
+  }
+
+  $totalCount = @($allVMs).Count
+  if ($totalCount -eq 0) {
+    Write-Log "No protected VMs found across any Prism Central" -Level "WARNING"
     return @()
   }
 
-  # Apply VM name filter if specified
-  if ($VMNames -and $VMNames.Count -gt 0) {
-    $allRPs = @($allRPs | Where-Object {
-      $_.vmName -in $VMNames -or $_.name -in $VMNames
-    })
-  }
-
-  return $allRPs
+  Write-Log "Discovered $totalCount protected VM(s) across $(@($prismCentrals).Count) Prism Central(s)" -Level "SUCCESS"
+  return @($allVMs)
 }
 
 function Get-VBAHVRestorePointMetadata {
@@ -330,7 +457,10 @@ function Get-VBAHVStorageContainers {
     [Parameter(Mandatory = $true)][string]$ClusterId
   )
 
-  return Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "clusters/$ClusterId/storageContainers"
+  # GET /clusters/{id}/storageContainers returns PageOfStorageContainer { results[] }
+  $response = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "clusters/$ClusterId/storageContainers"
+  $containers = if ($response.results) { @($response.results) } else { @($response) }
+  return $containers
 }
 
 # ============================================================================
@@ -383,30 +513,14 @@ function Start-AHVFullRestore {
   Write-Log "Starting Full VM Restore via VBAHV Plugin REST API: $vmName -> $recoveryName" -Level "INFO"
 
   try {
-    # Step 1: Find the corresponding restore point in the plugin
-    Write-Log "  Querying VBAHV Plugin for restore points..." -Level "INFO"
-    $pluginRPs = Get-VBAHVRestorePoints
-
-    # Match by VM name and closest creation time
-    $targetCreationTime = $RestorePointInfo.CreationTime
-    $matchedRP = $null
-
-    $candidates = @($pluginRPs | Where-Object {
-      $_.vmName -eq $vmName -or $_.name -imatch [regex]::Escape($vmName)
-    })
-
-    if ($candidates.Count -gt 0) {
-      $matchedRP = $candidates | Sort-Object {
-        [math]::Abs(([datetime]$_.creationTime - $targetCreationTime).TotalSeconds)
-      } | Select-Object -First 1
+    # Step 1: Use the restore point ID from the pre-discovered VM/restore point info
+    # The RestorePointId comes from VM discovery via Get-VBAHVProtectedVMs (VM id from
+    # prismCentrals/{pcId}/vms) or from VBR core API backup object restore points.
+    $pluginRPId = $RestorePointInfo.RestorePointId
+    if (-not $pluginRPId) {
+      throw "No restore point ID available for '$vmName'. Ensure VM was discovered via Get-VBAHVProtectedVMs."
     }
-
-    if (-not $matchedRP) {
-      throw "No matching restore point for '$vmName' in VBAHV Plugin. Ensure the plugin has access to the backup repository."
-    }
-
-    $pluginRPId = $matchedRP.id
-    Write-Log "  Matched plugin restore point: $pluginRPId (created: $($matchedRP.creationTime))" -Level "INFO"
+    Write-Log "  Using restore point ID: $pluginRPId" -Level "INFO"
 
     # Step 2: Get VM metadata (NICs, disks, cluster) via /metadata endpoint
     Write-Log "  Retrieving restore point metadata..." -Level "INFO"
@@ -483,8 +597,8 @@ function Start-AHVFullRestore {
     $restoreResult = Invoke-VBAHVPluginAPI -Method "POST" -Endpoint "restorePoints/restore" -Body $restoreBody -TimeoutSec 120
 
     # Step 5: Poll async task via GET /sessions/{id}
-    $sessionId = $restoreResult.id
-    if (-not $sessionId) { $sessionId = $restoreResult.sessionId }
+    # AsyncTask schema: { sessionId: string } — sessionId is the only documented field
+    $sessionId = $restoreResult.sessionId
 
     if ($sessionId) {
       Write-Log "  Restore session: $sessionId — polling for completion..." -Level "INFO"
@@ -500,13 +614,24 @@ function Start-AHVFullRestore {
           $sessionStatus = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "sessions/$sessionId"
           $state = $sessionStatus.state
 
-          if ($state -imatch "Success|Completed|Finished") {
-            Write-Log "  Full restore completed in ${elapsed}s" -Level "SUCCESS"
-            break
+          # SessionState enum: Unknown, Starting, Running, Finished, Cancelling, Cancelled
+          # SessionResult enum: Unknown, None, Success, Warning, Error
+          if ($state -eq "Finished") {
+            $result = $sessionStatus.result
+            if ($result -eq "Success" -or $result -eq "Warning") {
+              Write-Log "  Full restore completed in ${elapsed}s (result: $result)" -Level "SUCCESS"
+              break
+            }
+            else {
+              $errMsg = if ($sessionStatus.progressState.events) {
+                ($sessionStatus.progressState.events | Where-Object { $_.severity -eq "Error" } |
+                 Select-Object -First 1).message
+              } else { "result: $result" }
+              throw "Full restore session failed: $errMsg"
+            }
           }
-          elseif ($state -imatch "Failed|Error|Canceled") {
-            $errMsg = if ($sessionStatus.message) { $sessionStatus.message } else { "unknown error" }
-            throw "Full restore session failed: $errMsg"
+          elseif ($state -eq "Cancelled") {
+            throw "Full restore session was cancelled"
           }
 
           if ($elapsed % 60 -eq 0) {
