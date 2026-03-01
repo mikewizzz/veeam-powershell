@@ -358,7 +358,7 @@ function Get-PrismSubnets {
         $totalMatches = if ($result.metadata.total_matches) { $result.metadata.total_matches } else { 0 }
         $offset += $pageSize
       } while ($offset -lt $totalMatches)
-      return $allSubnets
+      return ,$allSubnets.ToArray()
     }
   }
   return Get-PrismEntities -EndpointKey "Subnets"
