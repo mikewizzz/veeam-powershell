@@ -1,5 +1,7 @@
 # Veeam SureBackup for Nutanix AHV
 
+> **Community Tool** — This is not an official Veeam product feature. It implements SureBackup-like VM boot testing for Nutanix AHV using public REST APIs. Veeam's native SureBackup for AHV supports backup verification and content scan only; this script extends that with full VM restore and boot testing.
+
 Automated backup recoverability verification for Nutanix AHV workloads protected by Veeam Backup & Replication. Restores VMs to an isolated network, runs configurable verification tests, and generates professional reports.
 
 ## Prerequisites
@@ -7,7 +9,7 @@ Automated backup recoverability verification for Nutanix AHV workloads protected
 | Component | Version |
 |---|---|
 | PowerShell | 5.1+ (7.x recommended) |
-| Veeam Backup & Replication | 13.0.1+ with Nutanix AHV Plugin v9 |
+| Veeam Backup & Replication | v12.2+ with Nutanix AHV Plugin v9 |
 | Nutanix Prism Central | pc.2024.1+ (REST API v3 or v4) |
 
 Before running, create an **isolated network** in Prism Central with no route to production (e.g., `SureBackup-Isolated` on a dedicated VLAN). The script auto-detects subnets with `isolated`, `surebackup`, or `lab` in the name.

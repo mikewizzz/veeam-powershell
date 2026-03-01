@@ -373,8 +373,8 @@ tbody tr:hover { background: var(--ms-gray-10); }
 <body>
 <div class="container">
   <div class="header">
-    <div class="header-title">Veeam SureBackup Verification Report</div>
-    <div class="header-subtitle">Automated Backup Recoverability Testing</div>
+    <div class="header-title">Backup Verification Report (Community Tool)</div>
+    <div class="header-subtitle">Automated Backup Recoverability Testing &mdash; Community Script</div>
     <div class="header-platform">Nutanix AHV Platform</div>
     <div class="header-meta">
       <span><strong>Generated:</strong> $reportDate</span>
@@ -491,8 +491,8 @@ $logRows
   </div>
 
   <div class="footer">
-    <p>Veeam SureBackup for Nutanix AHV v1.1.0 | Report generated on $reportDate</p>
-    <p>Veeam Backup & Replication + Nutanix Prism Central REST API $PrismApiVersion</p>
+    <p>Backup Verification for Nutanix AHV v1.1.0 (Community Tool) | Report generated on $reportDate</p>
+    <p>Uses Veeam Backup & Replication + Nutanix Prism Central REST API $PrismApiVersion | Not an official Veeam product</p>
   </div>
 </div>
 </body>
