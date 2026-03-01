@@ -1,0 +1,8 @@
+# Claude Code - private/sensitive
+.claude/rules/competitive.md
+.claude/settings.local.json
+.claude/worktrees/
+
+# OS files
+.DS_Store
+Thumbs.db

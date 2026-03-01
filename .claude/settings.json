@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "INPUT=$(cat); FILE_PATH=$(echo \"$INPUT\" | jq -r '.tool_input.file_path // empty'); if [ -n \"$FILE_PATH\" ]; then case \"$FILE_PATH\" in *.env|*.env.*|*.key|*.pem|*.pfx|*credentials*|*secret*) echo 'BLOCKED: Refusing to edit sensitive file: '\"$FILE_PATH\"; exit 2;; esac; fi; exit 0"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./.claude/hooks/lint-ps1.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
