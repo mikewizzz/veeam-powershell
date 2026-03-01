@@ -215,14 +215,15 @@ function Get-TenantInfo {
     default               { "Unknown" }
   }
 
-  # Retrieve org details — try cmdlet first, fall back to Graph REST
+  # Retrieve org details — handle single object or array return from cmdlet
   try {
-    $org = (Get-MgOrganization -ErrorAction Stop)[0]
+    $orgResult = Get-MgOrganization -ErrorAction Stop
+    $org = if ($orgResult -is [array]) { $orgResult[0] } else { $orgResult }
     $script:OrgId = $org.Id
     $script:OrgName = $org.DisplayName
     $script:DefaultDomain = ($org.VerifiedDomains | Where-Object { $_.IsDefault -eq $true } | Select-Object -First 1).Name
   } catch {
-    Write-Log "Get-MgOrganization failed ($($_.Exception.Message)), trying Graph REST" -Level WARNING
+    Write-Log "Get-MgOrganization failed ($($_.Exception.Message)), trying Graph REST"
     try {
       $orgResp = Invoke-Graph -Uri "https://graph.microsoft.com/v1.0/organization"
       $orgData = $orgResp.value[0]
@@ -230,7 +231,7 @@ function Get-TenantInfo {
       $script:OrgName = $orgData.displayName
       $script:DefaultDomain = ($orgData.verifiedDomains | Where-Object { $_.isDefault -eq $true } | Select-Object -First 1).name
     } catch {
-      Write-Log "Graph REST organization query also failed: $($_.Exception.Message)" -Level WARNING
+      Write-Log "Graph REST organization query also failed: $($_.Exception.Message)"
     }
   }
 
