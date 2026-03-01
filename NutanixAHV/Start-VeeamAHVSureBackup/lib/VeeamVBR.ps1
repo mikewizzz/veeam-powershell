@@ -187,6 +187,14 @@ function Invoke-VBAHVPluginAPI {
         $statusCode = [int]$_.Exception.Response.StatusCode
       }
 
+      # SSL/TLS errors are not transient — fail immediately with guidance
+      if ($_.Exception.Message -match 'SSL|TLS|certificate' -or
+          ($_.Exception.InnerException -and $_.Exception.InnerException.Message -match 'SSL|TLS|certificate')) {
+        Write-Log "VBAHV Plugin API SSL/TLS error: $($_.Exception.Message)" -Level "ERROR"
+        Write-Log "Pass -SkipCertificateCheck to bypass certificate validation for self-signed certs" -Level "ERROR"
+        throw
+      }
+
       # 401 Unauthorized — token likely expired, refresh and retry once
       if ($statusCode -eq 401) {
         Write-Log "VBAHV Plugin API returned 401 — refreshing OAuth2 token" -Level "WARNING"
@@ -277,8 +285,13 @@ function Get-VBAHVPrismCentralVMs {
     }
 
     $offset += @($results).Count
-    $tc = $page.totalCount -as [int]
-    $totalCount = if ($null -ne $tc) { $tc } else { $offset }
+    $totalCount = $offset
+    if ($null -ne $page.totalCount) {
+      $parsed = 0
+      if ([int]::TryParse("$($page.totalCount)", [ref]$parsed)) {
+        $totalCount = $parsed
+      }
+    }
   } while ($offset -lt $totalCount)
 
   # Apply VM name filter if specified
