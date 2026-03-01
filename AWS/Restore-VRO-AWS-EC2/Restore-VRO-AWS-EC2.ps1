@@ -386,6 +386,8 @@ $script:STSExpiration = $null
 $script:STSAssumeParams = $null
 $script:HealthCheckResults = @()
 $script:AuditTrail = New-Object System.Collections.Generic.List[object]
+$script:TotalSteps = 8
+$script:CurrentStep = 0
 
 # Output folder
 $stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
@@ -434,35 +436,33 @@ $success = $false
 $errorMsg = $null
 
 try {
-  Write-Log "========================================="
-  Write-Log "VRO AWS EC2 Restore - Starting"
-  Write-Log "========================================="
-  Write-Log "Backup: $BackupName | Region: $AWSRegion | Mode: $RestoreMode"
-  if ($VROPlanName) { Write-Log "VRO Plan: $VROPlanName / Step: $VROStepName" }
-  if ($DryRun) { Write-Log "*** DRY RUN MODE - No changes will be made ***" -Level WARNING }
+  Write-Banner
 
   # Step 1: Prerequisites
-  Write-Log "--- Step 1: Prerequisites ---"
+  Write-ProgressStep -Activity "Prerequisites" -Status "Checking modules..."
   Test-Prerequisites
 
   # Step 2: Connect to VBR
-  Write-Log "--- Step 2: VBR Connection ---"
+  Write-ProgressStep -Activity "VBR Connection" -Status "Connecting to $VBRServer..."
   Connect-VBRSession
 
   # Step 3: Connect to AWS
-  Write-Log "--- Step 3: AWS Authentication ---"
+  Write-ProgressStep -Activity "AWS Authentication" -Status "Authenticating..."
   Connect-AWSSession
 
   # Step 4: Find restore point
-  Write-Log "--- Step 4: Restore Point Discovery ---"
+  Write-ProgressStep -Activity "Restore Point Discovery" -Status "Searching backup..."
   $restorePoint = Find-RestorePoint
 
   # Step 5: Resolve EC2 target
-  Write-Log "--- Step 5: EC2 Target Configuration ---"
+  Write-ProgressStep -Activity "EC2 Target Configuration" -Status "Resolving infrastructure..."
   $ec2Config = Get-EC2TargetConfig
 
+  # Show the resolved restore plan before executing
+  Write-RestorePlan -RestorePoint $restorePoint -EC2Config $ec2Config
+
   # Step 6: Execute restore
-  Write-Log "--- Step 6: Restore Execution ---"
+  Write-ProgressStep -Activity "Restore Execution" -Status "Starting restore..."
   $session = Start-EC2Restore -RestorePoint $restorePoint -EC2Config $ec2Config
 
   if ($DryRun) {
@@ -471,11 +471,11 @@ try {
   }
   else {
     # Step 7: Monitor restore
-    Write-Log "--- Step 7: Restore Monitoring ---"
+    Write-ProgressStep -Activity "Restore Monitoring" -Status "Waiting for completion..."
     $finalSession = Wait-RestoreCompletion -Session $session
 
     # Step 8: Validate and tag
-    Write-Log "--- Step 8: Validation & Tagging ---"
+    Write-ProgressStep -Activity "Validation & Tagging" -Status "Checking instance health..."
     $instanceName = if ($EC2InstanceName) { $EC2InstanceName } else {
       $vmLabel = if ($VMName) { $VMName } else { $BackupName }
       "Restored-$vmLabel-$stamp"
@@ -484,15 +484,15 @@ try {
     $instance = Test-EC2InstanceHealth -InstanceName $instanceName
     Set-EC2ResourceTags -Instance $instance
 
-    # Step 9: CloudWatch Alarms (optional)
+    # Optional: CloudWatch Alarms
     if ($CreateCloudWatchAlarms -and $instance) {
-      Write-Log "--- Step 9: CloudWatch Alarms ---"
+      Write-Log "Optional: CloudWatch Alarms"
       New-EC2CloudWatchAlarms -InstanceId $instance.InstanceId
     }
 
-    # Step 10: Route53 DNS Update (optional)
+    # Optional: Route53 DNS Update
     if ($Route53HostedZoneId -and $Route53RecordName -and $instance) {
-      Write-Log "--- Step 10: Route53 DNS Update ---"
+      Write-Log "Optional: Route53 DNS Update"
       $dnsIP = if ($AssociatePublicIP -and $instance.PublicIpAddress) {
         $instance.PublicIpAddress
       }
@@ -502,9 +502,9 @@ try {
       Update-Route53Record -InstanceIP $dnsIP
     }
 
-    # Step 11: SSM Post-Restore Script (optional)
+    # Optional: SSM Post-Restore Script
     if ($PostRestoreSSMDocument -and $instance) {
-      Write-Log "--- Step 11: Post-Restore SSM Document ---"
+      Write-Log "Optional: Post-Restore SSM Document"
       $ssmResult = Invoke-PostRestoreSSMDocument -InstanceId $instance.InstanceId `
         -DocumentName $PostRestoreSSMDocument -Parameters $PostRestoreSSMParameters
       $ssmLevel = if ($ssmResult.Status -eq "Success") { "SUCCESS" } else { "WARNING" }
@@ -513,9 +513,9 @@ try {
 
     $success = $true
 
-    # Step 12: DR Drill Lifecycle (optional, runs after success)
+    # Optional: DR Drill Lifecycle
     if ($DRDrillMode -and $instance) {
-      Write-Log "--- Step 12: DR Drill Lifecycle ---"
+      Write-Log "Optional: DR Drill Lifecycle"
       Invoke-DRDrill -Instance $instance -KeepMinutes $DRDrillKeepMinutes
     }
   }
@@ -539,6 +539,7 @@ catch {
   }
 }
 finally {
+  Write-Progress -Activity "VRO AWS EC2 Restore" -Completed
   $duration = (Get-Date) - $script:StartTime
 
   # Generate report
