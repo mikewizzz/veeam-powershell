@@ -194,19 +194,45 @@ function Connect-GraphSession {
 #>
 function Get-TenantInfo {
   $ctx = Get-MgContext
-  $script:envName = try { $ctx.Environment.Name } catch { "Unknown" }
 
-  $script:TenantCategory = switch ($script:envName) {
-    "AzureUSGovernment" { "US Government (GCC/GCC High/DoD)" }
-    "AzureChinaCloud"   { "China (21Vianet)" }
-    "AzureCloud"        { "Commercial" }
-    default             { "Unknown" }
+  # SDK v2.x returns Environment as a string ("Global"), v1.x as an object (.Name)
+  $rawEnv = $ctx.Environment
+  if ($null -ne $rawEnv -and $rawEnv.PSObject.Properties['Name']) {
+    $script:envName = $rawEnv.Name
+  } else {
+    $script:envName = [string]$rawEnv
   }
 
-  $org = (Get-MgOrganization)[0]
-  $script:OrgId = $org.Id
-  $script:OrgName = $org.DisplayName
-  $script:DefaultDomain = ($org.VerifiedDomains | Where-Object { $_.IsDefault -eq $true } | Select-Object -First 1).Name
+  # Map environment identifier to category (handles both SDK v1.x and v2.x naming)
+  $script:TenantCategory = switch ($script:envName) {
+    "AzureCloud"          { "Commercial" }
+    "Global"              { "Commercial" }
+    "AzureUSGovernment"   { "US Government (GCC/GCC High/DoD)" }
+    "USGov"               { "US Government (GCC/GCC High/DoD)" }
+    "USGovDoD"            { "US Government (DoD)" }
+    "AzureChinaCloud"     { "China (21Vianet)" }
+    "China"               { "China (21Vianet)" }
+    default               { "Unknown" }
+  }
+
+  # Retrieve org details — try cmdlet first, fall back to Graph REST
+  try {
+    $org = (Get-MgOrganization -ErrorAction Stop)[0]
+    $script:OrgId = $org.Id
+    $script:OrgName = $org.DisplayName
+    $script:DefaultDomain = ($org.VerifiedDomains | Where-Object { $_.IsDefault -eq $true } | Select-Object -First 1).Name
+  } catch {
+    Write-Log "Get-MgOrganization failed ($($_.Exception.Message)), trying Graph REST" -Level WARNING
+    try {
+      $orgResp = Invoke-Graph -Uri "https://graph.microsoft.com/v1.0/organization"
+      $orgData = $orgResp.value[0]
+      $script:OrgId = $orgData.id
+      $script:OrgName = $orgData.displayName
+      $script:DefaultDomain = ($orgData.verifiedDomains | Where-Object { $_.isDefault -eq $true } | Select-Object -First 1).name
+    } catch {
+      Write-Log "Graph REST organization query also failed: $($_.Exception.Message)" -Level WARNING
+    }
+  }
 
   Write-Log "Tenant: $($script:OrgName) ($($script:OrgId)), DefaultDomain: $($script:DefaultDomain), Env: $($script:envName), Category: $($script:TenantCategory)"
 }
