@@ -72,7 +72,10 @@ function Get-GraphReportCsv {
   $uri = "https://graph.microsoft.com/v1.0/reports/$ReportName(period='D$PeriodDays')"
   $tmp = Join-Path $runFolder "$ReportName.csv"
   Invoke-GraphDownloadCsv -Uri $uri -OutPath $tmp
-  return (Import-Csv $tmp)
+  $data = Import-Csv $tmp
+  # Remove raw CSV containing PII (UPNs, display names) after import
+  Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+  return $data
 }
 
 <#
@@ -92,11 +95,11 @@ function Annualize-GrowthPct {
   $earliest = [double]$rows[-1].$field
   $days     = [int]$rows[0].'Report Period'
 
-  if ($days -le 0 -or $latest -le 0) { return 0.0 }
+  if ($days -le 0 -or $earliest -le 0) { return 0.0 }
 
   $perDay  = ($latest - $earliest) / $days
   $perYear = $perDay * 365
-  $pct     = $perYear / [math]::Max($latest,1)
+  $pct     = $perYear / [math]::Max($earliest,1)
 
   return [math]::Round($pct, 4)
 }

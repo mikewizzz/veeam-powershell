@@ -366,28 +366,16 @@ $css
   <div class="tenant-info">
     <div class="tenant-info-title">Tenant Information</div>
     <div class="tenant-info-row">
-      <div class="tenant-info-item">
-        <span class="tenant-info-label">Organization:</span>
-        <span class="tenant-info-value">$($script:OrgName)</span>
-      </div>
-      <div class="tenant-info-item">
-        <span class="tenant-info-label">Tenant ID:</span>
-        <span class="tenant-info-value">$($script:OrgId)</span>
-      </div>
+      $(if($script:OrgName){"<div class='tenant-info-item'><span class='tenant-info-label'>Organization:</span><span class='tenant-info-value'>$(Escape-Html $script:OrgName)</span></div>"}else{""})
+      $(if($script:OrgId){"<div class='tenant-info-item'><span class='tenant-info-label'>Tenant ID:</span><span class='tenant-info-value'>$(Escape-Html $script:OrgId)</span></div>"}else{""})
     </div>
     <div class="tenant-info-row">
-      <div class="tenant-info-item">
-        <span class="tenant-info-label">Default Domain:</span>
-        <span class="tenant-info-value">$($script:DefaultDomain)</span>
-      </div>
+      $(if($script:DefaultDomain){"<div class='tenant-info-item'><span class='tenant-info-label'>Default Domain:</span><span class='tenant-info-value'>$(Escape-Html $script:DefaultDomain)</span></div>"}else{""})
       <div class="tenant-info-item">
         <span class="tenant-info-label">Environment:</span>
-        <span class="tenant-info-value">$($script:envName)</span>
+        <span class="tenant-info-value">$(Escape-Html $script:envName)</span>
       </div>
-      <div class="tenant-info-item">
-        <span class="tenant-info-label">Category:</span>
-        <span class="tenant-info-value">$($script:TenantCategory)</span>
-      </div>
+      $(if($script:TenantCategory){"<div class='tenant-info-item'><span class='tenant-info-label'>Category:</span><span class='tenant-info-value'>$(Escape-Html $script:TenantCategory)</span></div>"}else{""})
     </div>
   </div>
 "@)
@@ -405,8 +393,8 @@ $css
       $toneClass = $f.Tone.ToLower()
       $findingsHtml += @"
       <div class="finding-card $severityClass">
-        <div class="finding-card-title">$($f.Title)<span class="finding-card-badge $toneClass">$($f.Tone)</span></div>
-        <div class="finding-card-detail">$($f.Detail)</div>
+        <div class="finding-card-title">$(Escape-Html $f.Title)<span class="finding-card-badge $toneClass">$(Escape-Html $f.Tone)</span></div>
+        <div class="finding-card-detail">$(Escape-Html $f.Detail)</div>
       </div>
 "@
     }
@@ -468,8 +456,8 @@ $css
       $barWidth = [math]::Min($lic.UtilizationPct, 100)
       $licRows += @"
           <tr>
-            <td><strong>$($lic.DisplayName)</strong></td>
-            <td>$($lic.SkuPartNumber)</td>
+            <td><strong>$(Escape-Html $lic.DisplayName)</strong></td>
+            <td>$(Escape-Html $lic.SkuPartNumber)</td>
             <td style="text-align:right">$('{0:N0}' -f $lic.Purchased)</td>
             <td style="text-align:right">$('{0:N0}' -f $lic.Assigned)</td>
             <td style="text-align:right">$('{0:N0}' -f $lic.Available)</td>
@@ -752,8 +740,8 @@ $secScoreBarHtml
           <tr><td>SharePoint Daily Change Rate (Modeled)</td><td>$(Format-Pct $ChangeRateSharePoint)</td></tr>
           <tr><td>Capacity Buffer (Heuristic)</td><td>$(Format-Pct $BufferPct)</td></tr>
           <tr><td>Report Period</td><td>$Period days</td></tr>
-          <tr><td>Include AD Group</td><td>$([string]::IsNullOrWhiteSpace($ADGroup) ? "None" : $ADGroup)</td></tr>
-          <tr><td>Exclude AD Group</td><td>$([string]::IsNullOrWhiteSpace($ExcludeADGroup) ? "None" : $ExcludeADGroup)</td></tr>
+          <tr><td>Include AD Group</td><td>$(if([string]::IsNullOrWhiteSpace($ADGroup)){"None"}else{[System.Net.WebUtility]::HtmlEncode($ADGroup)})</td></tr>
+          <tr><td>Exclude AD Group</td><td>$(if([string]::IsNullOrWhiteSpace($ExcludeADGroup)){"None"}else{[System.Net.WebUtility]::HtmlEncode($ExcludeADGroup)})</td></tr>
           <tr><td>Archive Mailboxes</td><td>$(if($IncludeArchive){"Included"}else{"Not included"})</td></tr>
           <tr><td>Recoverable Items</td><td>$(if($IncludeRecoverableItems){"Included"}else{"Not included"})</td></tr>
         </tbody>
@@ -775,10 +763,10 @@ $secScoreBarHtml
       foreach ($r in $tierRecs) {
         $recsHtml += @"
       <div class="recommendation-card tier-$tierClass">
-        <div class="priority-badge $tierClass">$($r.Tier)</div>
-        <div class="rec-title">$($r.Title)</div>
-        <div class="rec-detail">$($r.Detail)</div>
-        $(if($r.Rationale){"<div class='rec-rationale'>$($r.Rationale)</div>"}else{""})
+        <div class="priority-badge $tierClass">$(Escape-Html $r.Tier)</div>
+        <div class="rec-title">$(Escape-Html $r.Title)</div>
+        <div class="rec-detail">$(Escape-Html $r.Detail)</div>
+        $(if($r.Rationale){"<div class='rec-rationale'>$(Escape-Html $r.Rationale)</div>"}else{""})
       </div>
 "@
       }
