@@ -3,7 +3,6 @@
 # =========================================================================
 
 $script:LogEntries = New-Object System.Collections.Generic.List[object]
-$script:TotalSteps = 10
 $script:CurrentStep = 0
 
 <#

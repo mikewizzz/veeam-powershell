@@ -48,7 +48,7 @@ function Get-VeeamSizing {
   }
 
   if ($totalSQLDatabases -gt 0 -or $totalSQLMIs -gt 0) {
-    $recommendations += "Consider Veeam Backup for Azure SQL for $totalSQLDatabases databases and $totalSQLMIs managed instances"
+    $recommendations += "Enable Azure SQL protection in Veeam Backup for Azure for $totalSQLDatabases databases and $totalSQLMIs managed instances"
   }
 
   return [PSCustomObject]@{
