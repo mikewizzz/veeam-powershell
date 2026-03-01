@@ -156,6 +156,14 @@ function Invoke-PrismAPI {
         $statusCode = [int]$_.Exception.Response.StatusCode
       }
 
+      # SSL/TLS errors are not transient — fail immediately with guidance
+      if ($_.Exception.Message -match 'SSL|TLS|certificate' -or
+          ($_.Exception.InnerException -and $_.Exception.InnerException.Message -match 'SSL|TLS|certificate')) {
+        Write-Log "Prism API SSL/TLS error [correlation=$correlationId]: $($_.Exception.Message)" -Level "ERROR"
+        Write-Log "Pass -SkipCertificateCheck to bypass certificate validation for self-signed certs" -Level "ERROR"
+        throw
+      }
+
       # Non-retryable client errors (except 429)
       if ($statusCode -and $statusCode -ge 400 -and $statusCode -lt 500 -and $statusCode -ne 429) {
         Write-Log "Prism API client error ($statusCode) [correlation=$correlationId]: $Method $Endpoint - $($_.Exception.Message)" -Level "ERROR"
