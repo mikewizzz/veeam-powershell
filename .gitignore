@@ -1,5 +1,8 @@
 # Private/sensitive config
 .claude/rules/competitive.md
+.claude/rules/execution.md
+.claude/rules/velocity.md
+.claude/rules/product.md
 .claude/settings.local.json
 .claude/worktrees/
 
