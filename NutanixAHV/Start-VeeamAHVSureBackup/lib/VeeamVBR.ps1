@@ -315,8 +315,8 @@ function Get-VBAHVJobs {
 
   Write-Log "Discovering AHV backup jobs via VBAHV Plugin REST API..." -Level "INFO"
   $response = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "jobs"
-  # GET /jobs returns PageOfJob { results[] } — extract .results with flat-array fallback
-  $allJobs = if ($response.results) { @($response.results) } else { @($response) }
+  # GET /jobs returns PageOfJob { results[] }
+  $allJobs = @($response.results)
 
   if ($JobNames -and $JobNames.Count -gt 0) {
     $filtered = @($allJobs | Where-Object { $_.name -in $JobNames })
@@ -459,7 +459,7 @@ function Get-VBAHVStorageContainers {
 
   # GET /clusters/{id}/storageContainers returns PageOfStorageContainer { results[] }
   $response = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "clusters/$ClusterId/storageContainers"
-  $containers = if ($response.results) { @($response.results) } else { @($response) }
+  $containers = @($response.results)
   return $containers
 }
 
@@ -648,7 +648,7 @@ function Start-AHVFullRestore {
       }
     }
     else {
-      Write-Log "  Full restore completed (synchronous response)" -Level "SUCCESS"
+      throw "Restore API returned no sessionId — unexpected response format"
     }
 
     # Step 6: Find restored VM in Prism Central
