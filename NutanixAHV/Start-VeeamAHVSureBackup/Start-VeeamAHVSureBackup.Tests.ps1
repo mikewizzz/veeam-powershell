@@ -1044,7 +1044,8 @@ Describe "Smoke test - script integrity" {
 
   It "defines VBAHV Plugin REST API functions" {
     foreach ($fn in @("Initialize-VBAHVPluginConnection", "Invoke-VBAHVPluginAPI",
-        "Get-VBAHVRestorePoints", "Get-VBAHVRestorePointMetadata",
+        "Get-VBAHVPrismCentrals", "Get-VBAHVPrismCentralVMs", "Get-VBAHVProtectedVMs",
+        "Get-VBAHVRestorePointMetadata",
         "Get-VBAHVJobs", "Get-VBAHVClusters", "Get-VBAHVStorageContainers",
         "Start-AHVFullRestore", "Stop-AHVFullRestore")) {
       Get-Command $fn -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty -Because "function $fn should be defined"
@@ -1545,15 +1546,6 @@ Describe "VBAHV Plugin REST API" {
     It "uses originalMacAddress (not macAddress) in network adapter remap" {
       $script:capturedBody = $null
 
-      Mock Get-VBAHVRestorePoints {
-        return @(@{
-          id = "rp1"
-          vmName = "test-vm"
-          vmId = "vm-src-1"
-          creationTime = (Get-Date).ToString("o")
-        })
-      }
-
       Mock Get-VBAHVRestorePointMetadata {
         return @{
           clusterId = "c1"
@@ -1580,7 +1572,7 @@ Describe "VBAHV Plugin REST API" {
       Mock Start-Sleep {}
 
       $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
-      $rpInfo = [PSCustomObject]@{ VMName = "test-vm"; CreationTime = Get-Date; JobName = "Job1" }
+      $rpInfo = [PSCustomObject]@{ VMName = "test-vm"; RestorePointId = "rp1"; CreationTime = Get-Date; JobName = "Job1" }
       $isolatedNet = [PSCustomObject]@{ UUID = "net-iso-1"; Name = "isolated-lab" }
 
       Start-AHVFullRestore -RestorePointInfo $rpInfo -IsolatedNetwork $isolatedNet
@@ -1593,14 +1585,6 @@ Describe "VBAHV Plugin REST API" {
 
     It "always sends required fields in restore body" {
       $script:capturedBody = $null
-
-      Mock Get-VBAHVRestorePoints {
-        return @(@{
-          id = "rp1"
-          vmName = "test-vm"
-          creationTime = (Get-Date).ToString("o")
-        })
-      }
 
       Mock Get-VBAHVRestorePointMetadata {
         return @{ clusterId = "c1"; networkAdapters = @() }
@@ -1623,7 +1607,7 @@ Describe "VBAHV Plugin REST API" {
       Mock Start-Sleep {}
 
       $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
-      $rpInfo = [PSCustomObject]@{ VMName = "test-vm"; CreationTime = Get-Date; JobName = "Job1" }
+      $rpInfo = [PSCustomObject]@{ VMName = "test-vm"; RestorePointId = "rp1"; CreationTime = Get-Date; JobName = "Job1" }
       $isolatedNet = [PSCustomObject]@{ UUID = "net-iso-1"; Name = "isolated-lab" }
 
       Start-AHVFullRestore -RestorePointInfo $rpInfo -IsolatedNetwork $isolatedNet

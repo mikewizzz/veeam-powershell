@@ -342,35 +342,34 @@ try {
   Write-ProgressStep -Activity "Discovering AHV Backups" -Status "Scanning backup jobs and restore points..."
   $ahvJobs = Get-VBAHVJobs -JobNames $BackupJobNames
 
-  # Get restore points via REST API and build info objects
-  $allPluginRPs = Get-VBAHVRestorePoints -VMNames $VMNames
+  # Discover protected VMs via VBAHV Plugin (prismCentrals -> VMs)
+  $allProtectedVMs = Get-VBAHVProtectedVMs -VMNames $VMNames
   $restorePointsList = New-Object System.Collections.Generic.List[object]
 
-  if ($allPluginRPs -and @($allPluginRPs).Count -gt 0) {
-    # Group by VM name and take the latest restore point per VM
-    $grouped = $allPluginRPs | Group-Object { $_.vmName }
-    foreach ($group in $grouped) {
-      $latestRP = $group.Group | Sort-Object { [datetime]$_.creationTime } -Descending | Select-Object -First 1
+  if ($allProtectedVMs -and @($allProtectedVMs).Count -gt 0) {
+    foreach ($vm in @($allProtectedVMs)) {
       $rpInfo = [PSCustomObject]@{
-        VMName       = $latestRP.vmName
-        JobName      = if ($latestRP.jobName) { $latestRP.jobName } else { "N/A" }
-        RestorePointId = $latestRP.id
-        CreationTime = [datetime]$latestRP.creationTime
-        BackupSize   = if ($latestRP.backupSize) { $latestRP.backupSize } else { 0 }
-        IsConsistent = if ($null -ne $latestRP.isConsistent) { $latestRP.isConsistent } else { $true }
+        VMName         = $vm.name
+        JobName        = if ($vm.protectionDomain) { $vm.protectionDomain } else { "N/A" }
+        RestorePointId = $vm.id
+        CreationTime   = Get-Date  # VM discovery doesn't expose backup timestamps
+        BackupSize     = if ($vm.vmSize) { $vm.vmSize } else { 0 }
+        IsConsistent   = $true
+        ClusterId      = $vm.clusterId
+        ClusterName    = $vm.clusterName
       }
       $restorePointsList.Add($rpInfo)
-      Write-Log "  Found restore point for '$($rpInfo.VMName)' from $($rpInfo.CreationTime.ToString('yyyy-MM-dd HH:mm'))" -Level "INFO"
+      Write-Log "  Found protected VM: '$($rpInfo.VMName)' on cluster '$($rpInfo.ClusterName)'" -Level "INFO"
     }
   }
 
   $restorePoints = @($restorePointsList)
 
   if ($restorePoints.Count -eq 0) {
-    throw "No restore points found for any AHV VMs. Ensure backups have completed successfully."
+    throw "No protected VMs found in any Prism Central. Ensure AHV backup jobs exist and the VBAHV Plugin is configured."
   }
 
-  Write-Log "Discovered $($restorePoints.Count) VM restore point(s)" -Level "SUCCESS"
+  Write-Log "Discovered $($restorePoints.Count) protected VM(s)" -Level "SUCCESS"
 
   # Tip for large VM lists when not using interactive mode
   if ($restorePoints.Count -gt 10 -and -not $Interactive) {

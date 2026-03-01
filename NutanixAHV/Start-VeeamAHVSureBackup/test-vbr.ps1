@@ -5,7 +5,7 @@
 .DESCRIPTION
   Tests the Veeam Plug-in for Nutanix AHV REST API v9 independently of Prism Central.
   Validates authentication, cluster discovery, storage containers, backup jobs,
-  restore points, and restore point metadata in 6 sequential steps.
+  Prism Central VM discovery, and restore point metadata in 7 sequential steps.
 
   All operations are read-only — no restores, no mutations.
 
@@ -68,7 +68,7 @@ $ProgressPreference = "SilentlyContinue"
 $script:LogEntries = New-Object System.Collections.Generic.List[object]
 $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
 $script:CurrentStep = 0
-$script:TotalSteps = 6
+$script:TotalSteps = 7
 
 # =============================
 # Load Function Libraries
@@ -149,7 +149,7 @@ Write-Host ""
 # =============================
 # Step 1: Authenticate to VBAHV Plugin
 # =============================
-$null = Invoke-TestStep -Step 1 -Total 6 -Description "Authenticate to VBAHV Plugin REST API" -Action {
+$null = Invoke-TestStep -Step 1 -Total 7 -Description "Authenticate to VBAHV Plugin REST API" -Action {
   Initialize-VBAHVPluginConnection
   Write-Host "  Token expires: $($script:VBAHVTokenExpiry.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Gray
 }
@@ -157,7 +157,7 @@ $null = Invoke-TestStep -Step 1 -Total 6 -Description "Authenticate to VBAHV Plu
 # =============================
 # Step 2: List Clusters
 # =============================
-$clusters = Invoke-TestStep -Step 2 -Total 6 -Description "Discover AHV clusters via VBAHV Plugin" -NonFatal -Action {
+$clusters = Invoke-TestStep -Step 2 -Total 7 -Description "Discover AHV clusters via VBAHV Plugin" -NonFatal -Action {
   $result = Get-VBAHVClusters
   $items = @($result)
   if ($items.Count -lt 1) { throw "No clusters returned" }
@@ -169,7 +169,7 @@ $clusters = Invoke-TestStep -Step 2 -Total 6 -Description "Discover AHV clusters
 # Step 3: Storage Containers (first cluster)
 # =============================
 if ($clusters) {
-  $null = Invoke-TestStep -Step 3 -Total 6 -Description "List storage containers (first cluster)" -NonFatal -Action {
+  $null = Invoke-TestStep -Step 3 -Total 7 -Description "List storage containers (first cluster)" -NonFatal -Action {
     $firstCluster = @($clusters)[0]
     $clusterId = $firstCluster.id
     $clusterName = $firstCluster.name
@@ -180,13 +180,13 @@ if ($clusters) {
   }
 }
 else {
-  Write-Log "STEP 3/6: List storage containers — SKIPPED (no clusters from step 2)" -Level "WARNING"
+  Write-Log "STEP 3/7: List storage containers — SKIPPED (no clusters from step 2)" -Level "WARNING"
 }
 
 # =============================
 # Step 4: List Backup Jobs
 # =============================
-$jobs = Invoke-TestStep -Step 4 -Total 6 -Description "Discover AHV backup jobs" -Action {
+$jobs = Invoke-TestStep -Step 4 -Total 7 -Description "Discover AHV backup jobs" -Action {
   $jobNames = if ($JobNameFilter) { @($JobNameFilter) } else { $null }
   $result = Get-VBAHVJobs -JobNames $jobNames
   Show-SampleData -Label "Backup Jobs" -Data $result -Properties @("id", "name")
@@ -194,26 +194,50 @@ $jobs = Invoke-TestStep -Step 4 -Total 6 -Description "Discover AHV backup jobs"
 }
 
 # =============================
-# Step 5: List Restore Points
+# Step 5: Discover Prism Centrals via VBAHV Plugin
 # =============================
-$restorePoints = Invoke-TestStep -Step 5 -Total 6 -Description "Discover restore points" -Action {
-  $vmNames = if ($VMNameFilter) { @($VMNameFilter) } else { $null }
-  $result = Get-VBAHVRestorePoints -VMNames $vmNames
+$prismCentrals = Invoke-TestStep -Step 5 -Total 7 -Description "Discover Prism Centrals via VBAHV Plugin" -Action {
+  $result = Get-VBAHVPrismCentrals
   $items = @($result)
-  if ($items.Count -lt 1) { throw "No restore points found$(if ($VMNameFilter) { " for VM '$VMNameFilter'" })" }
-  Write-Host "  Found $($items.Count) restore point(s)" -ForegroundColor Gray
-  Show-SampleData -Label "Restore Points" -Data $items -Properties @("id", "vmName", "creationTime") -MaxItems 10
+  if ($items.Count -lt 1) { throw "No Prism Centrals found in VBAHV Plugin" }
+  Write-Host "  Found $($items.Count) Prism Central(s)" -ForegroundColor Gray
+  foreach ($pc in $items) {
+    $addr = if ($pc.settings.address) { $pc.settings.address } else { "unknown" }
+    $state = if ($pc.state) { $pc.state } else { "unknown" }
+    Write-Host "    PC: $addr (state: $state)" -ForegroundColor Gray
+  }
   return $result
 }
 
 # =============================
-# Step 6: Restore Point Metadata (first RP)
+# Step 6: Discover VMs from first Prism Central
 # =============================
-$null = Invoke-TestStep -Step 6 -Total 6 -Description "Get restore point metadata" -Action {
-  $firstRP = @($restorePoints)[0]
-  $rpId = $firstRP.id
-  Write-Host "  Using RP: $rpId (VM: $($firstRP.vmName))" -ForegroundColor Gray
-  $metadata = Get-VBAHVRestorePointMetadata -RestorePointId $rpId
+$protectedVMs = Invoke-TestStep -Step 6 -Total 7 -Description "Discover protected VMs from Prism Central" -Action {
+  $firstPC = @($prismCentrals)[0]
+  $pcId = $firstPC.id
+  if (-not $pcId) { $pcId = $firstPC.settings.id }
+  if (-not $pcId) { throw "First Prism Central has no discoverable ID" }
+
+  $pcAddr = if ($firstPC.settings.address) { $firstPC.settings.address } else { $pcId }
+  Write-Host "  Using Prism Central: $pcAddr ($pcId)" -ForegroundColor Gray
+
+  $vmNames = if ($VMNameFilter) { @($VMNameFilter) } else { $null }
+  $result = Get-VBAHVPrismCentralVMs -PrismCentralId $pcId -VMNames $vmNames
+  $items = @($result)
+  if ($items.Count -lt 1) { throw "No VMs found$(if ($VMNameFilter) { " matching '$VMNameFilter'" })" }
+  Write-Host "  Found $($items.Count) VM(s)" -ForegroundColor Gray
+  Show-SampleData -Label "Protected VMs" -Data $items -Properties @("id", "name", "clusterName") -MaxItems 10
+  return $result
+}
+
+# =============================
+# Step 7: Restore Point Metadata (first VM)
+# =============================
+$null = Invoke-TestStep -Step 7 -Total 7 -Description "Get restore point metadata for first VM" -Action {
+  $firstVM = @($protectedVMs)[0]
+  $vmId = $firstVM.id
+  Write-Host "  Using VM: $($firstVM.name) ($vmId)" -ForegroundColor Gray
+  $metadata = Get-VBAHVRestorePointMetadata -RestorePointId $vmId
 
   # Validate key fields
   $hasNICs = ($metadata.networkAdapters -and @($metadata.networkAdapters).Count -gt 0)
@@ -242,7 +266,7 @@ if ($warnings -gt 0) {
   Write-Host "  Core steps passed ($warnings non-fatal warning(s))." -ForegroundColor Yellow
 }
 else {
-  Write-Host "  All 6 steps passed." -ForegroundColor Green
+  Write-Host "  All 7 steps passed." -ForegroundColor Green
 }
 Write-Host "  VBR API layer is healthy. Ready for combined testing." -ForegroundColor Green
 Write-Host ""
