@@ -430,7 +430,7 @@ $css
     </div>
     <div class="kpi-card">
       <div class="kpi-label">Total Dataset</div>
-      <div class="kpi-value">$($script:totalTB) TB</div>
+      <div class="kpi-value">$(Format-Storage $script:totalGB)</div>
       <div class="kpi-subtext">$($script:totalGB) GB | $($script:totalTiB) TiB (binary)</div>
     </div>
     <div class="kpi-card">
@@ -440,8 +440,8 @@ $css
     </div>
     <div class="kpi-card">
       <div class="kpi-label">Recommended MBS Capacity</div>
-      <div class="kpi-value">$($script:suggestedStartGB) GB</div>
-      <div class="kpi-subtext">Modeled estimate: $($script:mbsEstimateGB) GB + $(Format-Pct $BufferPct) buffer</div>
+      <div class="kpi-value">$(Format-Storage $script:suggestedStartGB)</div>
+      <div class="kpi-subtext">Modeled estimate: $(Format-Storage $script:mbsEstimateGB) + $(Format-Pct $BufferPct) buffer</div>
     </div>
   </div>
 "@)
@@ -580,19 +580,19 @@ $licRows
     <div class="coverage-grid">
       <div class="coverage-item">
         <div class="coverage-item-title">Exchange Online</div>
-        <div class="coverage-item-stat">$('{0:N2}' -f $script:exGB) GB</div>
+        <div class="coverage-item-stat">$(Format-Storage $script:exGB)</div>
         <div class="coverage-item-detail">$($script:exUsers.Count) mailboxes + $($script:exShared.Count) shared</div>
         <div class="coverage-item-detail">Conversations, calendars, contacts</div>
       </div>
       <div class="coverage-item">
         <div class="coverage-item-title">OneDrive for Business</div>
-        <div class="coverage-item-stat">$('{0:N2}' -f $script:odGB) GB</div>
+        <div class="coverage-item-stat">$(Format-Storage $script:odGB)</div>
         <div class="coverage-item-detail">$($script:odActive.Count) accounts</div>
         <div class="coverage-item-detail">User files, documents, media</div>
       </div>
       <div class="coverage-item">
         <div class="coverage-item-title">SharePoint Online</div>
-        <div class="coverage-item-stat">$('{0:N2}' -f $script:spGB) GB</div>
+        <div class="coverage-item-stat">$(Format-Storage $script:spGB)</div>
         <div class="coverage-item-detail">$($script:spActive.Count) sites, $($script:spFiles) files</div>
         <div class="coverage-item-detail">Team sites, document libraries, lists</div>
       </div>
