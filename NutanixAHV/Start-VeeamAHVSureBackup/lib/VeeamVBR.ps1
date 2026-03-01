@@ -12,9 +12,8 @@ function Initialize-VBAHVPluginConnection {
   .SYNOPSIS
     Authenticate to the Veeam Plug-in for Nutanix AHV REST API via OAuth2
   .DESCRIPTION
-    The plugin REST API runs as a VBR server extension (since v8, there is
-    no separate backup appliance). Authentication uses the VBR server's
-    OAuth2 token endpoint.
+    The plugin REST API runs as a VBR server extension. Authentication uses
+    the VBR server's OAuth2 token endpoint. Only the v9 REST API is supported.
 
     Ref: https://helpcenter.veeam.com/references/vbahv/9/rest/tag/SectionOverview
   #>
@@ -59,10 +58,69 @@ function Initialize-VBAHVPluginConnection {
       "Content-Type"  = "application/json"
       "Accept"        = "application/json"
     }
-    Write-Log "Veeam AHV Plugin REST API authenticated (API $apiVersion)" -Level "SUCCESS"
+
+    # Store refresh token and expiry for proactive token renewal during long runs
+    $script:VBAHVTokenUrl = $tokenUrl
+    $script:VBAHVRefreshToken = $tokenResponse.refresh_token
+    $expiresIn = if ($tokenResponse.expires_in) { [int]$tokenResponse.expires_in } else { 900 }
+    $script:VBAHVTokenExpiry = (Get-Date).AddSeconds($expiresIn)
+
+    Write-Log "Veeam AHV Plugin REST API authenticated (API $apiVersion, token expires in ${expiresIn}s)" -Level "SUCCESS"
   }
   catch {
-    throw "Veeam AHV Plugin authentication failed: $($_.Exception.Message). Verify VBR credentials and that the AHV plugin (v8+) is installed."
+    throw "Veeam AHV Plugin authentication failed: $($_.Exception.Message). Verify VBR credentials and that the AHV plugin v9 is installed."
+  }
+}
+
+function Refresh-VBAHVToken {
+  <#
+  .SYNOPSIS
+    Refresh the OAuth2 bearer token using the stored refresh token
+  .DESCRIPTION
+    VBR OAuth2 tokens expire in 30-60 minutes. Long SureBackup runs (many VMs)
+    can exceed this window. This function uses the refresh_token grant to obtain
+    a new access token without re-authenticating with credentials.
+  #>
+  if (-not $script:VBAHVRefreshToken -or -not $script:VBAHVTokenUrl) {
+    Write-Log "No refresh token available — re-authenticating with credentials" -Level "WARNING"
+    Initialize-VBAHVPluginConnection
+    return
+  }
+
+  $refreshBody = @{
+    grant_type    = "refresh_token"
+    refresh_token = $script:VBAHVRefreshToken
+  }
+
+  $refreshParams = @{
+    Method      = "POST"
+    Uri         = $script:VBAHVTokenUrl
+    Body        = $refreshBody
+    ContentType = "application/x-www-form-urlencoded"
+    TimeoutSec  = 30
+    ErrorAction = "Stop"
+  }
+
+  if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $refreshParams.SkipCertificateCheck = $true
+  }
+
+  try {
+    $tokenResponse = Invoke-RestMethod @refreshParams
+    $script:VBAHVHeaders["Authorization"] = "Bearer $($tokenResponse.access_token)"
+
+    if ($tokenResponse.refresh_token) {
+      $script:VBAHVRefreshToken = $tokenResponse.refresh_token
+    }
+
+    $expiresIn = if ($tokenResponse.expires_in) { [int]$tokenResponse.expires_in } else { 900 }
+    $script:VBAHVTokenExpiry = (Get-Date).AddSeconds($expiresIn)
+
+    Write-Log "OAuth2 token refreshed (expires in ${expiresIn}s)" -Level "INFO"
+  }
+  catch {
+    Write-Log "Token refresh failed: $($_.Exception.Message) — re-authenticating" -Level "WARNING"
+    Initialize-VBAHVPluginConnection
   }
 }
 
@@ -92,6 +150,11 @@ function Invoke-VBAHVPluginAPI {
     [ValidateRange(1, 600)][int]$TimeoutSec = 60
   )
 
+  # Proactively refresh token if within 5 minutes of expiry
+  if ($script:VBAHVTokenExpiry -and (Get-Date) -gt $script:VBAHVTokenExpiry.AddMinutes(-5)) {
+    Refresh-VBAHVToken
+  }
+
   $url = "$($script:VBAHVBaseUrl)/$Endpoint"
   $attempt = 0
 
@@ -118,6 +181,14 @@ function Invoke-VBAHVPluginAPI {
       $statusCode = $null
       if ($_.Exception.Response) {
         $statusCode = [int]$_.Exception.Response.StatusCode
+      }
+
+      # 401 Unauthorized — token likely expired, refresh and retry once
+      if ($statusCode -eq 401) {
+        Write-Log "VBAHV Plugin API returned 401 — refreshing OAuth2 token" -Level "WARNING"
+        Refresh-VBAHVToken
+        $attempt++
+        continue
       }
 
       # Non-retryable client errors (except 429 Too Many Requests)
