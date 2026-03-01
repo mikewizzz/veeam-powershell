@@ -10,8 +10,8 @@ function Export-InputsData {
   $inputs = @(
     [pscustomobject]@{ Key="Mode"; Value=$(if($Full){"Full"}else{"Quick"}) },
     [pscustomobject]@{ Key="PeriodDays"; Value=$Period },
-    [pscustomobject]@{ Key="ADGroup"; Value=($ADGroup ?? "") },
-    [pscustomobject]@{ Key="ExcludeADGroup"; Value=($ExcludeADGroup ?? "") },
+    [pscustomobject]@{ Key="ADGroup"; Value=$(if($ADGroup){$ADGroup}else{""}) },
+    [pscustomobject]@{ Key="ExcludeADGroup"; Value=$(if($ExcludeADGroup){$ExcludeADGroup}else{""}) },
     [pscustomobject]@{ Key="IncludeArchive"; Value=$IncludeArchive },
     [pscustomobject]@{ Key="IncludeRecoverableItems"; Value=$IncludeRecoverableItems },
     [pscustomobject]@{ Key="AnnualGrowthPct_Model"; Value=$AnnualGrowthPct },
