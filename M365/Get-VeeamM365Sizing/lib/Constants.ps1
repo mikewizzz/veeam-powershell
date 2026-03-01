@@ -60,6 +60,19 @@ function Escape-ODataString([string]$s) {
 .NOTES
   Only masks if -MaskUserIds switch is enabled. Returns first 12 chars of hash.
 #>
+<#
+.SYNOPSIS
+  Encodes a string for safe embedding in HTML to prevent XSS.
+.PARAMETER s
+  The string to encode.
+.NOTES
+  Uses .NET WebUtility for proper HTML entity encoding.
+#>
+function Escape-Html([string]$s) {
+  if ([string]::IsNullOrWhiteSpace($s)) { return $s }
+  return [System.Net.WebUtility]::HtmlEncode($s)
+}
+
 function Mask-UPN([string]$upn) {
   if (-not $MaskUserIds -or [string]::IsNullOrWhiteSpace($upn)) { return $upn }
   $bytes = [Text.Encoding]::UTF8.GetBytes($upn)

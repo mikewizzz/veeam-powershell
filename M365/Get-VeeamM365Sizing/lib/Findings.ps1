@@ -91,10 +91,11 @@ function Get-Findings {
   # --- Global Admins ---
   if ($script:globalAdmins -is [System.Collections.IEnumerable] -and $script:globalAdmins -isnot [string]) {
     $adminCount = @($script:globalAdmins).Count
+    $adminWord = if ($adminCount -eq 1) { "Global Administrator" } else { "Global Administrators" }
     if ($adminCount -le $ADMIN_THRESHOLD) {
-      $findings.Add((New-Finding -Title "Well-Managed Admin Accounts" -Detail "$adminCount Global Administrator(s) detected. This is within the recommended threshold of $ADMIN_THRESHOLD or fewer." -Severity "Info" -Category "Identity" -Tone "Strong"))
+      $findings.Add((New-Finding -Title "Well-Managed Admin Accounts" -Detail "$adminCount $adminWord detected. This is within the recommended threshold of $ADMIN_THRESHOLD or fewer." -Severity "Info" -Category "Identity" -Tone "Strong"))
     } else {
-      $findings.Add((New-Finding -Title "Elevated Global Administrator Count" -Detail "$adminCount Global Administrators detected. Microsoft recommends no more than $ADMIN_THRESHOLD to minimize blast radius of compromised privileged accounts." -Severity "Medium" -Category "Identity" -Tone "Opportunity"))
+      $findings.Add((New-Finding -Title "Elevated Global Administrator Count" -Detail "$adminCount $adminWord detected. Microsoft recommends no more than $ADMIN_THRESHOLD to minimize blast radius of compromised privileged accounts." -Severity "Medium" -Category "Identity" -Tone "Opportunity"))
     }
   }
 
@@ -123,9 +124,11 @@ function Get-Findings {
   # --- Conditional Access Policies ---
   if ($script:caPolicyCount -is [int]) {
     if ($script:caPolicyCount -lt $CA_POLICY_THRESHOLD) {
-      $findings.Add((New-Finding -Title "Limited Conditional Access Policies" -Detail "$($script:caPolicyCount) Conditional Access policies detected. Microsoft recommends at least $CA_POLICY_THRESHOLD policies covering MFA enforcement, location-based access, and device compliance." -Severity "Medium" -Category "Identity" -Tone "Opportunity"))
+      $caWord = if ($script:caPolicyCount -eq 1) { "policy" } else { "policies" }
+      $findings.Add((New-Finding -Title "Limited Conditional Access Policies" -Detail "$($script:caPolicyCount) Conditional Access $caWord detected. Microsoft recommends at least $CA_POLICY_THRESHOLD policies covering MFA enforcement, location-based access, and device compliance." -Severity "Medium" -Category "Identity" -Tone "Opportunity"))
     } else {
-      $findings.Add((New-Finding -Title "Conditional Access Policies Configured" -Detail "$($script:caPolicyCount) Conditional Access policies in place. This demonstrates proactive access governance." -Severity "Info" -Category "Identity" -Tone "Strong"))
+      $caWord = if ($script:caPolicyCount -eq 1) { "policy" } else { "policies" }
+      $findings.Add((New-Finding -Title "Conditional Access Policies Configured" -Detail "$($script:caPolicyCount) Conditional Access $caWord in place. This demonstrates proactive access governance." -Severity "Info" -Category "Identity" -Tone "Strong"))
     }
   }
 
@@ -145,7 +148,7 @@ function Get-Findings {
     $findings.Add((New-Finding -Title "Microsoft Teams Workload Detected" -Detail "$($script:teamsCount) Teams detected. Teams data spans Exchange (conversations) and SharePoint (files); confirm your data protection strategy includes Teams-specific coverage." -Severity "Info" -Category "Data Protection" -Tone "Informational"))
   }
 
-  return @($findings)
+  return ,$findings.ToArray()
 }
 
 <#
@@ -210,7 +213,7 @@ function Get-Recommendations {
     $recs.Add((New-Recommendation -Title "Include Teams in Data Protection Scope" -Detail "Verify that your data protection strategy covers all $($script:teamsCount) Teams including conversations, channel files, and team settings. Teams data spans Exchange (conversations) and SharePoint (files)." -Rationale "Teams is a critical collaboration workload. Ensure your retention and recovery capabilities extend to Teams-specific data." -Tier "Strategic"))
   }
 
-  return @($recs)
+  return ,$recs.ToArray()
 }
 
 <#

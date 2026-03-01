@@ -24,7 +24,7 @@ function Get-GlobalAdmins {
         Id                = $m.id
       })
     }
-    return $admins
+    return ,@($admins)
   } catch {
     $msg = $_.Exception.Message
     if ($msg -match 'Insufficient privileges|Authorization_RequestDenied|access denied|permission|consent|401|403|Forbidden') {
