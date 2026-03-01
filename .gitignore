@@ -1,4 +1,4 @@
-# Claude Code - private/sensitive
+# Private/sensitive config
 .claude/rules/competitive.md
 .claude/settings.local.json
 .claude/worktrees/

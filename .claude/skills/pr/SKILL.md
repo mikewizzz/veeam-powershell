@@ -33,8 +33,6 @@ gh pr create --title "the pr title" --body "$(cat <<'EOF'
 ## Test plan
 - [ ] verification step 1
 - [ ] verification step 2
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
 )"
 ```
@@ -46,4 +44,4 @@ EOF
 - Follow conventional commit format for the title
 - No sensitive information in PR title or body (no tenant IDs, no internal tool names)
 - No competitor mentions in PR description
-- Always include the Claude Code footer
+- No AI attribution — no "Generated with Claude Code", no Co-Authored-By AI lines, no mentions of AI tooling
