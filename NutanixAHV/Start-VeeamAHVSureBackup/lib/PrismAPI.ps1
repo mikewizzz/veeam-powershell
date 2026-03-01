@@ -336,7 +336,8 @@ function Get-PrismSubnets {
       $pageSize = 250
       do {
         $body = @{ kind = "subnet"; length = $pageSize; offset = $offset }
-        $result = Invoke-PrismAPI -Method "POST" -Endpoint "nutanix/v3/subnets/list" -Body $body
+        $raw = Invoke-PrismAPI -Method "POST" -Endpoint "nutanix/v3/subnets/list" -Body $body
+        $result = Resolve-PrismResponseBody $raw
         if ($result.entities) {
           foreach ($entity in $result.entities) {
             # Normalize v3 shape to v4 properties for downstream compatibility
