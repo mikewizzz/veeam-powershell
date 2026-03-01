@@ -7,6 +7,11 @@
   backup recoverability verification using the Veeam Plug-in for Nutanix AHV REST API (v9)
   and Nutanix Prism Central REST API.
 
+  DISCLAIMER: This is a community-developed script, not an official Veeam product feature.
+  Veeam's native SureBackup for Nutanix AHV supports backup verification and content scan
+  only. This script extends that capability by using public REST APIs to perform full VM
+  restore and boot testing — functionality not available in the product natively.
+
   WHAT THIS SCRIPT DOES:
   1. Authenticates to Veeam AHV Plugin REST API via VBR OAuth2
   2. Connects to Nutanix Prism Central via REST API v3/v4
@@ -116,7 +121,7 @@
 
 .PARAMETER VBAHVApiVersion
   Veeam Plug-in for Nutanix AHV REST API version (default: "v9").
-  Only v8 and v9 are supported by the plugin.
+  Only v9 is supported. This script uses v9-only endpoints (e.g., /restorePoints/{id}/metadata).
 
 .PARAMETER RestoreToOriginal
   Restore VMs to their original location. Default: false (SureBackup uses isolated network).
@@ -163,7 +168,7 @@
   Requires: PowerShell 5.1+ (7.x recommended)
   Modules: None
   Nutanix: Prism Central v4 API (pc.2024.3+ GA, default) or v3 (legacy)
-  VBR: Veeam Backup & Replication v13.0.1+ with Nutanix AHV Plugin v9
+  VBR: Veeam Backup & Replication v12.2+ with Nutanix AHV Plugin v9
   AHV Plugin REST API: https://helpcenter.veeam.com/references/vbahv/9/rest/
 #>
 
@@ -229,7 +234,7 @@ param(
   [switch]$DryRun,
 
   # VBAHV Plugin REST API
-  [ValidateSet("v8", "v9")]
+  [ValidateSet("v9")]
   [string]$VBAHVApiVersion = "v9",
 
   # Restore Options
