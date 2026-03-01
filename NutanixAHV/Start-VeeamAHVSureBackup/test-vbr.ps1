@@ -101,6 +101,9 @@ function Invoke-TestStep {
       return $null
     }
     Write-Log "  FAIL: $($_.Exception.Message)" -Level "ERROR"
+    if ($_.ScriptStackTrace) {
+      Write-Host "  Stack: $($_.ScriptStackTrace)" -ForegroundColor DarkGray
+    }
     Write-Host ""
     Write-Host "Test halted at step ${Step}/${Total}. Fix the issue above and re-run." -ForegroundColor Red
     exit 1

@@ -277,7 +277,8 @@ function Get-VBAHVPrismCentralVMs {
     }
 
     $offset += @($results).Count
-    $totalCount = if ($page.totalCount) { [int]$page.totalCount } else { $offset }
+    $tc = $page.totalCount -as [int]
+    $totalCount = if ($null -ne $tc) { $tc } else { $offset }
   } while ($offset -lt $totalCount)
 
   # Apply VM name filter if specified
