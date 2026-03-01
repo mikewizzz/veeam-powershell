@@ -321,8 +321,45 @@ function Get-PrismClusters {
 function Get-PrismSubnets {
   <#
   .SYNOPSIS
-    Retrieve all subnets from Prism Central (paginated, v3/v4)
+    Retrieve all subnets from Prism Central (paginated, v3/v4).
+    Falls back to v3 subnets/list if v4 networking namespace returns 500.
   #>
+  if ($PrismApiVersion -eq "v4") {
+    try {
+      return Get-PrismEntities -EndpointKey "Subnets"
+    }
+    catch {
+      Write-Log "v4 networking API unavailable ($($_.Exception.Message)), falling back to v3 subnets/list" -Level "WARNING"
+      # v3 fallback via the v4 base URL — append nutanix/v3 path manually
+      $allSubnets = New-Object System.Collections.Generic.List[object]
+      $offset = 0
+      $pageSize = 250
+      do {
+        $body = @{ kind = "subnet"; length = $pageSize; offset = $offset }
+        $result = Invoke-PrismAPI -Method "POST" -Endpoint "nutanix/v3/subnets/list" -Body $body
+        if ($result.entities) {
+          foreach ($entity in $result.entities) {
+            # Normalize v3 shape to v4 properties for downstream compatibility
+            $clusterRef = $null
+            if ($entity.spec.cluster_reference) {
+              $clusterRef = [PSCustomObject]@{ extId = $entity.spec.cluster_reference.uuid }
+            }
+            $normalized = [PSCustomObject]@{
+              extId            = $entity.metadata.uuid
+              name             = $entity.spec.name
+              vlanId           = $entity.spec.resources.vlan_id
+              subnetType       = $entity.spec.resources.subnet_type
+              clusterReference = $clusterRef
+            }
+            $allSubnets.Add($normalized)
+          }
+        }
+        $totalMatches = if ($result.metadata.total_matches) { $result.metadata.total_matches } else { 0 }
+        $offset += $pageSize
+      } while ($offset -lt $totalMatches)
+      return $allSubnets
+    }
+  }
   return Get-PrismEntities -EndpointKey "Subnets"
 }
 
