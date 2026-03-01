@@ -61,11 +61,11 @@
 .PARAMETER OutputPath
   Output folder for reports and CSVs (default: ./VeeamAzureSizing_[timestamp]).
 
-.PARAMETER GenerateHTML
-  Generate professional HTML report (default: true).
+.PARAMETER SkipHTML
+  Skip HTML report generation.
 
-.PARAMETER ZipOutput
-  Create ZIP archive of all outputs (default: true).
+.PARAMETER SkipZip
+  Skip ZIP archive creation.
 
 .EXAMPLE
   .\Get-VeeamAzureSizing.ps1
@@ -116,8 +116,8 @@ param(
 
   # Output
   [string]$OutputPath,
-  [switch]$GenerateHTML = $true,
-  [switch]$ZipOutput = $true
+  [switch]$SkipHTML,
+  [switch]$SkipZip
 )
 
 $ErrorActionPreference = "Stop"
@@ -171,6 +171,11 @@ foreach ($lib in $requiredLibs) {
   . $libFile
 }
 
+# Set total progress steps dynamically (auth + resolve + 4 inventory + sizing + export + optional html + optional zip)
+$script:TotalSteps = 8
+if (-not $SkipHTML) { $script:TotalSteps++ }
+if (-not $SkipZip)  { $script:TotalSteps++ }
+
 # =============================
 # Main Execution
 # =============================
@@ -197,8 +202,8 @@ try {
     -StorageInventory $stInv -AzureBackupInventory $abInv -VeeamSizing $veeamSizing
 
   $htmlPath = $null
-  if ($GenerateHTML) {
-    $htmlPath = Build-HtmlReport -VmInventory $vmInv -SqlInventory $sqlInv `
+  if (-not $SkipHTML) {
+    $htmlPath = Build-HtmlReport -VmInventory $vmInv `
       -StorageInventory $stInv -AzureBackupInventory $abInv `
       -VeeamSizing $veeamSizing -OutputPath $OutputPath
   }
@@ -206,7 +211,7 @@ try {
   Export-LogData
 
   $zipPath = $null
-  if ($ZipOutput) {
+  if (-not $SkipZip) {
     $zipPath = New-OutputArchive
   }
 
@@ -240,5 +245,6 @@ try {
   Write-Host "`nAssessment failed. Check execution_log.csv for details." -ForegroundColor Red
   throw
 } finally {
+  Export-LogData
   Write-Progress -Activity "Veeam Azure Sizing" -Completed
 }

@@ -90,9 +90,14 @@ function Get-VMInventory {
 
   foreach ($sub in $script:Subs) {
     Write-Log "Scanning VMs in subscription: $($sub.Name)" -Level "INFO"
-    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    try {
+      Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    } catch {
+      Write-Log "Failed to set context for subscription $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+      continue
+    }
 
-    $vms = @(Get-AzVM -Status -ErrorAction SilentlyContinue)
+    $vms = @(Invoke-AzWithRetry { Get-AzVM -Status -ErrorAction Stop })
 
     foreach ($vm in $vms) {
       if (-not (Test-RegionMatch $vm.Location)) { continue }
@@ -104,13 +109,11 @@ function Get-VMInventory {
       }
 
       # Network details
-      $nicIds = @()
       $privateIps = @()
       $publicIps = @()
 
       foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
         $nicId = $nicRef.Id
-        $nicIds += $nicId
 
         if (-not $nicsCache.ContainsKey($nicId)) {
           try {
@@ -208,10 +211,15 @@ function Get-SqlInventory {
 
   foreach ($sub in $script:Subs) {
     Write-Log "Scanning Azure SQL in subscription: $($sub.Name)" -Level "INFO"
-    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    try {
+      Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    } catch {
+      Write-Log "Failed to set context for subscription $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+      continue
+    }
 
     # SQL Databases
-    $servers = @(Get-AzSqlServer -ErrorAction SilentlyContinue)
+    $servers = @(Invoke-AzWithRetry { Get-AzSqlServer -ErrorAction Stop })
     foreach ($srv in $servers) {
       if (-not (Test-RegionMatch $srv.Location)) { continue }
 
@@ -240,7 +248,7 @@ function Get-SqlInventory {
     }
 
     # Managed Instances
-    $managed = @(Get-AzSqlInstance -ErrorAction SilentlyContinue)
+    $managed = @(Invoke-AzWithRetry { Get-AzSqlInstance -ErrorAction Stop })
     foreach ($mi in $managed) {
       if (-not (Test-RegionMatch $mi.Location)) { continue }
 
@@ -287,9 +295,14 @@ function Get-StorageInventory {
 
   foreach ($sub in $script:Subs) {
     Write-Log "Scanning Storage in subscription: $($sub.Name)" -Level "INFO"
-    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    try {
+      Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    } catch {
+      Write-Log "Failed to set context for subscription $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+      continue
+    }
 
-    $accts = @(Get-AzStorageAccount -ErrorAction SilentlyContinue)
+    $accts = @(Invoke-AzWithRetry { Get-AzStorageAccount -ErrorAction Stop })
 
     foreach ($acct in $accts) {
       if (-not (Test-RegionMatch $acct.Location)) { continue }
@@ -304,7 +317,9 @@ function Get-StorageInventory {
           try {
             $rmShare = Get-AzRmStorageShare -ResourceGroupName $acct.ResourceGroupName -StorageAccountName $acct.StorageAccountName -Name $sh.Name -Expand "stats" -ErrorAction Stop
             $usageBytes = $rmShare.ShareUsageBytes
-          } catch {}
+          } catch {
+            Write-Log "Failed to retrieve share usage for $($sh.Name) in $($acct.StorageAccountName): $($_.Exception.Message)" -Level "WARNING"
+          }
 
           $usageGiB = if ($usageBytes) { [math]::Round($usageBytes / 1GB, 2) } else { $null }
 
@@ -386,9 +401,14 @@ function Get-AzureBackupInventory {
 
   foreach ($sub in $script:Subs) {
     Write-Log "Scanning Azure Backup in subscription: $($sub.Name)" -Level "INFO"
-    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    try {
+      Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    } catch {
+      Write-Log "Failed to set context for subscription $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+      continue
+    }
 
-    $vaults = @(Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue)
+    $vaults = @(Invoke-AzWithRetry { Get-AzRecoveryServicesVault -ErrorAction Stop })
 
     foreach ($v in $vaults) {
       if (-not (Test-RegionMatch $v.Location)) { continue }

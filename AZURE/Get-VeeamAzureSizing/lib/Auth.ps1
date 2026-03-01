@@ -28,7 +28,7 @@ function Initialize-RequiredModules {
     Write-Host "Install all missing modules with:" -ForegroundColor Yellow
     Write-Host "  Install-Module $($missingModules -join ', ') -Scope CurrentUser" -ForegroundColor Cyan
     Write-Host ""
-    exit 1
+    throw "Missing required Azure PowerShell modules: $($missingModules -join ', '). Install with: Install-Module $($missingModules -join ', ') -Scope CurrentUser"
   }
 }
 
