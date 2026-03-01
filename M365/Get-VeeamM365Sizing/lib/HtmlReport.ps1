@@ -1,18 +1,19 @@
 # =========================================================================
-# HtmlReport.ps1 - Full HTML report generation (CSS + markup)
+# HtmlReport.ps1 - Executive-grade HTML report generation
 # =========================================================================
 
 <#
 .SYNOPSIS
   Builds the complete HTML report with all sections.
 .DESCRIPTION
-  Generates a professional Microsoft Fluent Design System HTML report.
-  Quick mode: tenant info, KPIs, workload analysis, methodology, sizing params, artifacts.
-  Full mode adds: executive summary, license overview, data protection landscape,
-  identity & access security, and recommendations.
+  Generates a professional executive-grade HTML report with inline SVG charts,
+  dark gradient header, numbered sections, and glassmorphism KPI cards.
+  Quick mode: tenant info, KPIs, capacity forecast, workload analysis, methodology, sizing params, artifacts.
+  Full mode adds: executive summary with gauge, license overview with bar chart,
+  data protection landscape, identity & access with risk matrix, and grouped recommendations.
 .NOTES
   CSS-only visuals, no JavaScript, no external dependencies.
-  Works as a static file and prints correctly.
+  Works as a static file, prints correctly to PDF, responsive on mobile.
 #>
 function Build-HtmlReport {
   # =============================
@@ -35,6 +36,8 @@ function Build-HtmlReport {
   --color-warning: #F7630C;
   --color-danger: #D13438;
   --color-info: #0078D4;
+  --header-dark: #1B1B2F;
+  --header-mid: #1F4068;
   --shadow-depth-4: 0 1.6px 3.6px 0 rgba(0,0,0,.132), 0 0.3px 0.9px 0 rgba(0,0,0,.108);
   --shadow-depth-8: 0 3.2px 7.2px 0 rgba(0,0,0,.132), 0 0.6px 1.8px 0 rgba(0,0,0,.108);
   --shadow-depth-16: 0 6.4px 14.4px 0 rgba(0,0,0,.132), 0 1.2px 3.6px 0 rgba(0,0,0,.108);
@@ -49,38 +52,112 @@ body {
   line-height: 1.6;
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
+  counter-reset: section-counter;
 }
 
-.container { max-width: 1440px; margin: 0 auto; padding: 40px 32px; }
+.container { max-width: 1440px; margin: 0 auto; padding: 0 32px 40px; }
 
-/* Header */
-.header {
-  background: white;
-  border-left: 4px solid var(--ms-blue);
-  padding: 32px;
+/* ===== Executive Dark Header ===== */
+.exec-header {
+  background: linear-gradient(135deg, var(--header-dark) 0%, var(--header-mid) 100%);
+  padding: 48px 32px 40px;
   margin-bottom: 32px;
-  box-shadow: var(--shadow-depth-4);
-  border-radius: 2px;
+  position: relative;
+  overflow: hidden;
 }
-.header-title {
-  font-size: 28px; font-weight: 600; color: var(--ms-gray-160);
-  margin-bottom: 8px; letter-spacing: -0.02em;
+.exec-header::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  right: -10%;
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, rgba(255,255,255,0.04) 0%, transparent 70%);
+  border-radius: 50%;
 }
-.header-subtitle { font-size: 16px; color: var(--ms-gray-90); font-weight: 400; }
-.badge {
-  display: inline-block; padding: 4px 12px; background: var(--ms-blue); color: white;
-  border-radius: 12px; font-size: 12px; font-weight: 600; margin-left: 12px;
-  text-transform: uppercase; letter-spacing: 0.05em;
+.exec-header-inner { max-width: 1440px; margin: 0 auto; position: relative; z-index: 1; }
+.exec-header-org {
+  font-size: 36px; font-weight: 700; color: #FFFFFF;
+  letter-spacing: -0.02em; margin-bottom: 6px;
+}
+.exec-header-title {
+  font-size: 16px; font-weight: 400; color: rgba(255,255,255,0.75);
+  margin-bottom: 20px;
+}
+.exec-header-meta {
+  display: flex; flex-wrap: wrap; gap: 24px; align-items: center;
+}
+.exec-header-meta-item {
+  font-size: 13px; color: rgba(255,255,255,0.6);
+}
+.exec-header-meta-item strong {
+  color: rgba(255,255,255,0.9); font-weight: 600;
+}
+.exec-badge {
+  display: inline-block; padding: 4px 14px;
+  background: rgba(255,255,255,0.15); color: #FFFFFF;
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 14px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  backdrop-filter: blur(4px);
 }
 
-/* Tenant Info */
+/* ===== Section Numbering & Dividers ===== */
+.section {
+  background: white; padding: 32px; margin-bottom: 24px;
+  border-radius: 4px; box-shadow: var(--shadow-depth-4);
+  counter-increment: section-counter;
+}
+.section-title {
+  font-size: 20px; font-weight: 600; color: var(--ms-gray-160);
+  margin-bottom: 20px; padding-bottom: 12px;
+  border-bottom: 3px solid transparent;
+  border-image: linear-gradient(90deg, var(--ms-blue), var(--veeam-green), transparent) 1;
+  display: flex; align-items: baseline; gap: 12px;
+}
+.section-title::before {
+  content: counter(section-counter, decimal-leading-zero);
+  font-size: 14px; font-weight: 700; color: var(--ms-blue);
+  font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+  min-width: 28px;
+}
+
+/* ===== Glassmorphism KPI Cards ===== */
+.kpi-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px; margin-bottom: 24px;
+}
+.kpi-card {
+  background: rgba(255,255,255,0.85);
+  backdrop-filter: blur(12px);
+  padding: 24px; border-radius: 8px;
+  box-shadow: var(--shadow-depth-4);
+  border: 1px solid rgba(255,255,255,0.6);
+  transition: all 0.2s ease;
+  display: flex; gap: 16px; align-items: flex-start;
+}
+.kpi-card:hover { box-shadow: var(--shadow-depth-8); transform: translateY(-2px); }
+.kpi-card-content { flex: 1; }
+.kpi-label {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--ms-gray-90); margin-bottom: 8px;
+}
+.kpi-value {
+  font-size: 32px; font-weight: 700; color: var(--ms-gray-160);
+  line-height: 1.1; margin-bottom: 6px;
+  font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-subtext { font-size: 12px; color: var(--ms-gray-90); font-weight: 400; }
+
+/* ===== Tenant Info ===== */
 .tenant-info {
   background: white; padding: 24px 32px; margin-bottom: 24px;
-  border-radius: 2px; box-shadow: var(--shadow-depth-4);
+  border-radius: 4px; box-shadow: var(--shadow-depth-4);
 }
 .tenant-info-title {
-  font-size: 12px; font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.05em; color: var(--ms-gray-90); margin-bottom: 12px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--ms-gray-90); margin-bottom: 12px;
 }
 .tenant-info-row {
   display: flex; flex-wrap: wrap; gap: 24px; padding: 8px 0;
@@ -91,39 +168,66 @@ body {
 .tenant-info-label { color: var(--ms-gray-90); font-weight: 400; }
 .tenant-info-value { color: var(--ms-gray-160); font-weight: 600; }
 
-/* KPI Cards */
-.kpi-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 24px; margin-bottom: 32px;
+/* ===== Executive Summary 3-Column ===== */
+.exec-summary-grid {
+  display: grid; grid-template-columns: auto 1fr 1fr;
+  gap: 32px; align-items: flex-start;
 }
-.kpi-card {
-  background: white; padding: 24px; border-radius: 2px;
-  box-shadow: var(--shadow-depth-4); transition: all 0.2s ease;
-  border-top: 3px solid var(--ms-blue);
+.exec-summary-gauge { text-align: center; min-width: 220px; }
+.exec-summary-risks, .exec-summary-actions { min-width: 0; }
+.exec-summary-subtitle {
+  font-weight: 700; font-size: 13px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--ms-gray-90); margin-bottom: 12px;
+  padding-bottom: 8px; border-bottom: 2px solid var(--ms-gray-30);
 }
-.kpi-card:hover { box-shadow: var(--shadow-depth-8); transform: translateY(-2px); }
-.kpi-card:nth-child(4) { border-top-color: var(--veeam-green); }
-.kpi-label {
-  font-size: 12px; font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.05em; color: var(--ms-gray-90); margin-bottom: 12px;
+.exec-risk-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 8px 0; border-bottom: 1px solid var(--ms-gray-20);
 }
-.kpi-value {
-  font-size: 36px; font-weight: 600; color: var(--ms-gray-160);
-  line-height: 1.2; margin-bottom: 8px;
+.exec-risk-item:last-child { border-bottom: none; }
+.severity-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex-shrink: 0; margin-top: 6px;
 }
-.kpi-subtext { font-size: 13px; color: var(--ms-gray-90); font-weight: 400; }
+.severity-dot.high { background: var(--color-danger); }
+.severity-dot.medium { background: var(--color-warning); }
+.severity-dot.low { background: var(--color-info); }
+.severity-dot.info { background: var(--color-success); }
+.exec-risk-text { font-size: 13px; color: var(--ms-gray-130); line-height: 1.4; }
+.exec-action-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 8px 0; border-bottom: 1px solid var(--ms-gray-20);
+}
+.exec-action-item:last-child { border-bottom: none; }
+.tier-dot {
+  display: inline-block; padding: 2px 8px; border-radius: 3px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; color: white; flex-shrink: 0; margin-top: 3px;
+}
+.tier-dot.immediate { background: var(--color-danger); }
+.tier-dot.short-term { background: var(--color-warning); }
+.tier-dot.strategic { background: var(--color-info); }
+.exec-action-text { font-size: 13px; color: var(--ms-gray-130); line-height: 1.4; }
 
-/* Section */
-.section {
-  background: white; padding: 32px; margin-bottom: 24px;
-  border-radius: 2px; box-shadow: var(--shadow-depth-4);
+/* ===== Key Takeaway Bar ===== */
+.takeaway-bar {
+  background: var(--ms-gray-20); border-radius: 6px;
+  padding: 14px 24px; margin-top: 24px;
+  font-size: 14px; color: var(--ms-gray-130); text-align: center;
 }
-.section-title {
-  font-size: 20px; font-weight: 600; color: var(--ms-gray-160);
-  margin-bottom: 20px; padding-bottom: 12px; border-bottom: 2px solid var(--ms-gray-30);
+.takeaway-bar strong { color: var(--ms-gray-160); }
+
+/* ===== Capacity Forecast ===== */
+.capacity-forecast {
+  background: white; padding: 24px 32px; margin-bottom: 24px;
+  border-radius: 4px; box-shadow: var(--shadow-depth-4);
+}
+.capacity-forecast-title {
+  font-size: 14px; font-weight: 600; color: var(--ms-gray-130);
+  margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.04em;
 }
 
-/* Tables */
+/* ===== Tables ===== */
 .table-container { overflow-x: auto; margin-top: 16px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 thead { background: var(--ms-gray-20); }
@@ -132,11 +236,15 @@ th {
   font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em;
   border-bottom: 2px solid var(--ms-gray-50);
 }
-td { padding: 14px 16px; border-bottom: 1px solid var(--ms-gray-30); color: var(--ms-gray-160); }
+td {
+  padding: 14px 16px; border-bottom: 1px solid var(--ms-gray-30);
+  color: var(--ms-gray-160);
+  font-variant-numeric: tabular-nums;
+}
 tbody tr:hover { background: var(--ms-gray-10); }
 tbody tr:last-child td { border-bottom: none; }
 
-/* Info Cards */
+/* ===== Info Cards ===== */
 .info-card {
   background: var(--ms-gray-10); border-left: 4px solid var(--ms-blue);
   padding: 20px 24px; margin: 16px 0; border-radius: 2px;
@@ -145,16 +253,16 @@ tbody tr:last-child td { border-bottom: none; }
 .info-card-text { color: var(--ms-gray-90); font-size: 13px; line-height: 1.6; margin-bottom: 8px; }
 .info-card-text:last-child { margin-bottom: 0; }
 
-/* Code Block */
+/* ===== Code Block ===== */
 .code-block {
   background: var(--ms-gray-160); color: var(--ms-blue-light);
-  padding: 20px 24px; border-radius: 2px;
-  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  padding: 20px 24px; border-radius: 4px;
+  font-family: 'Cascadia Code', 'Consolas', 'Monaco', 'Courier New', monospace;
   font-size: 13px; line-height: 1.8; overflow-x: auto; margin-top: 16px;
 }
 .code-line { display: block; white-space: nowrap; }
 
-/* Progress Bar */
+/* ===== Progress Bar ===== */
 .progress-bar {
   width: 100%; height: 24px; background: var(--ms-gray-30); border-radius: 12px;
   overflow: hidden; margin: 8px 0;
@@ -169,7 +277,7 @@ tbody tr:last-child td { border-bottom: none; }
 .progress-fill.red { background: var(--color-danger); }
 .progress-fill.blue { background: var(--color-info); }
 
-/* Status Dot */
+/* ===== Status Dot ===== */
 .status-dot {
   display: inline-block; width: 10px; height: 10px; border-radius: 50%;
   margin-right: 8px; vertical-align: middle;
@@ -179,18 +287,7 @@ tbody tr:last-child td { border-bottom: none; }
 .status-dot.red { background: var(--color-danger); }
 .status-dot.gray { background: var(--ms-gray-50); }
 
-/* Score Circle */
-.score-circle {
-  width: 120px; height: 120px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center; flex-direction: column;
-  font-size: 36px; font-weight: 700; color: white; margin: 0 auto 16px;
-}
-.score-circle.green { background: var(--color-success); }
-.score-circle.yellow { background: var(--color-warning); }
-.score-circle.red { background: var(--color-danger); }
-.score-circle-label { font-size: 11px; font-weight: 400; opacity: 0.9; }
-
-/* Finding Cards */
+/* ===== Finding Cards ===== */
 .finding-card {
   background: white; border-left: 4px solid var(--ms-gray-50);
   padding: 16px 20px; margin: 12px 0; border-radius: 2px;
@@ -211,10 +308,16 @@ tbody tr:last-child td { border-bottom: none; }
 .finding-card-badge.opportunity { background: #FFF4CE; color: #8A6914; }
 .finding-card-badge.informational { background: #F0F6FF; color: var(--color-info); }
 
-/* Recommendation Cards */
+/* ===== Recommendation Cards (Grouped) ===== */
+.rec-phase-header {
+  font-size: 15px; font-weight: 700; color: var(--ms-gray-160);
+  margin: 24px 0 12px; padding-bottom: 8px;
+  border-bottom: 2px solid var(--ms-gray-30);
+}
+.rec-phase-header:first-child { margin-top: 0; }
 .recommendation-card {
   background: white; padding: 20px 24px; margin: 12px 0;
-  border-radius: 2px; box-shadow: var(--shadow-depth-4); border-left: 4px solid var(--ms-gray-50);
+  border-radius: 4px; box-shadow: var(--shadow-depth-4); border-left: 4px solid var(--ms-gray-50);
 }
 .recommendation-card.tier-immediate { border-left-color: var(--color-danger); }
 .recommendation-card.tier-short-term { border-left-color: var(--color-warning); }
@@ -231,33 +334,40 @@ tbody tr:last-child td { border-bottom: none; }
 .rec-detail { font-size: 13px; color: var(--ms-gray-130); line-height: 1.5; margin-bottom: 6px; }
 .rec-rationale { font-size: 12px; color: var(--ms-gray-90); font-style: italic; }
 
-/* Coverage Grid */
+/* ===== Workload Flex (Donut + Table) ===== */
+.workload-flex {
+  display: flex; gap: 32px; align-items: flex-start; flex-wrap: wrap;
+}
+.workload-chart { flex-shrink: 0; }
+.workload-table { flex: 1; min-width: 0; }
+
+/* ===== Coverage Grid ===== */
 .coverage-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 16px; margin-top: 16px;
 }
 .coverage-item {
-  background: var(--ms-gray-10); border-radius: 2px; padding: 20px;
+  background: var(--ms-gray-10); border-radius: 4px; padding: 20px;
   border-top: 3px solid var(--ms-blue);
 }
 .coverage-item-title { font-weight: 600; font-size: 15px; margin-bottom: 8px; }
 .coverage-item-stat {
   font-size: 24px; font-weight: 600; color: var(--ms-gray-160); margin-bottom: 4px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-variant-numeric: tabular-nums;
 }
 .coverage-item-detail { font-size: 12px; color: var(--ms-gray-90); margin-bottom: 4px; }
 
-/* Callout Card */
+/* ===== Callout Card ===== */
 .callout-card {
   background: var(--ms-gray-10); border: 1px solid var(--ms-gray-30);
-  border-radius: 2px; padding: 24px; margin: 16px 0;
+  border-radius: 4px; padding: 24px; margin: 16px 0;
 }
 .callout-card-title {
   font-weight: 600; font-size: 16px; margin-bottom: 16px;
   color: var(--ms-gray-160); text-align: center;
 }
-.callout-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
-}
+.callout-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 .callout-column-title {
   font-weight: 600; font-size: 13px; text-transform: uppercase;
   letter-spacing: 0.03em; margin-bottom: 12px; padding-bottom: 8px;
@@ -267,50 +377,91 @@ tbody tr:last-child td { border-bottom: none; }
 .callout-column-title.customer { color: var(--veeam-green); border-bottom-color: var(--veeam-green); }
 .callout-item { font-size: 13px; color: var(--ms-gray-130); padding: 4px 0; }
 
-/* Identity KPI Grid */
+/* ===== Identity KPI Grid ===== */
 .identity-kpi-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 16px; margin: 16px 0;
 }
 .identity-kpi {
-  background: var(--ms-gray-10); padding: 16px; border-radius: 2px; text-align: center;
+  background: var(--ms-gray-10); padding: 16px; border-radius: 4px; text-align: center;
 }
-.identity-kpi-value { font-size: 28px; font-weight: 600; color: var(--ms-gray-160); }
+.identity-kpi-value {
+  font-size: 28px; font-weight: 600; color: var(--ms-gray-160);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-variant-numeric: tabular-nums;
+}
 .identity-kpi-label { font-size: 12px; color: var(--ms-gray-90); margin-top: 4px; }
 
-/* File List */
+/* ===== File List ===== */
 .file-list { list-style: none; padding: 0; margin: 16px 0 0 0; }
 .file-item {
   padding: 10px 16px; border-bottom: 1px solid var(--ms-gray-30);
   color: var(--ms-gray-130); font-size: 13px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
 }
 .file-item:last-child { border-bottom: none; }
 
-/* Footer */
-.footer { text-align: center; padding: 32px 0; color: var(--ms-gray-90); font-size: 12px; }
+/* ===== Professional Footer ===== */
+.exec-footer {
+  text-align: center; padding: 32px 0 16px;
+  border-top: 1px solid var(--ms-gray-30);
+  margin-top: 16px;
+}
+.exec-footer-org {
+  font-size: 13px; font-weight: 600; color: var(--ms-gray-130); margin-bottom: 4px;
+}
+.exec-footer-conf {
+  font-size: 11px; color: var(--ms-gray-90); margin-bottom: 4px;
+  font-style: italic;
+}
+.exec-footer-stamp {
+  font-size: 11px; color: var(--ms-gray-50);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+}
 
-/* Responsive */
+/* ===== SVG Containers ===== */
+.svg-container { margin: 16px 0; }
+.svg-container svg { max-width: 100%; height: auto; }
+
+/* ===== Responsive ===== */
 @media (max-width: 768px) {
-  .container { padding: 20px 16px; }
-  .header { padding: 20px; }
-  .header-title { font-size: 22px; }
+  .container { padding: 0 16px 20px; }
+  .exec-header { padding: 32px 16px 28px; }
+  .exec-header-org { font-size: 24px; }
+  .exec-summary-grid { grid-template-columns: 1fr; }
   .kpi-grid { grid-template-columns: 1fr; }
   .section { padding: 20px; }
   .tenant-info-row { flex-direction: column; gap: 12px; }
   .callout-grid { grid-template-columns: 1fr; }
   .coverage-grid { grid-template-columns: 1fr; }
   .identity-kpi-grid { grid-template-columns: repeat(2, 1fr); }
+  .workload-flex { flex-direction: column; }
 }
 
+/* ===== Print ===== */
 @media print {
-  body { background: white; }
-  .container { max-width: 100%; }
-  .kpi-card, .section, .tenant-info { box-shadow: none; border: 1px solid var(--ms-gray-30); }
+  body { background: white; font-size: 12px; }
+  .container { max-width: 100%; padding: 0; }
+  .exec-header {
+    print-color-adjust: exact; -webkit-print-color-adjust: exact;
+    padding: 32px 24px;
+  }
+  .kpi-card, .section, .tenant-info {
+    box-shadow: none; border: 1px solid var(--ms-gray-30);
+    page-break-inside: avoid;
+  }
   .kpi-card:hover { transform: none; }
-  .finding-card, .recommendation-card { box-shadow: none; border: 1px solid var(--ms-gray-30); }
-  .score-circle { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
-  .progress-fill { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
-  .priority-badge { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .kpi-card { backdrop-filter: none; background: white; }
+  .finding-card, .recommendation-card {
+    box-shadow: none; border: 1px solid var(--ms-gray-30);
+    page-break-inside: avoid;
+  }
+  .progress-fill, .priority-badge, .severity-dot, .tier-dot, .status-dot,
+  .exec-badge, .coverage-item {
+    print-color-adjust: exact; -webkit-print-color-adjust: exact;
+  }
+  svg { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .section { page-break-inside: avoid; }
 }
 "@
 
@@ -324,15 +475,25 @@ tbody tr:last-child td { border-bottom: none; }
   }
 
   function _Get-ScoreColor([int]$score) {
-    if ($score -ge 70) { return "green" }
-    elseif ($score -ge 40) { return "yellow" }
-    else { return "red" }
+    if ($score -ge 70) { return "#107C10" }
+    elseif ($score -ge 40) { return "#F7630C" }
+    else { return "#D13438" }
+  }
+
+  function _Get-ScoreLabel([int]$score) {
+    if ($score -ge 70) { return "STRONG" }
+    elseif ($score -ge 40) { return "MODERATE" }
+    else { return "AT RISK" }
   }
 
   # =============================
   # Build HTML sections
   # =============================
   $htmlParts = New-Object System.Collections.Generic.List[string]
+
+  # Org display name
+  $orgDisplay = "Microsoft 365 Tenant"
+  if ($script:OrgName) { $orgDisplay = $script:OrgName }
 
   # DOCTYPE + head
   $htmlParts.Add(@"
@@ -341,30 +502,38 @@ tbody tr:last-child td { border-bottom: none; }
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Microsoft 365 Backup Sizing Assessment</title>
+<title>Microsoft 365 Backup Sizing Assessment — $(Escape-Html $orgDisplay)</title>
 <style>
 $css
 </style>
 </head>
 <body>
-<div class="container">
 "@)
 
-  # Header
+  # =============================
+  # Executive Dark Header
+  # =============================
+  $modeLabel = if ($Full) { "FULL ASSESSMENT" } else { "QUICK SIZING" }
   $htmlParts.Add(@"
-  <div class="header">
-    <h1 class="header-title">
-      Microsoft 365 Backup Sizing Assessment
-      <span class="badge">$(if($Full){"Full"}else{"Quick"})</span>
-    </h1>
-    <div class="header-subtitle">Generated: $(Get-Date -Format "MMMM dd, yyyy 'at' HH:mm") UTC</div>
+  <div class="exec-header">
+    <div class="exec-header-inner">
+      <div class="exec-header-org">$(Escape-Html $orgDisplay)</div>
+      <div class="exec-header-title">Microsoft 365 Backup Sizing Assessment</div>
+      <div class="exec-header-meta">
+        <span class="exec-badge">$modeLabel</span>
+        <span class="exec-header-meta-item"><strong>Generated:</strong> $(Get-Date -Format "MMMM dd, yyyy 'at' HH:mm") UTC</span>
+        $(if($script:OrgId){"<span class='exec-header-meta-item'><strong>Tenant:</strong> $(Escape-Html $script:OrgId)</span>"}else{""})
+        $(if($script:DefaultDomain){"<span class='exec-header-meta-item'><strong>Domain:</strong> $(Escape-Html $script:DefaultDomain)</span>"}else{""})
+      </div>
+    </div>
   </div>
+  <div class="container">
 "@)
 
   # Tenant Info
   $htmlParts.Add(@"
   <div class="tenant-info">
-    <div class="tenant-info-title">Tenant Information</div>
+    <div class="tenant-info-title">Tenant Details</div>
     <div class="tenant-info-row">
       $(if($script:OrgName){"<div class='tenant-info-item'><span class='tenant-info-label'>Organization:</span><span class='tenant-info-value'>$(Escape-Html $script:OrgName)</span></div>"}else{""})
       $(if($script:OrgId){"<div class='tenant-info-item'><span class='tenant-info-label'>Tenant ID:</span><span class='tenant-info-value'>$(Escape-Html $script:OrgId)</span></div>"}else{""})
@@ -381,75 +550,159 @@ $css
 "@)
 
   # =============================
-  # FULL MODE: Executive Summary
+  # FULL MODE: Executive Summary (3-Column)
   # =============================
-  if ($Full -and $script:readinessScore -ne $null) {
-    $scoreColor = _Get-ScoreColor $script:readinessScore
-    $topFindings = @($script:findings | Select-Object -First 5)
+  if ($Full -and $null -ne $script:readinessScore) {
+    # Gauge chart
+    $gaugeHtml = New-SvgGaugeChart -Score $script:readinessScore -Label "Protection Readiness"
 
-    $findingsHtml = ""
-    foreach ($f in $topFindings) {
-      $severityClass = "severity-$($f.Severity.ToLower())"
-      $toneClass = $f.Tone.ToLower()
-      $findingsHtml += @"
-      <div class="finding-card $severityClass">
-        <div class="finding-card-title">$(Escape-Html $f.Title)<span class="finding-card-badge $toneClass">$(Escape-Html $f.Tone)</span></div>
-        <div class="finding-card-detail">$(Escape-Html $f.Detail)</div>
-      </div>
+    # Top 3 risks
+    $topRisks = @($script:findings | Where-Object { $_.Tone -ne "Strong" } | Select-Object -First 3)
+    $risksHtml = ""
+    foreach ($f in $topRisks) {
+      $sevClass = $f.Severity.ToLower()
+      $risksHtml += @"
+        <div class="exec-risk-item">
+          <span class="severity-dot $sevClass"></span>
+          <span class="exec-risk-text">$(Escape-Html $f.Title)</span>
+        </div>
 "@
     }
+    if ($risksHtml -eq "") {
+      $risksHtml = '<div class="exec-risk-item"><span class="severity-dot info"></span><span class="exec-risk-text">No significant risks identified</span></div>'
+    }
+
+    # Top 3 actions
+    $topActions = @($script:recommendations | Select-Object -First 3)
+    $actionsHtml = ""
+    foreach ($r in $topActions) {
+      $tierClass = $r.Tier.ToLower() -replace ' ', '-'
+      $actionsHtml += @"
+        <div class="exec-action-item">
+          <span class="tier-dot $tierClass">$(Escape-Html $r.Tier)</span>
+          <span class="exec-action-text">$(Escape-Html $r.Title)</span>
+        </div>
+"@
+    }
+    if ($actionsHtml -eq "") {
+      $actionsHtml = '<div class="exec-action-item"><span class="tier-dot strategic">Info</span><span class="exec-action-text">No immediate actions required</span></div>'
+    }
+
+    # Takeaway
+    $scoreLabel = _Get-ScoreLabel $script:readinessScore
 
     $htmlParts.Add(@"
   <div class="section">
     <h2 class="section-title">Executive Summary</h2>
-    <div style="display: flex; align-items: flex-start; gap: 32px; flex-wrap: wrap;">
-      <div style="text-align: center; min-width: 160px;">
-        <div class="score-circle $scoreColor">
-          $($script:readinessScore)
-          <span class="score-circle-label">/ 100</span>
+    <div class="exec-summary-grid">
+      <div class="exec-summary-gauge">
+        <div class="svg-container">
+$gaugeHtml
         </div>
-        <div style="font-weight: 600; font-size: 14px; color: var(--ms-gray-130);">Protection Readiness</div>
-        <div style="font-size: 12px; color: var(--ms-gray-90); margin-top: 4px;">Composite score from identity &amp; security signals</div>
       </div>
-      <div style="flex: 1; min-width: 300px;">
-        <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">Key Findings</div>
-        $findingsHtml
+      <div class="exec-summary-risks">
+        <div class="exec-summary-subtitle">Key Risks</div>
+$risksHtml
       </div>
+      <div class="exec-summary-actions">
+        <div class="exec-summary-subtitle">Recommended Actions</div>
+$actionsHtml
+      </div>
+    </div>
+    <div class="takeaway-bar">
+      This tenant's data protection posture is <strong>$scoreLabel</strong> (score: $($script:readinessScore)/100). $(if($script:readinessScore -lt 70){"Targeted improvements in identity security and backup coverage can significantly reduce organizational risk."}else{"Continue strengthening backup coverage and identity controls to maintain this position."})
     </div>
   </div>
 "@)
   }
 
-  # KPI Grid
+  # =============================
+  # KPI Grid with Mini Rings
+  # =============================
+
+  # Calculate percentages for mini rings
+  $usersRingPct = 100  # Always 100% (these are the users to protect)
+  $growthRingPct = [Math]::Min([Math]::Round($AnnualGrowthPct * 100 / 0.5 * 100, 0), 100)  # Scale: 50% growth = full ring
+  $mbsRingPct = if ($script:totalGB -gt 0) { [Math]::Min([Math]::Round(($script:suggestedStartGB / ($script:totalGB * 3)) * 100, 0), 100) } else { 0 }
+
+  $usersRing = New-SvgMiniRing -Percent $usersRingPct -Color "#0078D4"
+  $datasetRing = New-SvgMiniRing -Percent 75 -Color "#106EBE"
+  $growthRing = New-SvgMiniRing -Percent $growthRingPct -Color "#F7630C"
+  $mbsRing = New-SvgMiniRing -Percent $mbsRingPct -Color "#00B336"
+
   $htmlParts.Add(@"
   <div class="kpi-grid">
     <div class="kpi-card">
-      <div class="kpi-label">Users to Protect</div>
-      <div class="kpi-value">$($script:UsersToProtect)</div>
-      <div class="kpi-subtext">Active user accounts</div>
+      $usersRing
+      <div class="kpi-card-content">
+        <div class="kpi-label">Users to Protect</div>
+        <div class="kpi-value">$($script:UsersToProtect)</div>
+        <div class="kpi-subtext">Active user accounts</div>
+      </div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Total Dataset</div>
-      <div class="kpi-value">$(Format-Storage $script:totalGB)</div>
-      <div class="kpi-subtext">$($script:totalGB) GB | $($script:totalTiB) TiB (binary)</div>
+      $datasetRing
+      <div class="kpi-card-content">
+        <div class="kpi-label">Total Dataset</div>
+        <div class="kpi-value">$(Format-Storage $script:totalGB)</div>
+        <div class="kpi-subtext">$($script:totalGB) GB | $($script:totalTiB) TiB (binary)</div>
+      </div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Projected Growth</div>
-      <div class="kpi-value">$(Format-Pct $AnnualGrowthPct)</div>
-      <div class="kpi-subtext">Annual growth rate (modeled)</div>
+      $growthRing
+      <div class="kpi-card-content">
+        <div class="kpi-label">Projected Growth</div>
+        <div class="kpi-value">$(Format-Pct $AnnualGrowthPct)</div>
+        <div class="kpi-subtext">Annual growth rate (modeled)</div>
+      </div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Recommended MBS Capacity</div>
-      <div class="kpi-value">$(Format-Storage $script:suggestedStartGB)</div>
-      <div class="kpi-subtext">Modeled estimate: $(Format-Storage $script:mbsEstimateGB) + $(Format-Pct $BufferPct) buffer</div>
+      $mbsRing
+      <div class="kpi-card-content">
+        <div class="kpi-label">Recommended MBS</div>
+        <div class="kpi-value">$(Format-Storage $script:suggestedStartGB)</div>
+        <div class="kpi-subtext">Estimate: $(Format-Storage $script:mbsEstimateGB) + $(Format-Pct $BufferPct) buffer</div>
+      </div>
     </div>
   </div>
 "@)
 
   # =============================
-  # FULL MODE: License Overview
+  # Capacity Forecast Bar Chart
+  # =============================
+  $projectedGB = [Math]::Round($script:totalGB * (1 + $AnnualGrowthPct), 2)
+  $capacityChart = New-SvgCapacityForecast -CurrentGB $script:totalGB -ProjectedGB $projectedGB -RecommendedGB $script:suggestedStartGB
+
+  if ($capacityChart) {
+    $htmlParts.Add(@"
+  <div class="capacity-forecast">
+    <div class="capacity-forecast-title">Capacity Forecast</div>
+    <div class="svg-container">
+$capacityChart
+    </div>
+  </div>
+"@)
+  }
+
+  # =============================
+  # FULL MODE: License Overview with Bar Chart
   # =============================
   if ($Full -and $script:licenseData -and $script:licenseData -isnot [string] -and @($script:licenseData).Count -gt 0) {
+    # Build bar chart items from license data
+    $barItems = New-Object System.Collections.Generic.List[object]
+    foreach ($lic in ($script:licenseData | Select-Object -First 8)) {
+      $barColor = "#0078D4"
+      if ($lic.UtilizationPct -ge 90) { $barColor = "#D13438" }
+      elseif ($lic.UtilizationPct -ge 70) { $barColor = "#F7630C" }
+      $barItems.Add(@{
+        Label    = $lic.DisplayName
+        Value    = $lic.UtilizationPct
+        MaxValue = 100
+        Color    = $barColor
+      })
+    }
+    $licBarChart = New-SvgHorizontalBarChart -Items $barItems
+
     $licRows = ""
     foreach ($lic in $script:licenseData) {
       $barColor = _Get-ProgressColor $lic.UtilizationPct
@@ -473,6 +726,9 @@ $css
     $htmlParts.Add(@"
   <div class="section">
     <h2 class="section-title">License Overview</h2>
+    <div class="svg-container" style="margin-bottom: 24px;">
+$licBarChart
+    </div>
     <div class="table-container">
       <table>
         <thead>
@@ -494,53 +750,74 @@ $licRows
 "@)
   }
 
-  # Workload Analysis
+  # =============================
+  # Workload Analysis with Donut Chart
+  # =============================
+  $donutSegments = New-Object System.Collections.Generic.List[object]
+  if ($script:exGB -gt 0) {
+    $donutSegments.Add(@{ Label = "Exchange Online"; Value = $script:exGB; Color = "#0078D4" })
+  }
+  if ($script:odGB -gt 0) {
+    $donutSegments.Add(@{ Label = "OneDrive"; Value = $script:odGB; Color = "#106EBE" })
+  }
+  if ($script:spGB -gt 0) {
+    $donutSegments.Add(@{ Label = "SharePoint"; Value = $script:spGB; Color = "#00B336" })
+  }
+  $donutChart = New-SvgDonutChart -Segments $donutSegments -CenterLabel (Format-Storage $script:totalGB) -CenterSubLabel "Total"
+
   $htmlParts.Add(@"
   <div class="section">
     <h2 class="section-title">Workload Analysis</h2>
-    <div class="table-container">
-      <table>
-        <thead>
-          <tr>
-            <th>Workload</th>
-            <th>Objects</th>
-            <th>Secondary</th>
-            <th>Source (GB)</th>
-            <th>Source (GiB)</th>
-            <th>Annual Growth</th>
-            <th>Notes</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><strong>Exchange Online</strong></td>
-            <td>$($script:exUsers.Count)</td>
-            <td>$($script:exShared.Count) shared</td>
-            <td>$($script:exGB)</td>
-            <td>$($script:exGiB)</td>
-            <td>$(Format-Pct $script:exGrowth)</td>
-            <td>Archive/RIF included only if enabled</td>
-          </tr>
-          <tr>
-            <td><strong>OneDrive for Business</strong></td>
-            <td>$($script:odActive.Count)</td>
-            <td>&mdash;</td>
-            <td>$($script:odGB)</td>
-            <td>$($script:odGiB)</td>
-            <td>$(Format-Pct $script:odGrowth)</td>
-            <td>Filtered by AD group (if specified)</td>
-          </tr>
-          <tr>
-            <td><strong>SharePoint Online</strong></td>
-            <td>$($script:spActive.Count)</td>
-            <td>$($script:spFiles) files</td>
-            <td>$($script:spGB)</td>
-            <td>$($script:spGiB)</td>
-            <td>$(Format-Pct $script:spGrowth)</td>
-            <td>Tenant-wide (no group filtering)</td>
-          </tr>
-        </tbody>
-      </table>
+    <div class="workload-flex">
+      <div class="workload-chart svg-container">
+$donutChart
+      </div>
+      <div class="workload-table">
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Workload</th>
+                <th>Objects</th>
+                <th>Secondary</th>
+                <th>Source (GB)</th>
+                <th>Source (GiB)</th>
+                <th>Growth</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Exchange Online</strong></td>
+                <td>$($script:exUsers.Count)</td>
+                <td>$($script:exShared.Count) shared</td>
+                <td>$($script:exGB)</td>
+                <td>$($script:exGiB)</td>
+                <td>$(Format-Pct $script:exGrowth)</td>
+                <td>Archive/RIF if enabled</td>
+              </tr>
+              <tr>
+                <td><strong>OneDrive for Business</strong></td>
+                <td>$($script:odActive.Count)</td>
+                <td>&mdash;</td>
+                <td>$($script:odGB)</td>
+                <td>$($script:odGiB)</td>
+                <td>$(Format-Pct $script:odGrowth)</td>
+                <td>AD group filtered</td>
+              </tr>
+              <tr>
+                <td><strong>SharePoint Online</strong></td>
+                <td>$($script:spActive.Count)</td>
+                <td>$($script:spFiles) files</td>
+                <td>$($script:spGB)</td>
+                <td>$($script:spGiB)</td>
+                <td>$(Format-Pct $script:spGrowth)</td>
+                <td>Tenant-wide</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
 "@)
@@ -549,8 +826,6 @@ $licRows
   # FULL MODE: Data Protection Landscape
   # =============================
   if ($Full) {
-    $teamsDisplay = if ($script:teamsCount -is [int]) { "$($script:teamsCount) Teams" } else { Format-CountValue $script:teamsCount }
-
     $htmlParts.Add(@"
   <div class="section">
     <h2 class="section-title">Data Protection Landscape</h2>
@@ -608,14 +883,42 @@ $licRows
   }
 
   # =============================
-  # FULL MODE: Identity & Access Security
+  # FULL MODE: Identity & Access Security with Risk Matrix
   # =============================
   if ($Full) {
     $globalAdminCount = if ($script:globalAdmins -is [System.Collections.IEnumerable] -and $script:globalAdmins -isnot [string]) { @($script:globalAdmins).Count } else { $null }
-    $adminDot = if ($globalAdminCount -ne $null -and $globalAdminCount -le $ADMIN_THRESHOLD) { "green" } elseif ($globalAdminCount -ne $null) { "yellow" } else { "gray" }
+    $adminDot = if ($null -ne $globalAdminCount -and $globalAdminCount -le $ADMIN_THRESHOLD) { "green" } elseif ($null -ne $globalAdminCount) { "yellow" } else { "gray" }
 
     $riskyTotal = if ($script:riskyUsers -is [hashtable]) { $script:riskyUsers.Total } else { $null }
-    $riskyDot = if ($riskyTotal -ne $null -and $riskyTotal -eq 0) { "green" } elseif ($riskyTotal -ne $null -and $script:riskyUsers.High -eq 0) { "yellow" } elseif ($riskyTotal -ne $null) { "red" } else { "gray" }
+    $riskyDot = if ($null -ne $riskyTotal -and $riskyTotal -eq 0) { "green" } elseif ($null -ne $riskyTotal -and $script:riskyUsers.High -eq 0) { "yellow" } elseif ($null -ne $riskyTotal) { "red" } else { "gray" }
+
+    # Build risk matrix from findings
+    $riskMatrixData = @{}
+    $riskCategories = New-Object System.Collections.Generic.List[string]
+    if ($script:findings -and $script:findings.Count -gt 0) {
+      foreach ($f in $script:findings) {
+        $cat = "General"
+        if ($f.Title -match "MFA|Multi-Factor|Authentication") { $cat = "Identity" }
+        elseif ($f.Title -match "Admin|Privilege|Role") { $cat = "Privilege" }
+        elseif ($f.Title -match "Stale|Inactive|Guest") { $cat = "Hygiene" }
+        elseif ($f.Title -match "Conditional|Access|Policy") { $cat = "Access" }
+        elseif ($f.Title -match "Backup|Recovery|Data") { $cat = "Data" }
+        elseif ($f.Title -match "Score|Secure|Security") { $cat = "Security" }
+
+        if (-not $riskCategories.Contains($cat)) { $riskCategories.Add($cat) }
+        $key = "$cat|$($f.Severity)"
+        if ($riskMatrixData.ContainsKey($key)) {
+          $riskMatrixData[$key] = $riskMatrixData[$key] + 1
+        } else {
+          $riskMatrixData[$key] = 1
+        }
+      }
+    }
+
+    $riskMatrixHtml = ""
+    if ($riskCategories.Count -gt 0) {
+      $riskMatrixHtml = New-SvgRiskMatrix -Categories $riskCategories -Severities @("High", "Medium", "Low") -Data $riskMatrixData
+    }
 
     # MFA progress bar
     $mfaBarHtml = ""
@@ -651,9 +954,11 @@ $licRows
   <div class="section">
     <h2 class="section-title">Identity &amp; Access Security</h2>
 
+    $(if($riskMatrixHtml){"<div class='svg-container' style='margin-bottom: 24px;'>$riskMatrixHtml</div>"}else{""})
+
     <div class="identity-kpi-grid">
       <div class="identity-kpi">
-        <div class="identity-kpi-value"><span class="status-dot $adminDot"></span>$(if($globalAdminCount -ne $null){$globalAdminCount}else{Format-CountValue $script:globalAdmins})</div>
+        <div class="identity-kpi-value"><span class="status-dot $adminDot"></span>$(if($null -ne $globalAdminCount){$globalAdminCount}else{Format-CountValue $script:globalAdmins})</div>
         <div class="identity-kpi-label">Global Admins</div>
       </div>
       <div class="identity-kpi">
@@ -665,7 +970,7 @@ $licRows
         <div class="identity-kpi-label">Stale Accounts (${STALE_DAYS}d+)</div>
       </div>
       <div class="identity-kpi">
-        <div class="identity-kpi-value"><span class="status-dot $riskyDot"></span>$(if($riskyTotal -ne $null){$riskyTotal}else{Format-CountValue $script:riskyUsers})</div>
+        <div class="identity-kpi-value"><span class="status-dot $riskyDot"></span>$(if($null -ne $riskyTotal){$riskyTotal}else{Format-CountValue $script:riskyUsers})</div>
         <div class="identity-kpi-label">Risky Users</div>
       </div>
     </div>
@@ -740,8 +1045,8 @@ $secScoreBarHtml
           <tr><td>SharePoint Daily Change Rate (Modeled)</td><td>$(Format-Pct $ChangeRateSharePoint)</td></tr>
           <tr><td>Capacity Buffer (Heuristic)</td><td>$(Format-Pct $BufferPct)</td></tr>
           <tr><td>Report Period</td><td>$Period days</td></tr>
-          <tr><td>Include AD Group</td><td>$(if([string]::IsNullOrWhiteSpace($ADGroup)){"None"}else{[System.Net.WebUtility]::HtmlEncode($ADGroup)})</td></tr>
-          <tr><td>Exclude AD Group</td><td>$(if([string]::IsNullOrWhiteSpace($ExcludeADGroup)){"None"}else{[System.Net.WebUtility]::HtmlEncode($ExcludeADGroup)})</td></tr>
+          <tr><td>Include AD Group</td><td>$(if([string]::IsNullOrWhiteSpace($ADGroup)){"None"}else{Escape-Html $ADGroup})</td></tr>
+          <tr><td>Exclude AD Group</td><td>$(if([string]::IsNullOrWhiteSpace($ExcludeADGroup)){"None"}else{Escape-Html $ExcludeADGroup})</td></tr>
           <tr><td>Archive Mailboxes</td><td>$(if($IncludeArchive){"Included"}else{"Not included"})</td></tr>
           <tr><td>Recoverable Items</td><td>$(if($IncludeRecoverableItems){"Included"}else{"Not included"})</td></tr>
         </tbody>
@@ -751,15 +1056,20 @@ $secScoreBarHtml
 "@)
 
   # =============================
-  # FULL MODE: Recommendations
+  # FULL MODE: Recommendations (Grouped by Phase)
   # =============================
   if ($Full -and $script:recommendations -and $script:recommendations.Count -gt 0) {
     $recsHtml = ""
-    $tierOrder = @("Immediate", "Short-Term", "Strategic")
-    foreach ($tier in $tierOrder) {
-      $tierRecs = @($script:recommendations | Where-Object { $_.Tier -eq $tier })
+    $tierOrder = @(
+      @{ Name = "Immediate"; Phase = "Phase 1: Immediate Actions" }
+      @{ Name = "Short-Term"; Phase = "Phase 2: Short-Term Improvements" }
+      @{ Name = "Strategic"; Phase = "Phase 3: Strategic Initiatives" }
+    )
+    foreach ($tierInfo in $tierOrder) {
+      $tierRecs = @($script:recommendations | Where-Object { $_.Tier -eq $tierInfo.Name })
       if ($tierRecs.Count -eq 0) { continue }
-      $tierClass = $tier.ToLower() -replace ' ', '-'
+      $tierClass = $tierInfo.Name.ToLower() -replace ' ', '-'
+      $recsHtml += "    <div class=`"rec-phase-header`">$(Escape-Html $tierInfo.Phase)</div>`n"
       foreach ($r in $tierRecs) {
         $recsHtml += @"
       <div class="recommendation-card tier-$tierClass">
@@ -802,11 +1112,14 @@ $artifactItems
   </div>
 "@)
 
-  # Footer
+  # =============================
+  # Professional Footer
+  # =============================
   $htmlParts.Add(@"
-  <footer class="footer">
-    <div>Generated by Veeam M365 Sizing Tool | $(Get-Date -Format 'yyyy-MM-dd HH:mm')</div>
-    <div>Microsoft 365 Backup Assessment Report</div>
+  <footer class="exec-footer">
+    <div class="exec-footer-org">Prepared for $(Escape-Html $orgDisplay)</div>
+    <div class="exec-footer-conf">This report contains confidential organizational data. Handle according to your data classification policy.</div>
+    <div class="exec-footer-stamp">$(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC | Veeam M365 Sizing Tool | Community Edition</div>
   </footer>
 </div>
 </body>

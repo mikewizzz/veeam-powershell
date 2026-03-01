@@ -128,6 +128,7 @@ $outZip      = Join-Path $OutFolder "Veeam-M365-SizingBundle-$stamp.zip"
 $libPath = Join-Path $PSScriptRoot "lib"
 $requiredLibs = @(
   "Constants.ps1",
+  "Charts.ps1",
   "Logging.ps1",
   "GraphApi.ps1",
   "Auth.ps1",
