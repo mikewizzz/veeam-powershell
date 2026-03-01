@@ -3,6 +3,9 @@
 .claude/settings.local.json
 .claude/worktrees/
 
+# Scratch/planning files
+TEST_PLAN.md
+
 # OS files
 .DS_Store
 Thumbs.db
