@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # =============================
 # HTML Report Generation
 # =============================
@@ -26,6 +27,15 @@ function New-HTMLReport {
   $reportDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
   $duration = (Get-Date) - $script:StartTime
   $durationStr = "{0:hh\:mm\:ss}" -f $duration
+
+  # HTML-escape all values that may contain user input or API-sourced data
+  $safeVBRServer = _EscapeHTML $VBRServer
+  $safePrismCentral = _EscapeHTML $PrismCentral
+  $safeNetworkName = _EscapeHTML $IsolatedNetwork.Name
+  $safeNetworkVlan = _EscapeHTML "$($IsolatedNetwork.VlanId)"
+  $safeCustomScript = _EscapeHTML $(if ($TestCustomScript) { $TestCustomScript } else { "None" })
+  $safeHttpEndpoints = _EscapeHTML $(if ($TestHttpEndpoints) { "$($TestHttpEndpoints -join ', ')" } else { "None" })
+  $safePorts = _EscapeHTML $(if ($TestPorts) { "$($TestPorts -join ', ')" } else { "None" })
 
   # Calculate summary stats
   $summary = _GetTestSummary -TestResults $TestResults
@@ -379,8 +389,8 @@ tbody tr:hover { background: var(--ms-gray-10); }
     <div class="header-meta">
       <span><strong>Generated:</strong> $reportDate</span>
       <span><strong>Duration:</strong> $durationStr</span>
-      <span><strong>VBR Server:</strong> $VBRServer</span>
-      <span><strong>Prism Central:</strong> $PrismCentral</span>
+      <span><strong>VBR Server:</strong> $safeVBRServer</span>
+      <span><strong>Prism Central:</strong> $safePrismCentral</span>
     </div>
   </div>
 
@@ -415,8 +425,8 @@ tbody tr:hover { background: var(--ms-gray-10); }
     </div>
     <div class="kpi-card nutanix">
       <div class="kpi-label">Isolated Network</div>
-      <div class="kpi-value" style="font-size: 20px;">$($IsolatedNetwork.Name)</div>
-      <div class="kpi-subtext">VLAN $($IsolatedNetwork.VlanId)</div>
+      <div class="kpi-value" style="font-size: 20px;">$safeNetworkName</div>
+      <div class="kpi-subtext">VLAN $safeNetworkVlan</div>
     </div>
   </div>
 
@@ -461,15 +471,15 @@ $testDetailRows
     <div class="info-card">
       <div class="info-card-title">SureBackup Parameters</div>
       <div class="info-card-text">
-        <strong>VBR Server:</strong> $VBRServer |
-        <strong>Prism Central:</strong> $PrismCentral<br>
-        <strong>Isolated Network:</strong> $($IsolatedNetwork.Name) (VLAN $($IsolatedNetwork.VlanId))<br>
+        <strong>VBR Server:</strong> $safeVBRServer |
+        <strong>Prism Central:</strong> $safePrismCentral<br>
+        <strong>Isolated Network:</strong> $safeNetworkName (VLAN $safeNetworkVlan)<br>
         <strong>Boot Timeout:</strong> ${TestBootTimeoutSec}s |
         <strong>Ping Test:</strong> $TestPing |
-        <strong>Port Tests:</strong> $(if($TestPorts){"$($TestPorts -join ', ')"}else{"None"})<br>
+        <strong>Port Tests:</strong> $safePorts<br>
         <strong>DNS Test:</strong> $TestDNS |
-        <strong>HTTP Endpoints:</strong> $(if($TestHttpEndpoints){"$($TestHttpEndpoints -join ', ')"}else{"None"})<br>
-        <strong>Custom Script:</strong> $(if($TestCustomScript){$TestCustomScript}else{"None"}) |
+        <strong>HTTP Endpoints:</strong> $safeHttpEndpoints<br>
+        <strong>Custom Script:</strong> $safeCustomScript |
         <strong>Max Concurrent VMs:</strong> $MaxConcurrentVMs<br>
         <strong>Application Groups:</strong> $(if($ApplicationGroups){"$($ApplicationGroups.Count) group(s) defined"}else{"None (parallel recovery)"})
       </div>

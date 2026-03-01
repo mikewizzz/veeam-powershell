@@ -162,7 +162,7 @@
   # Interactive mode - search/filter VMs by name, then select which to test
 
 .NOTES
-  Version: 1.0.0
+  Version: 1.1.0
   Author: Community Contributors
   Date: 2026-02-28
   Requires: PowerShell 5.1+ (7.x recommended)
@@ -344,7 +344,7 @@ try {
 
   # Get restore points via REST API and build info objects
   $allPluginRPs = Get-VBAHVRestorePoints -VMNames $VMNames
-  $restorePoints = @()
+  $restorePointsList = New-Object System.Collections.Generic.List[object]
 
   if ($allPluginRPs -and @($allPluginRPs).Count -gt 0) {
     # Group by VM name and take the latest restore point per VM
@@ -359,10 +359,12 @@ try {
         BackupSize   = if ($latestRP.backupSize) { $latestRP.backupSize } else { 0 }
         IsConsistent = if ($null -ne $latestRP.isConsistent) { $latestRP.isConsistent } else { $true }
       }
-      $restorePoints += $rpInfo
+      $restorePointsList.Add($rpInfo)
       Write-Log "  Found restore point for '$($rpInfo.VMName)' from $($rpInfo.CreationTime.ToString('yyyy-MM-dd HH:mm'))" -Level "INFO"
     }
   }
+
+  $restorePoints = @($restorePointsList)
 
   if ($restorePoints.Count -eq 0) {
     throw "No restore points found for any AHV VMs. Ensure backups have completed successfully."

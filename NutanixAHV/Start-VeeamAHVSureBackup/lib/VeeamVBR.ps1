@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # ============================================================================
 # Veeam Plug-in for Nutanix AHV REST API v9
 # ============================================================================
@@ -45,7 +46,7 @@ function Initialize-VBAHVPluginConnection {
     ErrorAction = "Stop"
   }
 
-  if ($PSVersionTable.PSVersion.Major -ge 7) {
+  if ($SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 7) {
     $tokenParams.SkipCertificateCheck = $true
   }
 
@@ -101,7 +102,7 @@ function Refresh-VBAHVToken {
     ErrorAction = "Stop"
   }
 
-  if ($PSVersionTable.PSVersion.Major -ge 7) {
+  if ($SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 7) {
     $refreshParams.SkipCertificateCheck = $true
   }
 
@@ -171,7 +172,7 @@ function Invoke-VBAHVPluginAPI {
         $params.Body = ($Body | ConvertTo-Json -Depth 20)
       }
 
-      if ($PSVersionTable.PSVersion.Major -ge 7) {
+      if ($SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 7) {
         $params.SkipCertificateCheck = $true
       }
 

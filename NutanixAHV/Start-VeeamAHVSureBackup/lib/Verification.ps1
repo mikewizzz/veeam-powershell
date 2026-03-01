@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # =============================
 # SureBackup Verification Tests
 # =============================
@@ -57,14 +58,14 @@ function Test-VMPing {
   $startTime = Get-Date
 
   try {
-    $pingResult = Test-Connection -ComputerName $IPAddress -Count 4 -Quiet -ErrorAction SilentlyContinue
-    $passed = $pingResult
+    # Single call to avoid doubling ICMP traffic (PS 5.1 sends synchronously)
+    $pingResults = Test-Connection -ComputerName $IPAddress -Count 4 -ErrorAction SilentlyContinue
+    $passed = ($null -ne $pingResults -and @($pingResults).Count -gt 0)
 
     if ($passed) {
-      # Get latency details (PS 7 uses 'Latency', PS 5.1 uses 'ResponseTime')
-      $pingDetail = Test-Connection -ComputerName $IPAddress -Count 2 -ErrorAction SilentlyContinue
-      $latencyProp = if ($pingDetail[0].PSObject.Properties['Latency']) { 'Latency' } else { 'ResponseTime' }
-      $avgLatency = ($pingDetail | Measure-Object -Property $latencyProp -Average).Average
+      # PS 7 uses 'Latency', PS 5.1 uses 'ResponseTime'
+      $latencyProp = if ($pingResults[0].PSObject.Properties['Latency']) { 'Latency' } else { 'ResponseTime' }
+      $avgLatency = ($pingResults | Measure-Object -Property $latencyProp -Average).Average
       $details = "Reply from $IPAddress - Avg latency: $([math]::Round($avgLatency, 1))ms"
     }
     else {

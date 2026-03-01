@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # =============================
 # Nutanix Prism Central REST API (v3 + v4)
 # =============================

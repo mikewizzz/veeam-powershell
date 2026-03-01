@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # =============================
 # DRY Helper Functions
 # =============================
