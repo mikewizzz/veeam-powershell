@@ -307,7 +307,7 @@ function Get-VBAHVPrismCentralVMs {
     return $filtered
   }
 
-  return @($allVMs)
+  return ,$allVMs.ToArray()
 }
 
 # ============================================================================
