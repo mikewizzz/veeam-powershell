@@ -21,6 +21,12 @@ $STALE_DAYS           = 90     # Accounts inactive for 90+ days
 $CA_POLICY_THRESHOLD  = 3      # Fewer than 3 CA policies = Medium severity
 
 # =============================
+# Zero Trust Maturity Thresholds
+# =============================
+$ZT_ADVANCED_THRESHOLD  = 67   # 67+ = Advanced maturity
+$ZT_DEVELOPING_THRESHOLD = 34  # 34-66 = Developing maturity; below 34 = Initial
+
+# =============================
 # Unit Conversion Functions
 # =============================
 

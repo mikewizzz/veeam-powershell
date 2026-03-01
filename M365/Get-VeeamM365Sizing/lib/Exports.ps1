@@ -98,6 +98,14 @@ function Export-SummaryData {
     $summaryProps["SecureScore"]       = if ($script:secureScore -is [hashtable]) { $script:secureScore.Percentage } else { $script:secureScore }
     $summaryProps["TeamsCount"]        = $script:teamsCount
     $summaryProps["ProtectionReadinessScore"] = $script:readinessScore
+    if ($script:ztScores -is [hashtable]) {
+      $summaryProps["ZT_Identity"]  = $script:ztScores.Identity
+      $summaryProps["ZT_Devices"]   = $script:ztScores.Devices
+      $summaryProps["ZT_Access"]    = $script:ztScores.Access
+      $summaryProps["ZT_Data"]      = $script:ztScores.Data
+      $summaryProps["ZT_Apps"]      = $script:ztScores.Apps
+      $summaryProps["ZT_Overall"]   = $script:ztScores.Overall
+    }
   }
 
   $summary = [pscustomobject]$summaryProps
@@ -179,6 +187,18 @@ function Export-SecurityData {
       [pscustomobject]@{ Section="Identity"; Name="SecureScore_Pct"; Value=$(if($script:secureScore -is [hashtable]){$script:secureScore.Percentage}else{$script:secureScore}) },
       [pscustomobject]@{ Section="Collaboration"; Name="TeamsCount"; Value=$script:teamsCount }
     )
+
+    # Zero Trust pillar scores
+    if ($script:ztScores -is [hashtable]) {
+      $sec += @(
+        [pscustomobject]@{ Section="ZeroTrust"; Name="Identity_Score"; Value=$script:ztScores.Identity },
+        [pscustomobject]@{ Section="ZeroTrust"; Name="Devices_Score"; Value=$script:ztScores.Devices },
+        [pscustomobject]@{ Section="ZeroTrust"; Name="Access_Score"; Value=$script:ztScores.Access },
+        [pscustomobject]@{ Section="ZeroTrust"; Name="Data_Score"; Value=$script:ztScores.Data },
+        [pscustomobject]@{ Section="ZeroTrust"; Name="Apps_Score"; Value=$script:ztScores.Apps },
+        [pscustomobject]@{ Section="ZeroTrust"; Name="Overall_Score"; Value=$script:ztScores.Overall }
+      )
+    }
   }
   $sec | Export-Csv -NoTypeInformation -Path $outSecurity
   return $sec
@@ -320,6 +340,16 @@ function Export-JsonBundle {
       SecureScore      = $script:secureScore
       TeamsCount       = $script:teamsCount
       ReadinessScore   = $script:readinessScore
+    }
+    if ($script:ztScores -is [hashtable]) {
+      $bundle["ZeroTrustScores"] = [ordered]@{
+        Identity = $script:ztScores.Identity
+        Devices  = $script:ztScores.Devices
+        Access   = $script:ztScores.Access
+        Data     = $script:ztScores.Data
+        Apps     = $script:ztScores.Apps
+        Overall  = $script:ztScores.Overall
+      }
     }
   }
 

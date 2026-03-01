@@ -137,6 +137,38 @@ function Get-Findings {
     $findings.Add((New-Finding -Title "External Guest Users Present" -Detail "$($script:guestUserCount) guest user(s) in the directory. Ensure guest access reviews are configured to periodically validate external user access." -Severity "Low" -Category "Identity" -Tone "Informational"))
   }
 
+  # --- Zero Trust Identity Gap ---
+  if ($script:ztScores -is [hashtable] -and $script:ztScores.Identity -lt $ZT_ADVANCED_THRESHOLD) {
+    $identityLabel = if ($script:ztScores.Identity -lt $ZT_DEVELOPING_THRESHOLD) { "Initial" } else { "Developing" }
+    $findings.Add((New-Finding -Title "Zero Trust Identity Gap" -Detail "Identity pillar scored $($script:ztScores.Identity)/100 ($identityLabel maturity). Strengthening MFA coverage, reducing privileged accounts, and remediating risky users would improve this score." -Severity $(if($script:ztScores.Identity -lt $ZT_DEVELOPING_THRESHOLD){"High"}else{"Medium"}) -Category "Identity" -Tone "Opportunity"))
+  }
+
+  # --- Device Management Gap ---
+  if ($script:ztScores -is [hashtable] -and $script:ztScores.Devices -lt $ZT_DEVELOPING_THRESHOLD) {
+    $findings.Add((New-Finding -Title "Device Management Gap" -Detail "Devices pillar scored $($script:ztScores.Devices)/100 (Initial maturity). Consider expanding Intune enrollment and compliance policies to establish device trust." -Severity "Medium" -Category "Data Protection" -Tone "Opportunity"))
+  }
+
+  # --- Entra ID Configuration at Risk ---
+  if ($script:caPolicyCount -is [int] -and $script:caPolicyCount -gt 0) {
+    $configCount = $script:caPolicyCount
+    if ($script:intuneCompliancePolicies -is [int]) { $configCount += $script:intuneCompliancePolicies }
+    if ($script:intuneDeviceConfigurations -is [int]) { $configCount += $script:intuneDeviceConfigurations }
+    if ($configCount -gt 0) {
+      $findings.Add((New-Finding -Title "Entra ID Configuration at Risk" -Detail "$configCount security configurations (Conditional Access, compliance, device) detected. These configurations represent significant administrative investment and should be included in backup scope." -Severity "Medium" -Category "Data Protection" -Tone "Opportunity"))
+    }
+  }
+
+  # --- Privileged Access Risk ---
+  if ($script:globalAdmins -is [System.Collections.IEnumerable] -and $script:globalAdmins -isnot [string]) {
+    $privAdminCount = @($script:globalAdmins).Count
+    if ($privAdminCount -gt 0 -and $script:mfaCount -is [int] -and $script:userCount -is [int] -and $script:userCount -gt 0) {
+      $privMfaPct = $script:mfaCount / $script:userCount
+      if ($privMfaPct -lt 1.0) {
+        $findings.Add((New-Finding -Title "Privileged Access Risk" -Detail "$privAdminCount Global Administrators exist while MFA coverage is $(Format-Pct $privMfaPct). Any privileged account without MFA is a critical attack vector." -Severity "High" -Category "Identity" -Tone "Opportunity"))
+      }
+    }
+  }
+
   # --- Data Protection: Dataset summary ---
   $totalDataGB = $script:exGB + $script:odGB + $script:spGB
   if ($totalDataGB -gt 0) {
@@ -203,6 +235,24 @@ function Get-Recommendations {
   # --- Guest Users ---
   if ($script:guestUserCount -is [int] -and $script:guestUserCount -gt 0) {
     $recs.Add((New-Recommendation -Title "Implement Guest Access Reviews" -Detail "Configure recurring access reviews for the $($script:guestUserCount) guest users. Set reviews to quarterly cadence with automatic removal of unreviewed access." -Rationale "Unmanaged guest access can lead to data leakage and compliance violations." -Tier "Short-Term"))
+  }
+
+  # --- Protect Entra ID Configuration ---
+  if ($script:caPolicyCount -is [int] -and $script:caPolicyCount -gt 0) {
+    $entConfigCount = $script:caPolicyCount
+    if ($script:intuneCompliancePolicies -is [int]) { $entConfigCount += $script:intuneCompliancePolicies }
+    if ($script:intuneDeviceConfigurations -is [int]) { $entConfigCount += $script:intuneDeviceConfigurations }
+    if ($entConfigCount -gt 0) {
+      $recs.Add((New-Recommendation -Title "Protect Entra ID Configuration" -Detail "Back up the $entConfigCount Conditional Access, compliance, and device configuration policies. Recreating these configurations manually after a security incident can take days." -Rationale "Entra ID configurations represent significant administrative investment and are critical to security posture. Loss requires manual reconstruction." -Tier "Immediate"))
+    }
+  }
+
+  # --- Establish Recovery Objectives ---
+  $recs.Add((New-Recommendation -Title "Establish Recovery Objectives" -Detail "Define RPO (Recovery Point Objective) and RTO (Recovery Time Objective) targets for each M365 workload. Use this assessment's data scope as input to business continuity planning." -Rationale "Without defined recovery objectives, organizations cannot validate whether their backup configuration meets business requirements." -Tier "Strategic"))
+
+  # --- Close Device Compliance Gaps ---
+  if ($script:ztScores -is [hashtable] -and $script:ztScores.Devices -lt $ZT_DEVELOPING_THRESHOLD) {
+    $recs.Add((New-Recommendation -Title "Close Device Compliance Gaps" -Detail "Expand Intune enrollment and deploy device compliance policies. Current device pillar maturity is Initial ($($script:ztScores.Devices)/100)." -Rationale "Unmanaged devices accessing corporate data represent a significant data exfiltration and compromise vector." -Tier "Short-Term"))
   }
 
   # --- Backup Strategy ---
@@ -290,4 +340,99 @@ function Get-ProtectionReadinessScore {
   # Normalize to 0-100 based on available signals
   if ($totalWeight -eq 0) { return $null }
   return [int][math]::Round(($earnedPoints / $totalWeight) * 100, 0)
+}
+
+<#
+.SYNOPSIS
+  Calculates Zero Trust maturity scores across 5 pillars.
+.DESCRIPTION
+  Maps existing collected data to Identity, Devices, Access, Data, and Apps
+  pillars, each scored 0-100. Uses only data already collected — no new API calls.
+.NOTES
+  Returns hashtable with pillar scores and overall average. Only runs in Full mode.
+#>
+function Get-ZeroTrustScores {
+  if (-not $Full) { return $null }
+
+  # --- Identity Pillar (MFA + admin count + risky users) ---
+  $idScore = 50  # baseline
+  if ($script:mfaCount -is [int] -and $script:userCount -is [int] -and $script:userCount -gt 0) {
+    $idScore = [int][math]::Round(($script:mfaCount / $script:userCount) * 70, 0)
+  }
+  if ($script:globalAdmins -is [System.Collections.IEnumerable] -and $script:globalAdmins -isnot [string]) {
+    $ac = @($script:globalAdmins).Count
+    if ($ac -le 2) { $idScore += 20 }
+    elseif ($ac -le $ADMIN_THRESHOLD) { $idScore += 15 }
+    elseif ($ac -le 8) { $idScore += 8 }
+    else { $idScore += 3 }
+  }
+  if ($script:riskyUsers -is [hashtable] -and $script:riskyUsers.Total -eq 0) { $idScore += 10 }
+  elseif ($script:riskyUsers -is [hashtable] -and $script:riskyUsers.High -eq 0) { $idScore += 5 }
+  $idScore = [math]::Min($idScore, 100)
+
+  # --- Devices Pillar (Intune presence + policy count) ---
+  $devScore = 0
+  if ($script:intuneManagedDevices -is [int] -and $script:intuneManagedDevices -gt 0) { $devScore += 40 }
+  if ($script:intuneCompliancePolicies -is [int] -and $script:intuneCompliancePolicies -gt 0) {
+    $devScore += [math]::Min($script:intuneCompliancePolicies * 10, 30)
+  }
+  if ($script:intuneDeviceConfigurations -is [int] -and $script:intuneDeviceConfigurations -gt 0) {
+    $devScore += [math]::Min($script:intuneDeviceConfigurations * 5, 20)
+  }
+  if ($script:intuneConfigurationPolicies -is [int] -and $script:intuneConfigurationPolicies -gt 0) {
+    $devScore += [math]::Min($script:intuneConfigurationPolicies * 5, 10)
+  }
+  $devScore = [math]::Min($devScore, 100)
+
+  # --- Access Pillar (CA policies + named locations + stale hygiene) ---
+  $accScore = 0
+  if ($script:caPolicyCount -is [int]) {
+    $accScore += [math]::Min($script:caPolicyCount * 12, 50)
+  }
+  if ($script:caNamedLocCount -is [int] -and $script:caNamedLocCount -gt 0) {
+    $accScore += [math]::Min($script:caNamedLocCount * 8, 20)
+  }
+  if ($script:staleAccounts -is [int] -and $script:userCount -is [int] -and $script:userCount -gt 0) {
+    $stalePctZt = $script:staleAccounts / $script:userCount
+    if ($stalePctZt -le 0.03) { $accScore += 30 }
+    elseif ($stalePctZt -le $STALE_THRESHOLD_PCT) { $accScore += 20 }
+    elseif ($stalePctZt -le 0.20) { $accScore += 10 }
+    else { $accScore += 5 }
+  }
+  $accScore = [math]::Min($accScore, 100)
+
+  # --- Data Pillar (workload coverage breadth) ---
+  $datScore = 0
+  if ($script:exGB -gt 0) { $datScore += 25 }
+  if ($script:odGB -gt 0) { $datScore += 25 }
+  if ($script:spGB -gt 0) { $datScore += 25 }
+  if ($script:teamsCount -is [int] -and $script:teamsCount -gt 0) { $datScore += 25 }
+  $datScore = [math]::Min($datScore, 100)
+
+  # --- Apps Pillar (app surface + guest governance) ---
+  $appScore = 30  # baseline for having data
+  if ($script:appRegCount -is [int] -and $script:appRegCount -gt 0) { $appScore += 15 }
+  if ($script:spnCount -is [int] -and $script:spnCount -gt 0) { $appScore += 15 }
+  if ($script:guestUserCount -is [int]) {
+    if ($script:guestUserCount -eq 0) { $appScore += 20 }
+    elseif ($script:userCount -is [int] -and $script:userCount -gt 0) {
+      $guestRatio = $script:guestUserCount / $script:userCount
+      if ($guestRatio -le 0.10) { $appScore += 15 }
+      elseif ($guestRatio -le 0.25) { $appScore += 10 }
+      else { $appScore += 5 }
+    }
+  }
+  if ($script:caPolicyCount -is [int] -and $script:caPolicyCount -ge $CA_POLICY_THRESHOLD) { $appScore += 20 }
+  $appScore = [math]::Min($appScore, 100)
+
+  $overall = [int][math]::Round(($idScore + $devScore + $accScore + $datScore + $appScore) / 5, 0)
+
+  return @{
+    Identity = $idScore
+    Devices  = $devScore
+    Access   = $accScore
+    Data     = $datScore
+    Apps     = $appScore
+    Overall  = $overall
+  }
 }
