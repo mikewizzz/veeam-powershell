@@ -1462,10 +1462,12 @@ Describe "VBAHV Plugin REST API" {
   Context "Get-VBAHVJobs" {
     It "returns all jobs from REST API" {
       Mock Invoke-VBAHVPluginAPI {
-        return @(
-          @{ name = "AHV-Job1"; id = "j1" },
-          @{ name = "AHV-Job2"; id = "j2" }
-        )
+        return @{
+          results = @(
+            @{ name = "AHV-Job1"; id = "j1" },
+            @{ name = "AHV-Job2"; id = "j2" }
+          )
+        }
       }
 
       $result = Get-VBAHVJobs
@@ -1474,10 +1476,12 @@ Describe "VBAHV Plugin REST API" {
 
     It "filters by job names" {
       Mock Invoke-VBAHVPluginAPI {
-        return @(
-          @{ name = "AHV-Job1"; id = "j1" },
-          @{ name = "AHV-Job2"; id = "j2" }
-        )
+        return @{
+          results = @(
+            @{ name = "AHV-Job1"; id = "j1" },
+            @{ name = "AHV-Job2"; id = "j2" }
+          )
+        }
       }
 
       $result = @(Get-VBAHVJobs -JobNames @("AHV-Job1"))
@@ -1486,7 +1490,7 @@ Describe "VBAHV Plugin REST API" {
     }
 
     It "throws when no jobs found" {
-      Mock Invoke-VBAHVPluginAPI { return @() }
+      Mock Invoke-VBAHVPluginAPI { return @{ results = @() } }
 
       { Get-VBAHVJobs } | Should -Throw "*No Nutanix AHV backup jobs found*"
     }
@@ -1531,9 +1535,11 @@ Describe "VBAHV Plugin REST API" {
       $script:capturedEndpoint = $null
       Mock Invoke-VBAHVPluginAPI {
         $script:capturedEndpoint = $Endpoint
-        return @(
-          @{ id = "sc1"; name = "default-container" }
-        )
+        return @{
+          results = @(
+            @{ id = "sc1"; name = "default-container" }
+          )
+        }
       }
 
       $result = Get-VBAHVStorageContainers -ClusterId "c1"
@@ -1559,10 +1565,10 @@ Describe "VBAHV Plugin REST API" {
         param($Method, $Endpoint, $Body)
         if ($Method -eq "POST" -and $Endpoint -eq "restorePoints/restore") {
           $script:capturedBody = $Body
-          return @{ id = "session-1" }
+          return @{ sessionId = "session-1" }
         }
         if ($Endpoint -match "sessions/") {
-          return @{ state = "Success" }
+          return @{ state = "Finished"; result = "Success" }
         }
         return @()
       }
@@ -1594,10 +1600,10 @@ Describe "VBAHV Plugin REST API" {
         param($Method, $Endpoint, $Body)
         if ($Method -eq "POST" -and $Endpoint -eq "restorePoints/restore") {
           $script:capturedBody = $Body
-          return @{ id = "session-1" }
+          return @{ sessionId = "session-1" }
         }
         if ($Endpoint -match "sessions/") {
-          return @{ state = "Success" }
+          return @{ state = "Finished"; result = "Success" }
         }
         return @()
       }
@@ -1619,6 +1625,30 @@ Describe "VBAHV Plugin REST API" {
       $script:capturedBody.restoreToOriginal | Should -Be $false
       $script:capturedBody.powerOnVmAfterRestore | Should -Be $false
       $script:capturedBody.restoreVmCategories | Should -Be $false
+    }
+
+    It "returns Failed status when restore API returns no sessionId" {
+      Mock Get-VBAHVRestorePointMetadata {
+        return @{ clusterId = "c1"; networkAdapters = @() }
+      }
+
+      Mock Invoke-VBAHVPluginAPI {
+        param($Method, $Endpoint, $Body)
+        if ($Method -eq "POST" -and $Endpoint -eq "restorePoints/restore") {
+          return @{ unexpectedField = "no-session-id" }
+        }
+        return @()
+      }
+
+      Mock Start-Sleep {}
+
+      $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
+      $rpInfo = [PSCustomObject]@{ VMName = "test-vm"; RestorePointId = "rp1"; CreationTime = Get-Date; JobName = "Job1" }
+      $isolatedNet = [PSCustomObject]@{ UUID = "net-iso-1"; Name = "isolated-lab" }
+
+      $result = Start-AHVFullRestore -RestorePointInfo $rpInfo -IsolatedNetwork $isolatedNet
+      $result.Status | Should -Be "Failed"
+      $result.Error | Should -BeLike "*no sessionId*"
     }
   }
 
