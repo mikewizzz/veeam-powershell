@@ -174,7 +174,8 @@ if ($Full) {
   $script:licenseData = Get-LicenseAnalysis
 }
 
-# Step 7: Generate findings & recommendations (Full mode only)
+# Step 7: Zero Trust scores, findings & recommendations (Full mode only)
+$script:ztScores = Get-ZeroTrustScores
 $script:findings = Get-Findings
 $script:recommendations = Get-Recommendations
 $script:readinessScore = Get-ProtectionReadinessScore

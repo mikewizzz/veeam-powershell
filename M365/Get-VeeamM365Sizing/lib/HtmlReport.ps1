@@ -106,20 +106,36 @@ body {
 .section {
   background: white; padding: 32px; margin-bottom: 24px;
   border-radius: 4px; box-shadow: var(--shadow-depth-4);
+}
+
+/* ===== Collapsible Sections ===== */
+details.section {
   counter-increment: section-counter;
 }
-.section-title {
+details.section > summary {
   font-size: 20px; font-weight: 600; color: var(--ms-gray-160);
   margin-bottom: 20px; padding-bottom: 12px;
   border-bottom: 3px solid transparent;
   border-image: linear-gradient(90deg, var(--ms-blue), var(--veeam-green), transparent) 1;
   display: flex; align-items: baseline; gap: 12px;
+  cursor: pointer; list-style: none; user-select: none;
 }
-.section-title::before {
+details.section > summary::-webkit-details-marker { display: none; }
+details.section > summary::before {
   content: counter(section-counter, decimal-leading-zero);
   font-size: 14px; font-weight: 700; color: var(--ms-blue);
   font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
   min-width: 28px;
+}
+details.section > summary::after {
+  content: '\25B6'; font-size: 12px; color: var(--ms-gray-90);
+  margin-left: auto; transition: transform 0.2s ease;
+}
+details[open].section > summary::after {
+  transform: rotate(90deg);
+}
+details.section > summary:hover {
+  color: var(--ms-blue-dark);
 }
 
 /* ===== Glassmorphism KPI Cards ===== */
@@ -462,6 +478,9 @@ tbody tr:last-child td { border-bottom: none; }
   }
   svg { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
   .section { page-break-inside: avoid; }
+  details.section { display: block; }
+  details.section > summary::after { display: none; }
+  details.section > .section-content { display: block !important; }
 }
 "@
 
@@ -592,8 +611,9 @@ $css
     $scoreLabel = _Get-ScoreLabel $script:readinessScore
 
     $htmlParts.Add(@"
-  <div class="section">
-    <h2 class="section-title">Executive Summary</h2>
+  <details class="section" open>
+    <summary>Executive Summary</summary>
+    <div class="section-content">
     <div class="exec-summary-grid">
       <div class="exec-summary-gauge">
         <div class="svg-container">
@@ -612,7 +632,8 @@ $actionsHtml
     <div class="takeaway-bar">
       This tenant's data protection posture is <strong>$scoreLabel</strong> (score: $($script:readinessScore)/100). $(if($script:readinessScore -lt 70){"Targeted improvements in identity security and backup coverage can significantly reduce organizational risk."}else{"Continue strengthening backup coverage and identity controls to maintain this position."})
     </div>
-  </div>
+    </div>
+  </details>
 "@)
   }
 
@@ -631,41 +652,122 @@ $actionsHtml
   $mbsRing = New-SvgMiniRing -Percent $mbsRingPct -Color "#00B336"
 
   $htmlParts.Add(@"
-  <div class="kpi-grid">
-    <div class="kpi-card">
-      $usersRing
-      <div class="kpi-card-content">
-        <div class="kpi-label">Users to Protect</div>
-        <div class="kpi-value">$($script:UsersToProtect)</div>
-        <div class="kpi-subtext">Active user accounts</div>
+  <details class="section" open>
+    <summary>Key Performance Indicators</summary>
+    <div class="section-content">
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        $usersRing
+        <div class="kpi-card-content">
+          <div class="kpi-label">Users to Protect</div>
+          <div class="kpi-value">$($script:UsersToProtect)</div>
+          <div class="kpi-subtext">Active user accounts</div>
+        </div>
+      </div>
+      <div class="kpi-card">
+        $datasetRing
+        <div class="kpi-card-content">
+          <div class="kpi-label">Total Dataset</div>
+          <div class="kpi-value">$(Format-Storage $script:totalGB)</div>
+          <div class="kpi-subtext">$($script:totalGB) GB | $($script:totalTiB) TiB (binary)</div>
+        </div>
+      </div>
+      <div class="kpi-card">
+        $growthRing
+        <div class="kpi-card-content">
+          <div class="kpi-label">Projected Growth</div>
+          <div class="kpi-value">$(Format-Pct $AnnualGrowthPct)</div>
+          <div class="kpi-subtext">Annual growth rate (modeled)</div>
+        </div>
+      </div>
+      <div class="kpi-card">
+        $mbsRing
+        <div class="kpi-card-content">
+          <div class="kpi-label">Recommended MBS</div>
+          <div class="kpi-value">$(Format-Storage $script:suggestedStartGB)</div>
+          <div class="kpi-subtext">Estimate: $(Format-Storage $script:mbsEstimateGB) + $(Format-Pct $BufferPct) buffer</div>
+        </div>
       </div>
     </div>
-    <div class="kpi-card">
-      $datasetRing
-      <div class="kpi-card-content">
-        <div class="kpi-label">Total Dataset</div>
-        <div class="kpi-value">$(Format-Storage $script:totalGB)</div>
-        <div class="kpi-subtext">$($script:totalGB) GB | $($script:totalTiB) TiB (binary)</div>
-      </div>
     </div>
-    <div class="kpi-card">
-      $growthRing
-      <div class="kpi-card-content">
-        <div class="kpi-label">Projected Growth</div>
-        <div class="kpi-value">$(Format-Pct $AnnualGrowthPct)</div>
-        <div class="kpi-subtext">Annual growth rate (modeled)</div>
-      </div>
-    </div>
-    <div class="kpi-card">
-      $mbsRing
-      <div class="kpi-card-content">
-        <div class="kpi-label">Recommended MBS</div>
-        <div class="kpi-value">$(Format-Storage $script:suggestedStartGB)</div>
-        <div class="kpi-subtext">Estimate: $(Format-Storage $script:mbsEstimateGB) + $(Format-Pct $BufferPct) buffer</div>
-      </div>
-    </div>
-  </div>
+  </details>
 "@)
+
+  # =============================
+  # FULL MODE: Cyber Resilience Scorecard
+  # =============================
+  if ($Full -and $null -ne $script:readinessScore) {
+    # Identity Protection ring
+    $idProtectPct = 0
+    if ($script:mfaCount -is [int] -and $script:userCount -is [int] -and $script:userCount -gt 0) {
+      $idProtectPct = [int][math]::Round(($script:mfaCount / $script:userCount) * 100, 0)
+    }
+    $idProtectRing = New-SvgMiniRing -Percent $idProtectPct -Color $(if($idProtectPct -ge 80){"#107C10"}elseif($idProtectPct -ge 50){"#F7630C"}else{"#D13438"})
+
+    # Data Recovery Readiness ring
+    $readinessPct = $script:readinessScore
+    $readinessRing = New-SvgMiniRing -Percent $readinessPct -Color $(_Get-ScoreColor $readinessPct)
+
+    # Access Governance ring
+    $accessPct = if ($script:ztScores -is [hashtable]) { $script:ztScores.Access } else { 0 }
+    $accessRing = New-SvgMiniRing -Percent $accessPct -Color $(if($accessPct -ge 67){"#107C10"}elseif($accessPct -ge 34){"#F7630C"}else{"#D13438"})
+
+    # Secure Score ring
+    $secScorePct = 0
+    if ($script:secureScore -is [hashtable] -and $script:secureScore.MaxScore -gt 0) {
+      $secScorePct = [int]$script:secureScore.Percentage
+    }
+    $secScoreRing = New-SvgMiniRing -Percent $secScorePct -Color $(if($secScorePct -ge 70){"#107C10"}elseif($secScorePct -ge 40){"#F7630C"}else{"#D13438"})
+
+    # Regulatory readiness context
+    $regMet = New-Object System.Collections.Generic.List[string]
+    if ($idProtectPct -ge 80) { $regMet.Add("MFA coverage meets common regulatory thresholds") }
+    if ($script:caPolicyCount -is [int] -and $script:caPolicyCount -ge $CA_POLICY_THRESHOLD) { $regMet.Add("Conditional Access policies demonstrate access governance") }
+    if ($readinessPct -ge 60) { $regMet.Add("Data protection readiness supports compliance posture") }
+
+    $htmlParts.Add(@"
+  <details class="section" open>
+    <summary>Cyber Resilience Scorecard</summary>
+    <div class="section-content">
+    <div class="identity-kpi-grid" style="grid-template-columns: repeat(4, 1fr);">
+      <div class="identity-kpi">
+        $idProtectRing
+        <div class="identity-kpi-value">${idProtectPct}%</div>
+        <div class="identity-kpi-label">Identity Protection</div>
+      </div>
+      <div class="identity-kpi">
+        $readinessRing
+        <div class="identity-kpi-value">${readinessPct}%</div>
+        <div class="identity-kpi-label">Data Recovery Readiness</div>
+      </div>
+      <div class="identity-kpi">
+        $accessRing
+        <div class="identity-kpi-value">${accessPct}%</div>
+        <div class="identity-kpi-label">Access Governance</div>
+      </div>
+      <div class="identity-kpi">
+        $secScoreRing
+        <div class="identity-kpi-value">${secScorePct}%</div>
+        <div class="identity-kpi-label">Microsoft Secure Score</div>
+      </div>
+    </div>
+    <div class="callout-card" style="margin-top: 24px;">
+      <div class="callout-card-title">Regulatory Readiness Context</div>
+      <div style="font-size: 13px; color: var(--ms-gray-130); line-height: 1.6;">
+        <div style="margin-bottom: 12px;">This assessment surfaces signals relevant to frameworks including <strong>NIS2</strong>, <strong>DORA</strong>, and <strong>SEC Cyber Disclosure Rules</strong>. These are data inputs for compliance evaluation, not compliance determinations.</div>
+        $(if($regMet.Count -gt 0){
+          $regItems = ""
+          foreach ($r in $regMet) { $regItems += "<div style='padding: 4px 0;'>&#10003; $r</div>" }
+          $regItems
+        }else{
+          "<div style='padding: 4px 0; color: var(--ms-gray-90);'>Insufficient data signals to evaluate regulatory readiness thresholds.</div>"
+        })
+      </div>
+    </div>
+    </div>
+  </details>
+"@)
+  }
 
   # =============================
   # Capacity Forecast Bar Chart
@@ -675,12 +777,14 @@ $actionsHtml
 
   if ($capacityChart) {
     $htmlParts.Add(@"
-  <div class="capacity-forecast">
-    <div class="capacity-forecast-title">Capacity Forecast</div>
+  <details class="section">
+    <summary>Capacity Forecast</summary>
+    <div class="section-content">
     <div class="svg-container">
 $capacityChart
     </div>
-  </div>
+    </div>
+  </details>
 "@)
   }
 
@@ -724,8 +828,9 @@ $capacityChart
     }
 
     $htmlParts.Add(@"
-  <div class="section">
-    <h2 class="section-title">License Overview</h2>
+  <details class="section">
+    <summary>License Overview</summary>
+    <div class="section-content">
     <div class="svg-container" style="margin-bottom: 24px;">
 $licBarChart
     </div>
@@ -746,7 +851,8 @@ $licRows
         </tbody>
       </table>
     </div>
-  </div>
+    </div>
+  </details>
 "@)
   }
 
@@ -766,8 +872,9 @@ $licRows
   $donutChart = New-SvgDonutChart -Segments $donutSegments -CenterLabel (Format-Storage $script:totalGB) -CenterSubLabel "Total"
 
   $htmlParts.Add(@"
-  <div class="section">
-    <h2 class="section-title">Workload Analysis</h2>
+  <details class="section">
+    <summary>Workload Analysis</summary>
+    <div class="section-content">
     <div class="workload-flex">
       <div class="workload-chart svg-container">
 $donutChart
@@ -819,7 +926,8 @@ $donutChart
         </div>
       </div>
     </div>
-  </div>
+    </div>
+  </details>
 "@)
 
   # =============================
@@ -827,9 +935,9 @@ $donutChart
   # =============================
   if ($Full) {
     $htmlParts.Add(@"
-  <div class="section">
-    <h2 class="section-title">Data Protection Landscape</h2>
-
+  <details class="section">
+    <summary>Data Protection Landscape</summary>
+    <div class="section-content">
     <div class="callout-card">
       <div class="callout-card-title">Microsoft Shared Responsibility Model</div>
       <div class="callout-grid">
@@ -878,7 +986,8 @@ $donutChart
         <div class="coverage-item-detail">Conditional Access, Intune policies, directory roles</div>
       </div>
     </div>
-  </div>
+    </div>
+  </details>
 "@)
   }
 
@@ -951,9 +1060,9 @@ $donutChart
     }
 
     $htmlParts.Add(@"
-  <div class="section">
-    <h2 class="section-title">Identity &amp; Access Security</h2>
-
+  <details class="section">
+    <summary>Identity &amp; Access Security</summary>
+    <div class="section-content">
     $(if($riskMatrixHtml){"<div class='svg-container' style='margin-bottom: 24px;'>$riskMatrixHtml</div>"}else{""})
 
     <div class="identity-kpi-grid">
@@ -1001,14 +1110,138 @@ $secScoreBarHtml
         </table>
       </div>
     </div>
-  </div>
+    </div>
+  </details>
+"@)
+  }
+
+  # =============================
+  # FULL MODE: Zero Trust Maturity Assessment
+  # =============================
+  if ($Full -and $script:ztScores -is [hashtable]) {
+    # Build bar chart items for the 5 pillars
+    $ztBarItems = New-Object System.Collections.Generic.List[object]
+    $ztPillars = @(
+      @{ Name = "Identity"; Score = $script:ztScores.Identity }
+      @{ Name = "Devices";  Score = $script:ztScores.Devices }
+      @{ Name = "Access";   Score = $script:ztScores.Access }
+      @{ Name = "Data";     Score = $script:ztScores.Data }
+      @{ Name = "Apps";     Score = $script:ztScores.Apps }
+    )
+    foreach ($p in $ztPillars) {
+      $ztColor = if ($p.Score -ge $ZT_ADVANCED_THRESHOLD) { "#107C10" } elseif ($p.Score -ge $ZT_DEVELOPING_THRESHOLD) { "#F7630C" } else { "#D13438" }
+      $ztBarItems.Add(@{ Label = $p.Name; Value = $p.Score; MaxValue = 100; Color = $ztColor })
+    }
+    $ztBarChart = New-SvgHorizontalBarChart -Items $ztBarItems
+
+    # Find weakest pillar
+    $weakest = $ztPillars[0]
+    foreach ($p in $ztPillars) {
+      if ($p.Score -lt $weakest.Score) { $weakest = $p }
+    }
+    $weakLabel = if ($weakest.Score -lt $ZT_DEVELOPING_THRESHOLD) { "Initial" } elseif ($weakest.Score -lt $ZT_ADVANCED_THRESHOLD) { "Developing" } else { "Advanced" }
+
+    $htmlParts.Add(@"
+  <details class="section">
+    <summary>Zero Trust Maturity Assessment</summary>
+    <div class="section-content">
+    <div style="font-size: 13px; color: var(--ms-gray-90); margin-bottom: 16px;">
+      Scores mapped from collected tenant data to Microsoft Zero Trust pillars. Maturity levels: <strong>Initial</strong> (0-33), <strong>Developing</strong> (34-66), <strong>Advanced</strong> (67-100).
+    </div>
+    <div class="svg-container">
+$ztBarChart
+    </div>
+    <div class="takeaway-bar" style="margin-top: 20px;">
+      Weakest pillar: <strong>$($weakest.Name)</strong> ($($weakest.Score)/100 &mdash; $weakLabel). $(if($weakest.Score -lt $ZT_DEVELOPING_THRESHOLD){"This pillar requires immediate attention to establish baseline Zero Trust maturity."}elseif($weakest.Score -lt $ZT_ADVANCED_THRESHOLD){"Targeted improvements in this area would advance overall Zero Trust posture."}else{"All pillars are at Advanced maturity. Maintain and continuously validate controls."})
+    </div>
+    </div>
+  </details>
+"@)
+  }
+
+  # =============================
+  # FULL MODE: Business Impact Analysis
+  # =============================
+  if ($Full) {
+    $totalDataGB = $script:exGB + $script:odGB + $script:spGB
+    $monthChangeDisplay = if ($null -ne $script:monthChangeGB) { "{0:N2}" -f $script:monthChangeGB } else { "N/A" }
+    $projectedYearGB = [Math]::Round($totalDataGB * (1 + $AnnualGrowthPct), 2)
+
+    $htmlParts.Add(@"
+  <details class="section">
+    <summary>Business Impact Analysis</summary>
+    <div class="section-content">
+    <div style="font-size: 13px; color: var(--ms-gray-90); margin-bottom: 16px;">
+      Translates technical data into business risk context. No dollar assumptions are made &mdash; use these data inputs for your organization's financial models.
+    </div>
+
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">Data at Risk by Workload</div>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr><th>Workload</th><th>Scope</th><th>Business Impact if Lost</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Exchange Online</strong></td>
+            <td>$(Format-Storage $script:exGB) &mdash; $($script:exUsers.Count) mailboxes</td>
+            <td>Business continuity disruption, legal discovery exposure, regulatory retention gaps</td>
+          </tr>
+          <tr>
+            <td><strong>OneDrive for Business</strong></td>
+            <td>$(Format-Storage $script:odGB) &mdash; $($script:odActive.Count) accounts</td>
+            <td>Productivity loss, intellectual property exposure, individual work product unrecoverable</td>
+          </tr>
+          <tr>
+            <td><strong>SharePoint Online</strong></td>
+            <td>$(Format-Storage $script:spGB) &mdash; $($script:spActive.Count) sites</td>
+            <td>Collaboration disruption, knowledge base loss, business process interruption</td>
+          </tr>
+          <tr>
+            <td><strong>Microsoft Teams</strong></td>
+            <td>$(Format-CountValue $script:teamsCount) teams</td>
+            <td>Communication continuity, channel history loss, project context unrecoverable</td>
+          </tr>
+          <tr>
+            <td><strong>Entra ID Configuration</strong></td>
+            <td>$(Format-CountValue $script:caPolicyCount) CA policies, $(Format-CountValue $script:intuneManagedDevices) devices</td>
+            <td>Security posture recreation cost, access control gaps during rebuild</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout-card" style="margin-top: 24px;">
+      <div class="callout-card-title">Recovery Planning Context</div>
+      <div class="identity-kpi-grid" style="grid-template-columns: repeat(4, 1fr);">
+        <div class="identity-kpi">
+          <div class="identity-kpi-value">$(Format-Storage $totalDataGB)</div>
+          <div class="identity-kpi-label">Total Dataset Scope</div>
+        </div>
+        <div class="identity-kpi">
+          <div class="identity-kpi-value">$monthChangeDisplay GB</div>
+          <div class="identity-kpi-label">Monthly Change Velocity</div>
+        </div>
+        <div class="identity-kpi">
+          <div class="identity-kpi-value">$(Format-CountValue $script:userCount)</div>
+          <div class="identity-kpi-label">Identity Surface</div>
+        </div>
+        <div class="identity-kpi">
+          <div class="identity-kpi-value">$(Format-Storage $projectedYearGB)</div>
+          <div class="identity-kpi-label">12-Month Projection</div>
+        </div>
+      </div>
+    </div>
+    </div>
+  </details>
 "@)
   }
 
   # Methodology
   $htmlParts.Add(@"
-  <div class="section">
-    <h2 class="section-title">Methodology</h2>
+  <details class="section">
+    <summary>Methodology</summary>
+    <div class="section-content">
     <div class="info-card">
       <div class="info-card-title">Measured Data</div>
       <div class="info-card-text">
@@ -1027,13 +1260,15 @@ $secScoreBarHtml
       <span class="code-line">MbsEstimateGB = (ProjectedDatasetGB x RetentionMultiplier) + MonthlyChangeGB</span>
       <span class="code-line">RecommendedMBS = MbsEstimateGB x (1 + BufferPct)</span>
     </div>
-  </div>
+    </div>
+  </details>
 "@)
 
   # Sizing Parameters
   $htmlParts.Add(@"
-  <div class="section">
-    <h2 class="section-title">Sizing Parameters</h2>
+  <details class="section">
+    <summary>Sizing Parameters</summary>
+    <div class="section-content">
     <div class="table-container">
       <table>
         <thead><tr><th>Parameter</th><th>Value</th></tr></thead>
@@ -1052,7 +1287,8 @@ $secScoreBarHtml
         </tbody>
       </table>
     </div>
-  </div>
+    </div>
+  </details>
 "@)
 
   # =============================
@@ -1083,10 +1319,12 @@ $secScoreBarHtml
     }
 
     $htmlParts.Add(@"
-  <div class="section">
-    <h2 class="section-title">Opportunities to Strengthen Protection</h2>
+  <details class="section" open>
+    <summary>Opportunities to Strengthen Protection</summary>
+    <div class="section-content">
 $recsHtml
-  </div>
+    </div>
+  </details>
 "@)
   }
 
@@ -1104,12 +1342,14 @@ $recsHtml
   if ($Full -and $script:outRecommendations) { $artifactItems += "      <div class='file-item'>Recommendations CSV: $(Split-Path $script:outRecommendations -Leaf)</div>`n" }
 
   $htmlParts.Add(@"
-  <div class="section">
-    <h2 class="section-title">Generated Artifacts</h2>
+  <details class="section">
+    <summary>Generated Artifacts</summary>
+    <div class="section-content">
     <div class="file-list">
 $artifactItems
     </div>
-  </div>
+    </div>
+  </details>
 "@)
 
   # =============================
