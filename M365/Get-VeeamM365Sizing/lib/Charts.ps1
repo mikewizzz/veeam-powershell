@@ -68,7 +68,7 @@ function New-SvgGaugeChart {
   $escapedLabel = Escape-Html $Label
 
   return @"
-    <svg viewBox="0 0 220 145" width="$Width" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Gauge showing score $Score out of 100">
+    <svg viewBox="0 0 220 160" width="$Width" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Gauge showing score $Score out of 100">
       <!-- Background arc -->
       <path d="$arcPath" fill="none" stroke="#EDEBE9" stroke-width="14" stroke-linecap="round" pathLength="100" />
       <!-- Score arc -->
@@ -80,10 +80,10 @@ $tickLabels
       <circle cx="$cx" cy="$cy" r="6" fill="$color" />
       <line x1="$cx" y1="$cy" x2="$([Math]::Round($nx,1))" y2="$([Math]::Round($ny,1))" stroke="$color" stroke-width="2.5" stroke-linecap="round" />
       <!-- Score text -->
-      <text x="$cx" y="$($cy + 2)" text-anchor="middle" dominant-baseline="middle" fill="$color" font-size="32" font-weight="700" font-family="'Cascadia Code','Consolas','Courier New',monospace">$Score</text>
-      <text x="$cx" y="$($cy + 18)" text-anchor="middle" fill="#605E5C" font-size="11" font-family="'Segoe UI',sans-serif">/ 100</text>
+      <text x="$cx" y="$($cy + 22)" text-anchor="middle" dominant-baseline="middle" fill="$color" font-size="32" font-weight="700" font-family="'Cascadia Code','Consolas','Courier New',monospace">$Score</text>
+      <text x="$cx" y="$($cy + 38)" text-anchor="middle" fill="#605E5C" font-size="11" font-family="'Segoe UI',sans-serif">/ 100</text>
       <!-- Label -->
-      <text x="$cx" y="138" text-anchor="middle" fill="#323130" font-size="12" font-weight="600" font-family="'Segoe UI',sans-serif">$escapedLabel</text>
+      <text x="$cx" y="154" text-anchor="middle" fill="#323130" font-size="12" font-weight="600" font-family="'Segoe UI',sans-serif">$escapedLabel</text>
     </svg>
 "@
 }
