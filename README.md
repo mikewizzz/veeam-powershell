@@ -14,7 +14,7 @@ Community-maintained PowerShell tools for Veeam backup solutions across Microsof
 
 | Tool | Description |
 |------|-------------|
-| [Get-VeeamAzureSizing](AZURE/Get-VeeamAzureSizing/) | Assess Azure infrastructure for Veeam backup sizing |
+| [Get-VeeamAzureSizing](AZURE/Get-VeeamAzureSizing/) | Discover Azure VMs, SQL, Storage, and Backup configuration with Veeam sizing recommendations and executive HTML reports |
 | [Get-VeeamVaultPricing](AZURE/Get-VeeamVaultPricing/) | Compare Veeam Vault vs Azure Blob storage costs |
 | [Get-VBAHealthCheck](AZURE/Get-VBAHealthCheck/) | Health check and compliance assessment for Veeam Backup for Azure |
 | [New-VeeamDRLandingZone](AZURE/New-VeeamDRLandingZone/) | Provision DR landing zones in Azure |
