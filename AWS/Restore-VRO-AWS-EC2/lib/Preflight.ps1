@@ -1,4 +1,41 @@
 # =============================
+# Parameter Conflict Detection
+# =============================
+
+<#
+.SYNOPSIS
+  Detects mutually exclusive or misconfigured parameter combinations.
+  Called before module loading to fail fast with clear messages.
+#>
+function Test-ParameterConflicts {
+  # Fatal conflicts — throw immediately
+  if ($UseLatestCleanPoint -and $RestorePointId) {
+    throw "Cannot use both -UseLatestCleanPoint and -RestorePointId. Remove one."
+  }
+
+  if ($IsolateNetwork -and $AssociatePublicIP) {
+    throw "Cannot associate a public IP with an isolated network. Remove -AssociatePublicIP or -IsolateNetwork."
+  }
+
+  if ($Route53RecordName -and -not $Route53HostedZoneId) {
+    throw "-Route53RecordName requires -Route53HostedZoneId. Provide the hosted zone ID."
+  }
+
+  # Warnings — log but continue
+  if ($SkipValidation -and ($HealthCheckPorts -or $HealthCheckUrls -or $SSMHealthCheckCommand)) {
+    Write-Log "Health check parameters ignored because -SkipValidation is set." -Level WARNING
+  }
+
+  if ($CloudWatchSNSTopicArn -and -not $CreateCloudWatchAlarms) {
+    Write-Log "-CloudWatchSNSTopicArn has no effect without -CreateCloudWatchAlarms." -Level WARNING
+  }
+
+  if ($KMSKeyId -and -not $EncryptVolumes) {
+    Write-Log "-KMSKeyId has no effect without -EncryptVolumes." -Level WARNING
+  }
+}
+
+# =============================
 # Prerequisites Check
 # =============================
 
@@ -7,6 +44,8 @@
   Validates required PowerShell modules and snap-ins are available.
 #>
 function Test-Prerequisites {
+  Test-ParameterConflicts
+
   Write-Log "Validating prerequisites..."
 
   # Check PowerShell version

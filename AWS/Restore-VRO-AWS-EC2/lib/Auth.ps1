@@ -31,8 +31,14 @@ function Connect-VBRSession {
     $connectParams["Credential"] = $VBRCredential
   }
 
-  Invoke-WithRetry -OperationName "VBR Connection" -ScriptBlock {
-    Connect-VBRServer @connectParams
+  try {
+    Invoke-WithRetry -OperationName "VBR Connection" -ScriptBlock {
+      Connect-VBRServer @connectParams
+    }
+  }
+  catch {
+    Write-Log "Verify VBR service is running on $VBRServer and port $VBRPort is accessible. Test with: Test-NetConnection -ComputerName $VBRServer -Port $VBRPort" -Level ERROR
+    throw
   }
 
   $script:VBRConnected = $true
@@ -71,8 +77,14 @@ function Connect-AWSSession {
       $assumeParams["ProfileName"] = $AWSProfile
     }
 
-    $stsResult = Invoke-WithRetry -OperationName "STS AssumeRole" -ScriptBlock {
-      Use-STSRole @assumeParams
+    try {
+      $stsResult = Invoke-WithRetry -OperationName "STS AssumeRole" -ScriptBlock {
+        Use-STSRole @assumeParams
+      }
+    }
+    catch {
+      Write-Log "Verify the IAM role trust policy allows the calling identity. Debug with: aws sts get-caller-identity" -Level ERROR
+      throw
     }
 
     Set-AWSCredential -Credential $stsResult.Credentials
@@ -93,9 +105,15 @@ function Connect-AWSSession {
   }
 
   # Validate connectivity
-  Invoke-WithRetry -OperationName "AWS Connectivity Check" -ScriptBlock {
-    $identity = Get-STSCallerIdentity -ErrorAction Stop
-    Write-Log "AWS identity: Account=$($identity.Account), ARN=$($identity.Arn)" -Level SUCCESS
+  try {
+    Invoke-WithRetry -OperationName "AWS Connectivity Check" -ScriptBlock {
+      $identity = Get-STSCallerIdentity -ErrorAction Stop
+      Write-Log "AWS identity: Account=$($identity.Account), ARN=$($identity.Arn)" -Level SUCCESS
+    }
+  }
+  catch {
+    Write-Log "No AWS credentials found. Options: (1) Run on EC2 with an IAM instance profile, (2) Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, (3) Use -AWSProfile, (4) Use -AWSRoleArn" -Level ERROR
+    throw
   }
 
   $script:AWSInitialized = $true

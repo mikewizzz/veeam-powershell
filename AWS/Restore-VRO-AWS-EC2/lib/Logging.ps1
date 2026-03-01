@@ -70,6 +70,112 @@ function Write-VROOutput {
 .PARAMETER Details
   Additional details hashtable.
 #>
+<#
+.SYNOPSIS
+  Displays a visual startup banner with version, mode, and key parameters.
+#>
+function Write-Banner {
+  $mode = if ($DRDrillMode) { "DR DRILL" }
+          elseif ($DryRun) { "DRY RUN" }
+          else { "LIVE" }
+
+  $banner = @"
+
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║       VRO AWS EC2 Restore  v2.1.0                              ║
+  ║       Automated Backup Restore to Amazon EC2                   ║
+  ╚══════════════════════════════════════════════════════════════════╝
+
+  Backup:    $BackupName
+  Region:    $AWSRegion
+  VBR:       ${VBRServer}:${VBRPort}
+
+"@
+  Write-Host $banner -ForegroundColor Cyan
+
+  if ($DryRun) {
+    Write-Host "  >>> DRY RUN MODE — No changes will be made <<<" -ForegroundColor Yellow
+    Write-Host ""
+  }
+  elseif ($DRDrillMode) {
+    Write-Host "  >>> DR DRILL MODE — Instance will auto-terminate after ${DRDrillKeepMinutes}m <<<" -ForegroundColor Yellow
+    Write-Host ""
+  }
+
+  Write-Log "VRO AWS EC2 Restore v2.1.0 | Mode: $mode | Backup: $BackupName | Region: $AWSRegion"
+  if ($VROPlanName) { Write-Log "VRO Plan: $VROPlanName / Step: $VROStepName" }
+}
+
+<#
+.SYNOPSIS
+  Logs a numbered step and updates the Write-Progress bar.
+.PARAMETER Activity
+  Short description of the current step.
+.PARAMETER Status
+  Status text shown in the progress bar.
+#>
+function Write-ProgressStep {
+  param(
+    [Parameter(Mandatory)][string]$Activity,
+    [string]$Status = "Processing..."
+  )
+
+  $script:CurrentStep++
+  $pct = [math]::Round(($script:CurrentStep / $script:TotalSteps) * 100)
+  Write-Progress -Activity "VRO AWS EC2 Restore" -Status "$Activity - $Status" -PercentComplete $pct
+  Write-Log "STEP $($script:CurrentStep)/$($script:TotalSteps): $Activity"
+}
+
+<#
+.SYNOPSIS
+  Displays a pre-execution restore plan summary showing the resolved configuration.
+.PARAMETER RestorePoint
+  The selected Veeam restore point object.
+.PARAMETER EC2Config
+  Hashtable from Get-EC2TargetConfig with resolved infrastructure details.
+#>
+function Write-RestorePlan {
+  param(
+    [Parameter(Mandatory)][object]$RestorePoint,
+    [Parameter(Mandatory)][hashtable]$EC2Config
+  )
+
+  $rpTime = if ($RestorePoint.CreationTime) { $RestorePoint.CreationTime.ToString("yyyy-MM-dd HH:mm:ss") } else { "N/A" }
+  $rpLabel = if ($UseLatestCleanPoint) { "$rpTime (latest clean)" }
+             elseif ($RestorePointId) { "$rpTime (specified)" }
+             else { "$rpTime (latest)" }
+
+  $vmLabel = if ($VMName) { $VMName } else { "(all)" }
+  $sgLabel = if ($EC2Config.SecurityGroupIds) { $EC2Config.SecurityGroupIds -join ", " } else { "(default)" }
+  $encLabel = if ($EncryptVolumes) {
+    $keyLabel = if ($KMSKeyId) { "KMS $KMSKeyId" } else { "KMS default key" }
+    "Yes ($keyLabel)"
+  } else { "No" }
+  $isoLabel = if ($IsolateNetwork) { "Yes" } else { "No" }
+  $powerLabel = if ($PowerOnAfterRestore) { "Yes" } else { "No" }
+
+  $plan = @"
+
+=== Restore Plan ===
+Backup:           $BackupName
+VM:               $vmLabel
+Restore Point:    $rpLabel
+Target Region:    $AWSRegion
+Instance Type:    $($EC2Config.InstanceType)
+VPC / Subnet:     $($EC2Config.VpcId) / $($EC2Config.SubnetId) ($($EC2Config.AvailabilityZone))
+Security Groups:  $sgLabel
+Disk Type:        $DiskType
+Encrypted:        $encLabel
+Network Isolated: $isoLabel
+Power On:         $powerLabel
+====================
+
+"@
+
+  Write-Host $plan -ForegroundColor White
+  Write-Log "Restore plan displayed — target: $($EC2Config.InstanceType) in $($EC2Config.AvailabilityZone)"
+}
+
 function Write-AuditEvent {
   param(
     [Parameter(Mandatory)][string]$EventType,

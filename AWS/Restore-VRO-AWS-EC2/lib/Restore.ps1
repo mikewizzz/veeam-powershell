@@ -413,11 +413,19 @@ function Start-EC2Restore {
 
   # Execute restore
   if ($DryRun) {
-    Write-Log "DRY RUN: Would restore '$($RestorePoint.Name)' as '$instanceName' to $AWSRegion" -Level WARNING
-    Write-Log "  Instance Type: $($EC2Config.InstanceType)"
-    Write-Log "  VPC: $($EC2Config.VpcId) / Subnet: $($EC2Config.SubnetId)"
-    Write-Log "  Security Groups: $($EC2Config.SecurityGroupIds -join ', ')"
-    Write-Log "  Disk Type: $DiskType | Encrypted: $EncryptVolumes"
+    Write-Log "" -Level SUCCESS
+    Write-Log "DRY RUN COMPLETE — No restore will be executed." -Level SUCCESS
+    Write-Log "Validated:" -Level SUCCESS
+    Write-Log "  [PASS] VBR connection to ${VBRServer}:${VBRPort}" -Level SUCCESS
+    Write-Log "  [PASS] AWS authentication" -Level SUCCESS
+    Write-Log "  [PASS] Backup '$BackupName' found ($($RestorePoint.Name))" -Level SUCCESS
+    Write-Log "  [PASS] VPC $($EC2Config.VpcId) / Subnet $($EC2Config.SubnetId) ($($EC2Config.AvailabilityZone))" -Level SUCCESS
+    $sgDisplay = if ($EC2Config.SecurityGroupIds) { $EC2Config.SecurityGroupIds -join ", " } else { "(default)" }
+    Write-Log "  [PASS] Security groups: $sgDisplay" -Level SUCCESS
+    Write-Log "  [PASS] Instance type $($EC2Config.InstanceType) available in $($EC2Config.AvailabilityZone)" -Level SUCCESS
+    $encDisplay = if ($EncryptVolumes) { "enabled" } else { "disabled" }
+    Write-Log "  [PASS] Disk type $DiskType, encryption $encDisplay" -Level SUCCESS
+    Write-Log "" -Level SUCCESS
     return $null
   }
 
