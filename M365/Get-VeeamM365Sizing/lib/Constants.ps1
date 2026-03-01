@@ -35,6 +35,23 @@ function To-TB([double]$bytes)  { [math]::Round($bytes / $TB, 4) }
 function To-GiB([double]$bytes) { [math]::Round($bytes / $GiB, 2) }
 function To-TiB([double]$bytes) { [math]::Round($bytes / $TiB, 4) }
 
+<#
+.SYNOPSIS
+  Formats a GB value with the most readable unit (MB, GB, or TB).
+.PARAMETER gb
+  Value in decimal gigabytes.
+.EXAMPLE
+  Format-Storage 0.04  returns "40 MB"
+  Format-Storage 2.5   returns "2.50 GB"
+  Format-Storage 1200  returns "1.20 TB"
+#>
+function Format-Storage([double]$gb) {
+  if ($gb -lt 0.01) { return "{0:N0} MB" -f ($gb * 1000) }
+  if ($gb -lt 1)    { return "{0:N0} MB" -f ($gb * 1000) }
+  if ($gb -ge 1000) { return "{0:N2} TB" -f ($gb / 1000) }
+  return "{0:N2} GB" -f $gb
+}
+
 # =============================
 # String Helper Functions
 # =============================
