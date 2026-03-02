@@ -113,7 +113,8 @@ function Invoke-TestStep {
     [int]$Step,
     [int]$Total,
     [string]$Description,
-    [scriptblock]$Action
+    [scriptblock]$Action,
+    [switch]$NonFatal
   )
   Write-Log "STEP ${Step}/${Total}: $Description" -Level "INFO"
   try {
@@ -122,6 +123,10 @@ function Invoke-TestStep {
     return $result
   }
   catch {
+    if ($NonFatal) {
+      Write-Log "  WARN: $($_.Exception.Message) (non-fatal, continuing)" -Level "WARNING"
+      return $null
+    }
     Write-Log "  FAIL: $($_.Exception.Message)" -Level "ERROR"
     Write-Host ""
     Write-Host "Test halted at step ${Step}/${Total}. Fix the issue above and re-run." -ForegroundColor Red

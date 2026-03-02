@@ -307,7 +307,7 @@ function Get-PrismEntities {
     } while ($offset -lt $totalMatches)
   }
 
-  return $allEntities
+  return ,$allEntities.ToArray()
 }
 
 function Get-PrismClusters {
