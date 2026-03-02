@@ -38,6 +38,24 @@ function Get-LicenseAnalysis {
       })
     }
 
+    # Detect Copilot licenses
+    $script:copilotLicenses = 0
+    $script:copilotSkuDetails = New-Object System.Collections.Generic.List[object]
+    foreach ($lic in $licenses) {
+      $isCopilot = $false
+      foreach ($pattern in $COPILOT_SKU_PATTERNS) {
+        if ($lic.SkuPartNumber -like $pattern) { $isCopilot = $true; break }
+      }
+      if ($lic.DisplayName -match 'Copilot') { $isCopilot = $true }
+      if ($isCopilot) {
+        $script:copilotLicenses += $lic.Assigned
+        $script:copilotSkuDetails.Add($lic)
+      }
+    }
+    if ($script:copilotLicenses -gt 0) {
+      Write-Log "Copilot licenses detected: $($script:copilotLicenses) assigned across $($script:copilotSkuDetails.Count) SKU(s)"
+    }
+
     # Sort by purchased count descending
     return @($licenses | Sort-Object -Property Purchased -Descending)
   } catch {

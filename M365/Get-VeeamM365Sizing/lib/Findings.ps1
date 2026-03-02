@@ -180,6 +180,17 @@ function Get-Findings {
     $findings.Add((New-Finding -Title "Microsoft Teams Workload Detected" -Detail "$($script:teamsCount) Teams detected. Teams data spans Exchange (conversations) and SharePoint (files); confirm your data protection strategy includes Teams-specific coverage." -Severity "Info" -Category "Data Protection" -Tone "Informational"))
   }
 
+  # --- Copilot ---
+  if ($script:copilotLicenses -is [int] -and $script:copilotLicenses -gt 0) {
+    $findings.Add((New-Finding -Title "Microsoft 365 Copilot Adoption Detected" -Detail "$($script:copilotLicenses) Copilot-licensed users generating AI-assisted content across Exchange, OneDrive, and SharePoint. Copilot interactions create additional data artifacts (drafts, summaries, chat history) that increase the backup data footprint by an estimated $([int](($COPILOT_DATA_MULTIPLIER - 1) * 100))%." -Severity "Info" -Category "Data Protection" -Tone "Informational"))
+
+    # Copilot data protection gap
+    $copilotPctOfUsers = if ($script:UsersToProtect -gt 0) { $script:copilotLicenses / $script:UsersToProtect } else { 0 }
+    if ($copilotPctOfUsers -ge 0.20) {
+      $findings.Add((New-Finding -Title "Copilot Data Growth Impact" -Detail "$(Format-Pct $copilotPctOfUsers) of protected users have Copilot licenses. At scale, AI-assisted workflows generate incremental Exchange and OneDrive data that compounds with retention policies. Factor Copilot growth into capacity projections." -Severity "Low" -Category "Data Protection" -Tone "Opportunity"))
+    }
+  }
+
   return ,$findings.ToArray()
 }
 
@@ -261,6 +272,11 @@ function Get-Recommendations {
   # --- Teams ---
   if ($script:teamsCount -is [int] -and $script:teamsCount -gt 0) {
     $recs.Add((New-Recommendation -Title "Include Teams in Data Protection Scope" -Detail "Verify that your data protection strategy covers all $($script:teamsCount) Teams including conversations, channel files, and team settings. Teams data spans Exchange (conversations) and SharePoint (files)." -Rationale "Teams is a critical collaboration workload. Ensure your retention and recovery capabilities extend to Teams-specific data." -Tier "Strategic"))
+  }
+
+  # --- Copilot ---
+  if ($script:copilotLicenses -is [int] -and $script:copilotLicenses -gt 0) {
+    $recs.Add((New-Recommendation -Title "Account for Copilot Data Growth" -Detail "With $($script:copilotLicenses) Copilot users, plan for an estimated $([int](($COPILOT_DATA_MULTIPLIER - 1) * 100))% increase in backup data volume. Copilot generates drafts, summaries, and chat artifacts stored in Exchange and OneDrive." -Rationale "AI-assisted workflows create incremental data that compounds with retention. Proactively sizing backup capacity avoids storage shortfalls." -Tier "Short-Term"))
   }
 
   return ,$recs.ToArray()

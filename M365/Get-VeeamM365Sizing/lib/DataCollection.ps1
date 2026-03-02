@@ -276,5 +276,16 @@ function Invoke-DataCollection {
 
   $script:projGB = [math]::Round($script:totalGB * (1 + $AnnualGrowthPct), 2)
   $script:mbsEstimateGB = [math]::Round(($script:projGB * $RetentionMultiplier) + $script:monthChangeGB, 2)
+
+  # Apply Copilot growth multiplier if Copilot licenses are detected
+  $script:copilotAdjustmentGB = 0
+  if ($script:copilotLicenses -is [int] -and $script:copilotLicenses -gt 0 -and $script:UsersToProtect -gt 0) {
+    $copilotRatio = [math]::Min($script:copilotLicenses / $script:UsersToProtect, 1.0)
+    $blendedMultiplier = 1.0 + (($COPILOT_DATA_MULTIPLIER - 1.0) * $copilotRatio)
+    $script:copilotAdjustmentGB = [math]::Round($script:mbsEstimateGB * ($blendedMultiplier - 1.0), 2)
+    $script:mbsEstimateGB = [math]::Round($script:mbsEstimateGB * $blendedMultiplier, 2)
+    Write-Log "Copilot adjustment: +$($script:copilotAdjustmentGB) GB ($('{0:N1}' -f (($blendedMultiplier - 1.0) * 100))% blended increase for $($script:copilotLicenses) Copilot users)"
+  }
+
   $script:suggestedStartGB = [math]::Round($script:mbsEstimateGB * (1 + $BufferPct), 2)
 }

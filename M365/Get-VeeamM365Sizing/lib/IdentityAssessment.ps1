@@ -218,6 +218,7 @@ function Invoke-IdentityAssessment {
   $script:riskyUsers      = $null
   $script:secureScore     = $null
   $script:teamsCount      = $null
+  $script:copilotLicenses = $null
 
   if ($Full) {
     Write-Host "Collecting posture signals (directory/CA/Intune)..." -ForegroundColor Green
