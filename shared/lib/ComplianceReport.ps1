@@ -972,10 +972,6 @@ function New-RecoveryScheduleConfig {
   $result = $null
 
   if ($format -eq "TaskScheduler") {
-    # Parse time
-    $timeParts = $Time -split ':'
-    $hour = $timeParts[0]
-    $minute = $timeParts[1]
     $startBoundary = "2026-01-01T${Time}:00"
 
     # Build trigger based on frequency
@@ -1256,7 +1252,7 @@ function Send-RecoveryNotification {
         }
 
         $jsonBody = $teamsPayload | ConvertTo-Json -Depth 10
-        Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $jsonBody -ContentType "application/json" -ErrorAction Stop | Out-Null
+        Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $jsonBody -ContentType "application/json" -TimeoutSec 30 -ErrorAction Stop | Out-Null
         Write-Verbose "Teams notification sent successfully"
       }
       elseif ($isSlack) {
@@ -1293,7 +1289,7 @@ function Send-RecoveryNotification {
         }
 
         $jsonBody = $slackPayload | ConvertTo-Json -Depth 10
-        Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $jsonBody -ContentType "application/json" -ErrorAction Stop | Out-Null
+        Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $jsonBody -ContentType "application/json" -TimeoutSec 30 -ErrorAction Stop | Out-Null
         Write-Verbose "Slack notification sent successfully"
       }
       else {
@@ -1318,7 +1314,7 @@ function Send-RecoveryNotification {
         }
 
         $jsonBody = $genericPayload | ConvertTo-Json -Depth 10
-        Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $jsonBody -ContentType "application/json" -ErrorAction Stop | Out-Null
+        Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $jsonBody -ContentType "application/json" -TimeoutSec 30 -ErrorAction Stop | Out-Null
         Write-Verbose "Webhook notification sent successfully"
       }
     }
