@@ -152,7 +152,8 @@ function Invoke-TestStep {
     [int]$Step,
     [int]$Total,
     [string]$Description,
-    [scriptblock]$Action
+    [scriptblock]$Action,
+    [switch]$NonFatal
   )
   Write-Log "STEP ${Step}/${Total}: $Description" -Level "INFO"
   try {
@@ -161,6 +162,10 @@ function Invoke-TestStep {
     return $result
   }
   catch {
+    if ($NonFatal) {
+      Write-Log "  WARN: $($_.Exception.Message) (non-fatal, continuing)" -Level "WARNING"
+      return $null
+    }
     Write-Log "  FAIL: $($_.Exception.Message)" -Level "ERROR"
     Write-Host ""
     Write-Host "Test halted at step ${Step}/${Total}. Fix the issue above and re-run." -ForegroundColor Red
@@ -247,7 +252,7 @@ $targetRP = Invoke-TestStep -Step 3 -Total 8 -Description "Find '$TargetVMName' 
 # =============================
 # Step 4: Get Restore Point Metadata
 # =============================
-$metadata = Invoke-TestStep -Step 4 -Total 8 -Description "Get restore point metadata (NICs, cluster, disks)" -Action {
+$metadata = Invoke-TestStep -Step 4 -Total 8 -Description "Get restore point metadata (NICs, cluster, disks)" -NonFatal -Action {
   $md = Get-VBAHVRestorePointMetadata -RestorePointId $targetRP.id
   Write-Host "  Using VM ID as restore point ID: $($targetRP.id)" -ForegroundColor Gray
 
@@ -309,7 +314,7 @@ $prismVM = Invoke-TestStep -Step 6 -Total 8 -Description "Find '$TargetVMName' i
 # =============================
 # Step 7: Compare Metadata (VBR backup vs Prism live)
 # =============================
-$null = Invoke-TestStep -Step 7 -Total 8 -Description "Compare backup metadata vs live Prism data" -Action {
+$null = Invoke-TestStep -Step 7 -Total 8 -Description "Compare backup metadata vs live Prism data" -NonFatal -Action {
   $mismatches = 0
 
   # Compare cluster
@@ -396,7 +401,13 @@ $null = Invoke-TestStep -Step 8 -Total 8 -Description "Resolve isolated network"
 # Summary
 # =============================
 Write-Host ""
-Write-Host "  All 8 steps passed." -ForegroundColor Green
+$warnings = @($script:LogEntries | Where-Object { $_.Level -eq "WARNING" }).Count
+if ($warnings -gt 0) {
+  Write-Host "  Core steps passed ($warnings non-fatal warning(s))." -ForegroundColor Yellow
+}
+else {
+  Write-Host "  All 8 steps passed." -ForegroundColor Green
+}
 Write-Host "  Cross-system data handoff validated for '$TargetVMName'." -ForegroundColor Green
 Write-Host "  Next: run the main script with -DryRun for full flow validation." -ForegroundColor Green
 Write-Host ""

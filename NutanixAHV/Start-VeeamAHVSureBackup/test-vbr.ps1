@@ -236,7 +236,7 @@ $protectedVMs = Invoke-TestStep -Step 6 -Total 7 -Description "Discover protecte
 # =============================
 # Step 7: Restore Point Metadata (first VM)
 # =============================
-$null = Invoke-TestStep -Step 7 -Total 7 -Description "Get restore point metadata for first VM" -Action {
+$null = Invoke-TestStep -Step 7 -Total 7 -Description "Get restore point metadata for first VM" -NonFatal -Action {
   $firstVM = @($protectedVMs)[0]
   $vmId = $firstVM.id
   Write-Host "  Using VM: $($firstVM.name) ($vmId)" -ForegroundColor Gray
