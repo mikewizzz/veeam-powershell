@@ -133,6 +133,13 @@ function Invoke-PrismAPI {
         # PS 5.1 fallback: use Invoke-WebRequest to access response headers for ETag
         $webParams = $params.Clone()
         $webParams.UseBasicParsing = $true
+        # PS 5.1: move Content-Type to dedicated parameter for reliability
+        $webHeaders = $webParams.Headers.Clone()
+        if ($webHeaders.ContainsKey("Content-Type")) {
+          $webParams.ContentType = $webHeaders["Content-Type"]
+          $webHeaders.Remove("Content-Type") | Out-Null
+          $webParams.Headers = $webHeaders
+        }
         $webResponse = Invoke-WebRequest @webParams -ErrorAction Stop
         $response = $webResponse.Content | ConvertFrom-Json
         $etag = $webResponse.Headers["ETag"]
@@ -358,10 +365,78 @@ function Get-PrismSubnets {
         $totalMatches = if ($result.metadata.total_matches) { $result.metadata.total_matches } else { 0 }
         $offset += $pageSize
       } while ($offset -lt $totalMatches)
+
+      # v3 returned 0 — try v2 networks API (required for Nutanix CE)
+      if ($allSubnets.Count -eq 0) {
+        Write-Log "v3 subnets/list returned 0 entities, trying v2 networks API..." -Level "WARNING"
+        try {
+          $v2Raw = Invoke-PrismAPI -Method "GET" -Endpoint "nutanix/v2.0/networks/?count=500"
+          $v2Result = Resolve-PrismResponseBody $v2Raw
+          if ($v2Result.entities) {
+            foreach ($net in $v2Result.entities) {
+              $normalized = [PSCustomObject]@{
+                extId            = $net.uuid
+                name             = $net.name
+                vlanId           = $net.vlan_id
+                subnetType       = if ($net.network_type) { $net.network_type } else { "VLAN" }
+                clusterReference = $null
+              }
+              $allSubnets.Add($normalized)
+            }
+            Write-Log "v2 networks returned $($allSubnets.Count) subnet(s)" -Level "INFO"
+          }
+        }
+        catch {
+          Write-Log "v2 networks API also failed: $($_.Exception.Message)" -Level "WARNING"
+        }
+      }
+
       return ,$allSubnets.ToArray()
     }
   }
-  return Get-PrismEntities -EndpointKey "Subnets"
+
+  # v3 mode
+  $v3Result = Get-PrismEntities -EndpointKey "Subnets"
+  if (@($v3Result).Count -gt 0) { return $v3Result }
+
+  # v3 returned 0 — try v2 networks API (required for Nutanix CE)
+  Write-Log "v3 subnets returned 0 entities, trying v2 networks API..." -Level "WARNING"
+  $allSubnets = New-Object System.Collections.Generic.List[object]
+  try {
+    # In v3 mode, base URL is /api/nutanix/v3 — construct v2 URL via PrismOrigin
+    $v2Url = "$($script:PrismOrigin)/api/nutanix/v2.0/networks/?count=500"
+    $v2Params = @{
+      Method     = "GET"
+      Uri        = $v2Url
+      Headers    = $script:PrismHeaders
+      TimeoutSec = 30
+    }
+    if ($script:SkipCert -and $PSVersionTable.PSVersion.Major -ge 7) {
+      $v2Params.SkipCertificateCheck = $true
+    }
+    $v2Response = Invoke-RestMethod @v2Params -ErrorAction Stop
+    if ($v2Response.entities) {
+      foreach ($net in $v2Response.entities) {
+        # Normalize to v3 shape for downstream v3 accessors
+        $allSubnets.Add([PSCustomObject]@{
+          metadata = [PSCustomObject]@{ uuid = $net.uuid; kind = "subnet" }
+          spec = [PSCustomObject]@{
+            name      = $net.name
+            resources = [PSCustomObject]@{
+              vlan_id     = $net.vlan_id
+              subnet_type = if ($net.network_type) { $net.network_type } else { "VLAN" }
+            }
+            cluster_reference = $null
+          }
+        })
+      }
+      Write-Log "v2 networks returned $($allSubnets.Count) subnet(s)" -Level "INFO"
+    }
+  }
+  catch {
+    Write-Log "v2 networks API also failed: $($_.Exception.Message)" -Level "WARNING"
+  }
+  return ,$allSubnets.ToArray()
 }
 
 function Get-SubnetName {
