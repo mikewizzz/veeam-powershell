@@ -27,6 +27,23 @@ $ZT_ADVANCED_THRESHOLD  = 67   # 67+ = Advanced maturity
 $ZT_DEVELOPING_THRESHOLD = 34  # 34-66 = Developing maturity; below 34 = Initial
 
 # =============================
+# Copilot SKU Part Numbers
+# =============================
+$COPILOT_SKU_PATTERNS = @(
+  "Microsoft_365_Copilot",
+  "COPILOT_*",
+  "M365_COPILOT_*",
+  "SPE_E5_COPILOT*"
+)
+
+# =============================
+# Copilot Sizing Multipliers
+# =============================
+$COPILOT_DATA_MULTIPLIER     = 1.15   # 15% additional data generation per Copilot user
+$COPILOT_EXCHANGE_MULTIPLIER = 1.20   # 20% more Exchange activity per Copilot user
+$COPILOT_ONEDRIVE_MULTIPLIER = 1.10   # 10% more OneDrive content per Copilot user
+
+# =============================
 # Unit Conversion Functions
 # =============================
 

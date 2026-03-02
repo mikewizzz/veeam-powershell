@@ -20,7 +20,10 @@ function Export-InputsData {
     [pscustomobject]@{ Key="ChangeRateOneDrive_Model"; Value=$ChangeRateOneDrive },
     [pscustomobject]@{ Key="ChangeRateSharePoint_Model"; Value=$ChangeRateSharePoint },
     [pscustomobject]@{ Key="BufferPct_Heuristic"; Value=$BufferPct },
-    [pscustomobject]@{ Key="SharePointGroupFiltering"; Value="Not supported from usage reports (by design)" }
+    [pscustomobject]@{ Key="SharePointGroupFiltering"; Value="Not supported from usage reports (by design)" },
+    [pscustomobject]@{ Key="Compliance"; Value=$Compliance },
+    [pscustomobject]@{ Key="AssessmentStore"; Value=$(if($AssessmentStore){$AssessmentStore}else{""}) },
+    [pscustomobject]@{ Key="TenantList"; Value=$(if($TenantList){$TenantList}else{""}) }
   )
   $inputs | Export-Csv -NoTypeInformation -Path $outInputs
   return $inputs
@@ -105,6 +108,20 @@ function Export-SummaryData {
       $summaryProps["ZT_Data"]      = $script:ztScores.Data
       $summaryProps["ZT_Apps"]      = $script:ztScores.Apps
       $summaryProps["ZT_Overall"]   = $script:ztScores.Overall
+    }
+
+    # Copilot metrics
+    $summaryProps["CopilotLicenses"]    = $script:copilotLicenses
+    $summaryProps["CopilotAdjustGB"]    = $script:copilotAdjustmentGB
+
+    # Compliance scores
+    if ($script:complianceScores) {
+      foreach ($fw in @("NIS2", "SOC2", "ISO27001", "Overall")) {
+        if ($script:complianceScores[$fw]) {
+          $summaryProps["Compliance_${fw}_Score"] = $script:complianceScores[$fw].Score
+          $summaryProps["Compliance_${fw}_Maturity"] = $script:complianceScores[$fw].Maturity
+        }
+      }
     }
   }
 
@@ -199,6 +216,26 @@ function Export-SecurityData {
         [pscustomobject]@{ Section="ZeroTrust"; Name="Overall_Score"; Value=$script:ztScores.Overall }
       )
     }
+
+    # Copilot
+    if ($script:copilotLicenses -is [int]) {
+      $sec += @(
+        [pscustomobject]@{ Section="AI"; Name="CopilotLicenses"; Value=$script:copilotLicenses },
+        [pscustomobject]@{ Section="AI"; Name="CopilotAdjustmentGB"; Value=$script:copilotAdjustmentGB }
+      )
+    }
+
+    # Compliance scores
+    if ($script:complianceScores) {
+      foreach ($fw in @("NIS2", "SOC2", "ISO27001", "Overall")) {
+        if ($script:complianceScores[$fw]) {
+          $sec += @(
+            [pscustomobject]@{ Section="Compliance"; Name="${fw}_Score"; Value=$script:complianceScores[$fw].Score },
+            [pscustomobject]@{ Section="Compliance"; Name="${fw}_Maturity"; Value=$script:complianceScores[$fw].Maturity }
+          )
+        }
+      }
+    }
   }
   $sec | Export-Csv -NoTypeInformation -Path $outSecurity
   return $sec
@@ -235,6 +272,118 @@ function Export-RecommendationsData {
   $outRecs = Join-Path $runFolder "Veeam-M365-Recommendations-$stamp.csv"
   $script:recommendations | Export-Csv -NoTypeInformation -Path $outRecs
   $script:outRecommendations = $outRecs
+}
+
+<#
+.SYNOPSIS
+  Exports compliance findings CSV with framework control mappings (Compliance mode only).
+#>
+function Export-ComplianceData {
+  if (-not $Compliance -or -not $script:findings -or $script:findings.Count -eq 0) { return }
+
+  $compRows = New-Object System.Collections.Generic.List[object]
+  foreach ($f in $script:findings) {
+    if ($f.PSObject.Properties.Name -contains "ComplianceControls" -and $f.ComplianceControls.Count -gt 0) {
+      foreach ($ctrl in $f.ComplianceControls) {
+        $compRows.Add([PSCustomObject]@{
+          FindingTitle = $f.Title
+          Severity     = $f.Severity
+          Category     = $f.Category
+          Framework    = $ctrl.Framework
+          Control      = $ctrl.Control
+          Description  = $ctrl.Description
+          Article      = $ctrl.Article
+        })
+      }
+    }
+  }
+
+  if ($compRows.Count -gt 0) {
+    $outCompliance = Join-Path $runFolder "Veeam-M365-Compliance-$stamp.csv"
+    $compRows | Export-Csv -NoTypeInformation -Path $outCompliance
+    $script:outCompliance = $outCompliance
+  }
+}
+
+<#
+.SYNOPSIS
+  Exports delta report CSV comparing current to prior assessment.
+#>
+function Export-DeltaData {
+  if (-not $script:assessmentDelta) { return }
+
+  $deltaRows = New-Object System.Collections.Generic.List[object]
+  $d = $script:assessmentDelta
+
+  # Sizing deltas
+  if ($d.Sizing) {
+    foreach ($key in $d.Sizing.Keys) {
+      $v = $d.Sizing[$key]
+      $deltaRows.Add([PSCustomObject]@{
+        Category  = "Sizing"
+        Metric    = $key
+        Prior     = $v.Prior
+        Current   = $v.Current
+        Delta     = $v.Delta
+        DeltaPct  = $v.DeltaPct
+        Direction = $v.Direction
+      })
+    }
+  }
+
+  # Identity deltas
+  if ($d.Identity) {
+    foreach ($key in $d.Identity.Keys) {
+      $v = $d.Identity[$key]
+      $deltaRows.Add([PSCustomObject]@{
+        Category  = "Identity"
+        Metric    = $key
+        Prior     = $v.Prior
+        Current   = $v.Current
+        Delta     = $v.Delta
+        DeltaPct  = $v.DeltaPct
+        Direction = $v.Direction
+      })
+    }
+  }
+
+  # Score deltas
+  if ($d.Scores) {
+    foreach ($key in $d.Scores.Keys) {
+      $v = $d.Scores[$key]
+      $deltaRows.Add([PSCustomObject]@{
+        Category  = "Scores"
+        Metric    = $key
+        Prior     = $v.Prior
+        Current   = $v.Current
+        Delta     = $v.Delta
+        DeltaPct  = $v.DeltaPct
+        Direction = $v.Direction
+      })
+    }
+  }
+
+  # Compliance score deltas
+  if ($d.ComplianceScores) {
+    foreach ($key in $d.ComplianceScores.Keys) {
+      $v = $d.ComplianceScores[$key]
+      $deltaRows.Add([PSCustomObject]@{
+        Category  = "ComplianceScores"
+        Metric    = $key
+        Prior     = $v.Prior
+        Current   = $v.Current
+        Delta     = $v.Delta
+        DeltaPct  = $v.DeltaPct
+        Direction = $v.Direction
+      })
+    }
+  }
+
+  if ($deltaRows.Count -gt 0) {
+    $outDelta = Join-Path $runFolder "Veeam-M365-Delta-$stamp.csv"
+    $deltaRows | Export-Csv -NoTypeInformation -Path $outDelta
+    $script:outDelta = $outDelta
+  }
 }
 
 <#
@@ -350,6 +499,25 @@ function Export-JsonBundle {
         Apps     = $script:ztScores.Apps
         Overall  = $script:ztScores.Overall
       }
+    }
+
+    # Copilot data
+    if ($script:copilotLicenses -is [int] -and $script:copilotLicenses -gt 0) {
+      $bundle["Copilot"] = [ordered]@{
+        Licenses       = $script:copilotLicenses
+        AdjustmentGB   = $script:copilotAdjustmentGB
+        SkuDetails     = if ($script:copilotSkuDetails) { @($script:copilotSkuDetails) } else { @() }
+      }
+    }
+
+    # Compliance scores
+    if ($script:complianceScores) {
+      $bundle["ComplianceScores"] = $script:complianceScores
+    }
+
+    # Delta from prior assessment
+    if ($script:assessmentDelta) {
+      $bundle["Delta"] = $script:assessmentDelta
     }
   }
 

@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Get-VeeamM365Sizing.ps1 - Microsoft 365 sizing (users + dataset + growth) with optional
-  security posture signals, identity assessment, and optional Exchange deep sizing.
+  Get-VeeamM365Sizing.ps1 - Microsoft 365 sizing, compliance assessment, and trend analysis
+  with optional security posture signals, identity assessment, and Exchange deep sizing.
 
 .DESCRIPTION (what this script does, in plain terms)
   1) Pulls Microsoft 365 usage report CSVs via Microsoft Graph (Exchange, OneDrive, SharePoint)
@@ -9,13 +9,26 @@
   3) Estimates a modeled "MBS" number (clearly labeled as a model, not a measured fact)
   4) Optionally pulls Entra ID/CA/Intune counts, identity signals, license analysis,
      and generates algorithmic findings and recommendations (Full mode)
-  5) Writes outputs to a timestamped folder and optionally zips the bundle
+  5) Maps findings to NIS2/SOC2/ISO27001 compliance frameworks (Compliance mode)
+  6) Detects Microsoft 365 Copilot adoption and adjusts sizing projections
+  7) Stores assessment snapshots and generates delta reports (trend analysis)
+  8) Supports multi-tenant batch assessment via CSV-driven credential list
+  9) Writes outputs to a timestamped folder and optionally zips the bundle
 
 QUICK START (simple run)
   .\Get-VeeamM365Sizing.ps1
 
 FULL RUN (includes identity assessment, license analysis, findings & recommendations)
   .\Get-VeeamM365Sizing.ps1 -Full
+
+COMPLIANCE ASSESSMENT (maps findings to NIS2, SOC2, ISO 27001 controls)
+  .\Get-VeeamM365Sizing.ps1 -Full -Compliance
+
+DELTA REPORT (compare against prior assessment)
+  .\Get-VeeamM365Sizing.ps1 -Full -AssessmentStore ".\assessments"
+
+MULTI-TENANT (batch assessment across multiple tenants)
+  .\Get-VeeamM365Sizing.ps1 -Full -TenantList ".\tenants.csv"
 
 OPTIONAL (more accurate Exchange dataset; slower)
   .\Get-VeeamM365Sizing.ps1 -IncludeArchive -IncludeRecoverableItems
@@ -85,6 +98,17 @@ param(
   [ValidateRange(0.0, 1.0)][double]$ChangeRateSharePoint = 0.003,# Daily change rate for SharePoint (0.3%)
   [ValidateRange(0.0, 1.0)][double]$BufferPct = 0.10,           # Safety buffer for capacity planning (10%)
 
+  # ===== Compliance Assessment =====
+  [switch]$Compliance,                         # Enable NIS2/SOC2/ISO27001 compliance mappings (requires -Full)
+
+  # ===== Assessment Persistence =====
+  [string]$AssessmentStore,                    # Path to store assessment snapshots for delta reports
+                                               # Default: {OutFolder}/.assessments
+
+  # ===== Multi-Tenant Mode =====
+  [string]$TenantList,                         # Path to CSV with tenant credentials for batch assessment
+                                               # CSV columns: TenantId, ClientId, CertificateThumbprint (or ClientSecret)
+
   # ===== Output & UX =====
   [string]$OutFolder = ".\VeeamM365SizingOutput",
   [switch]$ExportJson,
@@ -103,6 +127,18 @@ $ProgressPreference = 'SilentlyContinue'
 # If user didn't specify -Quick or -Full, default to Quick behavior.
 if (-not $PSBoundParameters.ContainsKey('Quick') -and -not $PSBoundParameters.ContainsKey('Full')) {
   $Quick = $true
+}
+
+# Compliance requires Full mode
+if ($Compliance -and -not $Full) {
+  Write-Host "Note: -Compliance requires -Full mode. Enabling Full mode automatically." -ForegroundColor Yellow
+  $Full = $true
+  $Quick = $false
+}
+
+# Default assessment store path
+if (-not $AssessmentStore) {
+  $AssessmentStore = Join-Path $OutFolder ".assessments"
 }
 
 # =============================
@@ -136,6 +172,8 @@ $requiredLibs = @(
   "IdentityAssessment.ps1",
   "LicenseAnalysis.ps1",
   "Findings.ps1",
+  "Compliance.ps1",
+  "Persistence.ps1",
   "Exports.ps1",
   "HtmlReport.ps1"
 )
@@ -145,6 +183,54 @@ foreach ($lib in $requiredLibs) {
     throw "Required library not found: $libFile. Ensure all files in lib/ are present."
   }
   . $libFile
+}
+
+# =============================
+# Multi-Tenant Mode
+# =============================
+if ($TenantList) {
+  if (-not (Test-Path $TenantList)) { throw "Tenant list CSV not found: $TenantList" }
+  $tenants = Import-Csv $TenantList
+  if (-not $tenants -or @($tenants).Count -eq 0) { throw "Tenant list CSV is empty: $TenantList" }
+
+  Write-Host "Multi-tenant mode: processing $(@($tenants).Count) tenant(s)..." -ForegroundColor Cyan
+  $mtResults = New-Object System.Collections.Generic.List[object]
+  $scriptPath = $PSCommandPath
+
+  foreach ($t in $tenants) {
+    Write-Host "`n--- Tenant: $($t.TenantId) ---" -ForegroundColor Yellow
+    $tenantArgs = @{
+      UseAppAccess = $true
+      TenantId     = $t.TenantId
+      ClientId     = $t.ClientId
+      OutFolder    = Join-Path $OutFolder $t.TenantId
+      ExportJson   = $true
+      ZipBundle    = $ZipBundle
+      Period       = $Period
+    }
+    if ($Full)       { $tenantArgs["Full"]       = $true }
+    if ($Compliance) { $tenantArgs["Compliance"] = $true }
+    if ($AssessmentStore) { $tenantArgs["AssessmentStore"] = $AssessmentStore }
+    if ($t.CertificateThumbprint) { $tenantArgs["CertificateThumbprint"] = $t.CertificateThumbprint }
+
+    try {
+      & $scriptPath @tenantArgs
+      $mtResults.Add([PSCustomObject]@{ TenantId = $t.TenantId; Status = "Success"; Error = $null })
+    } catch {
+      Write-Host "  Failed: $($_.Exception.Message)" -ForegroundColor Red
+      $mtResults.Add([PSCustomObject]@{ TenantId = $t.TenantId; Status = "Failed"; Error = $_.Exception.Message })
+    }
+  }
+
+  # Multi-tenant summary
+  $mtSummaryPath = Join-Path $OutFolder "MultiTenant-Summary-$stamp.csv"
+  $mtResults | Export-Csv -NoTypeInformation -Path $mtSummaryPath
+  Write-Host "`nMulti-tenant assessment complete." -ForegroundColor Green
+  Write-Host "Processed : $(@($tenants).Count) tenants"
+  Write-Host "Succeeded : $(($mtResults | Where-Object { $_.Status -eq 'Success' }).Count)"
+  Write-Host "Failed    : $(($mtResults | Where-Object { $_.Status -eq 'Failed' }).Count)"
+  Write-Host "Summary   : $mtSummaryPath"
+  return
 }
 
 # =============================
@@ -180,6 +266,44 @@ $script:findings = Get-Findings
 $script:recommendations = Get-Recommendations
 $script:readinessScore = Get-ProtectionReadinessScore
 
+# Step 7b: Compliance mappings (Full + Compliance mode)
+$script:complianceScores = $null
+$script:complianceFindings = $null
+if ($Compliance -and $script:findings -and $script:findings.Count -gt 0) {
+  Write-Host "Mapping findings to compliance frameworks (NIS2, SOC2, ISO 27001)..." -ForegroundColor Green
+
+  # Enrich existing findings with compliance control mappings
+  $script:findings = Get-ComplianceFindings -Findings $script:findings
+
+  # Generate compliance-specific findings
+  $compSpecific = Get-ComplianceSpecificFindings
+  if ($compSpecific -and $compSpecific.Count -gt 0) {
+    $compSpecific = Get-ComplianceFindings -Findings $compSpecific
+    $allFindings = New-Object System.Collections.Generic.List[object]
+    foreach ($f in $script:findings) { $allFindings.Add($f) }
+    foreach ($f in $compSpecific) { $allFindings.Add($f) }
+    $script:findings = ,$allFindings.ToArray()
+  }
+
+  # Calculate compliance readiness scores per framework
+  $script:complianceScores = Get-ComplianceScores -Findings $script:findings
+  Write-Log "Compliance scores: NIS2=$($script:complianceScores.NIS2.Score), SOC2=$($script:complianceScores.SOC2.Score), ISO27001=$($script:complianceScores.ISO27001.Score)"
+}
+
+# Step 7c: Load prior assessment for delta reporting
+$script:priorAssessment = $null
+$script:assessmentDelta = $null
+if ($AssessmentStore) {
+  $script:priorAssessment = Get-PriorAssessment -StorePath $AssessmentStore -TenantId $script:OrgId
+  if ($script:priorAssessment) {
+    $script:assessmentDelta = Get-AssessmentDelta -Prior $script:priorAssessment
+    $daysSince = $script:assessmentDelta.DaysBetween
+    Write-Host "Delta report: comparing against assessment from $daysSince days ago" -ForegroundColor Cyan
+  } else {
+    Write-Host "No prior assessment found. This run will establish the baseline." -ForegroundColor Yellow
+  }
+}
+
 # Step 8: Export data files
 $inputs  = Export-InputsData
 $summary = Export-SummaryData
@@ -189,19 +313,26 @@ $sec     = Export-SecurityData
 Export-LicenseData
 Export-FindingsData
 Export-RecommendationsData
+Export-ComplianceData
+Export-DeltaData
 Export-NotesFile -inputs $inputs
 Export-JsonBundle -inputs $inputs -summary $summary -wl $wl -sec $sec
 
 # Step 9: Generate HTML report
 Build-HtmlReport
 
-# Step 10: Zip bundle
+# Step 10: Save assessment snapshot for future delta reports
+if ($AssessmentStore) {
+  $script:snapshotPath = Save-AssessmentSnapshot -StorePath $AssessmentStore
+}
+
+# Step 11: Zip bundle
 if ($ZipBundle) {
   if (Test-Path $outZip) { Remove-Item $outZip -Force -ErrorAction SilentlyContinue }
   Compress-Archive -Path (Join-Path $runFolder "*") -DestinationPath $outZip -Force
 }
 
-# Step 11: Cleanup
+# Step 12: Cleanup
 Disconnect-MgGraph | Out-Null
 Write-Log "Completed run"
 
@@ -225,6 +356,35 @@ if ($Full) {
     Write-Host "Readiness     : $($script:readinessScore)/100" -ForegroundColor $(if($script:readinessScore -ge 70){"Green"}elseif($script:readinessScore -ge 40){"Yellow"}else{"Red"})
   }
 }
+if ($Compliance -and $script:complianceScores) {
+  Write-Host ""
+  Write-Host "Compliance Readiness:" -ForegroundColor Cyan
+  foreach ($fw in @("NIS2", "SOC2", "ISO27001")) {
+    $s = $script:complianceScores[$fw]
+    $color = if ($s.Score -ge 80) { "Green" } elseif ($s.Score -ge 50) { "Yellow" } else { "Red" }
+    Write-Host "  $fw : $($s.Status)" -ForegroundColor $color
+  }
+}
+if ($script:assessmentDelta) {
+  $d = $script:assessmentDelta
+  Write-Host ""
+  Write-Host "Delta vs prior ($($d.DaysBetween) days ago):" -ForegroundColor Cyan
+  $sizD = $d.Sizing
+  if ($sizD.TotalGB -and $sizD.TotalGB.Delta -ne $null) {
+    $dir = if ($sizD.TotalGB.Delta -gt 0) { "+" } else { "" }
+    Write-Host "  Dataset     : ${dir}$('{0:N2}' -f $sizD.TotalGB.Delta) GB ($('{0:N1}' -f $sizD.TotalGB.DeltaPct)%)"
+  }
+  if ($sizD.UsersToProtect -and $sizD.UsersToProtect.Delta -ne $null) {
+    $dir = if ($sizD.UsersToProtect.Delta -gt 0) { "+" } else { "" }
+    Write-Host "  Users       : ${dir}$($sizD.UsersToProtect.Delta)"
+  }
+  if ($d.Scores -and $d.Scores.ReadinessScore -and $d.Scores.ReadinessScore.Delta -ne $null) {
+    $dir = if ($d.Scores.ReadinessScore.Delta -gt 0) { "+" } else { "" }
+    $readColor = if ($d.Scores.ReadinessScore.Delta -ge 0) { "Green" } else { "Red" }
+    Write-Host "  Readiness   : ${dir}$($d.Scores.ReadinessScore.Delta) pts" -ForegroundColor $readColor
+  }
+}
+if ($script:snapshotPath) { Write-Host "Snapshot      : $($script:snapshotPath)" }
 if ($ExportJson) { Write-Host "JSON bundle   : $outJson" }
 if ($ZipBundle)  { Write-Host "ZIP bundle    : $outZip" }
 Write-Host ""

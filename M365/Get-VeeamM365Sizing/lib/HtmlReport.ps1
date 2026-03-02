@@ -1328,6 +1328,130 @@ $recsHtml
 "@)
   }
 
+  # =============================
+  # COMPLIANCE MODE: Framework Readiness Section
+  # =============================
+  if ($Compliance -and $script:complianceScores) {
+    $compHtml = ""
+
+    # Framework score cards
+    $compHtml += "    <div class='identity-kpi-grid' style='grid-template-columns: repeat(4, 1fr); margin-bottom: 24px;'>`n"
+    foreach ($fw in @("NIS2", "SOC2", "ISO27001", "Overall")) {
+      $cs = $script:complianceScores[$fw]
+      $scoreVal = if ($cs) { $cs.Score } else { 0 }
+      $maturity = if ($cs -and $cs.Maturity) { $cs.Maturity } else { "No Data" }
+      $scoreColor = if ($scoreVal -ge 80) { "var(--color-success)" } elseif ($scoreVal -ge 50) { "var(--color-warning)" } else { "var(--color-danger)" }
+      $fwLabel = if ($fw -eq "Overall") { "Overall Compliance" } elseif ($fw -eq "ISO27001") { "ISO 27001" } else { $fw }
+      $compHtml += @"
+      <div class='identity-kpi'>
+        <div class='identity-kpi-value' style='color: $scoreColor;'>$scoreVal<span style='font-size: 14px; color: var(--ms-gray-90);'>/100</span></div>
+        <div class='identity-kpi-label'>$fwLabel</div>
+        <div style='font-size: 11px; color: var(--ms-gray-90); margin-top: 2px;'>$maturity</div>
+      </div>
+"@
+    }
+    $compHtml += "    </div>`n"
+
+    # Compliance control mapping table
+    $mappedFindings = @($script:findings | Where-Object {
+      $_.PSObject.Properties.Name -contains "ComplianceControls" -and $_.ComplianceControls.Count -gt 0
+    })
+
+    if ($mappedFindings.Count -gt 0) {
+      $compHtml += @"
+    <div class='table-container'>
+      <table>
+        <thead><tr><th>Finding</th><th>Severity</th><th>NIS2</th><th>SOC2</th><th>ISO 27001</th></tr></thead>
+        <tbody>
+"@
+      foreach ($f in $mappedFindings) {
+        $nis2Ctrls = @($f.ComplianceControls | Where-Object { $_.Framework -eq "NIS2" } | ForEach-Object { $_.Control }) -join ", "
+        $soc2Ctrls = @($f.ComplianceControls | Where-Object { $_.Framework -eq "SOC2" } | ForEach-Object { $_.Control }) -join ", "
+        $isoCtrls  = @($f.ComplianceControls | Where-Object { $_.Framework -eq "ISO27001" } | ForEach-Object { $_.Control }) -join ", "
+        $sevClass = $f.Severity.ToLower()
+        $compHtml += "          <tr><td>$(Escape-Html $f.Title)</td><td><span class='severity-badge $sevClass'>$($f.Severity)</span></td><td>$(Escape-Html $nis2Ctrls)</td><td>$(Escape-Html $soc2Ctrls)</td><td>$(Escape-Html $isoCtrls)</td></tr>`n"
+      }
+      $compHtml += "        </tbody>`n      </table>`n    </div>`n"
+    }
+
+    $htmlParts.Add(@"
+  <details class="section" open>
+    <summary>Compliance Framework Readiness</summary>
+    <div class="section-content">
+$compHtml
+    </div>
+  </details>
+"@)
+  }
+
+  # =============================
+  # DELTA REPORT: Changes Since Last Assessment
+  # =============================
+  if ($script:assessmentDelta) {
+    $deltaHtml = ""
+    $d = $script:assessmentDelta
+    $daysBetween = $d.DaysBetween
+
+    $deltaHtml += "    <div class='info-card' style='margin-bottom: 24px;'>`n"
+    $deltaHtml += "      <div class='info-card-title'>Comparing against assessment from $daysBetween days ago</div>`n"
+    $deltaHtml += "      <div class='info-card-text'>Prior assessment date: $(Escape-Html $d.PriorDate)</div>`n"
+    $deltaHtml += "    </div>`n"
+
+    # Delta KPI cards
+    $deltaHtml += "    <div class='identity-kpi-grid' style='grid-template-columns: repeat(4, 1fr); margin-bottom: 24px;'>`n"
+
+    $deltaMetrics = @(
+      @{ Label = "Dataset Change"; Data = $d.Sizing.TotalGB; Unit = "GB"; InvertColor = $false },
+      @{ Label = "User Change"; Data = $d.Sizing.UsersToProtect; Unit = ""; InvertColor = $false },
+      @{ Label = "MBS Estimate Change"; Data = $d.Sizing.MbsEstimateGB; Unit = "GB"; InvertColor = $false }
+    )
+    if ($d.Scores -and $d.Scores.ReadinessScore) {
+      $deltaMetrics += @{ Label = "Readiness Change"; Data = $d.Scores.ReadinessScore; Unit = "pts"; InvertColor = $true }
+    }
+
+    foreach ($dm in $deltaMetrics) {
+      $val = $dm.Data
+      if ($val -and $null -ne $val.Delta) {
+        $sign = if ($val.Delta -gt 0) { "+" } else { "" }
+        $colorUp = if ($dm.InvertColor) { "var(--color-success)" } else { "var(--color-warning)" }
+        $colorDown = if ($dm.InvertColor) { "var(--color-danger)" } else { "var(--color-success)" }
+        $deltaColor = if ($val.Delta -gt 0) { $colorUp } elseif ($val.Delta -lt 0) { $colorDown } else { "var(--ms-gray-90)" }
+        $pctDisplay = if ($null -ne $val.DeltaPct) { " ($('{0:N1}' -f $val.DeltaPct)%)" } else { "" }
+        $deltaHtml += @"
+      <div class='identity-kpi'>
+        <div class='identity-kpi-value' style='color: $deltaColor;'>$sign$('{0:N1}' -f $val.Delta) $($dm.Unit)</div>
+        <div class='identity-kpi-label'>$($dm.Label)$pctDisplay</div>
+      </div>
+"@
+      }
+    }
+    $deltaHtml += "    </div>`n"
+
+    # Delta details table
+    if ($d.Sizing) {
+      $deltaHtml += "    <div class='table-container'>`n      <table>`n"
+      $deltaHtml += "        <thead><tr><th>Metric</th><th>Prior</th><th>Current</th><th>Change</th><th>Direction</th></tr></thead>`n"
+      $deltaHtml += "        <tbody>`n"
+      foreach ($key in $d.Sizing.Keys) {
+        $v = $d.Sizing[$key]
+        if ($null -eq $v.Delta) { continue }
+        $sign = if ($v.Delta -gt 0) { "+" } else { "" }
+        $dirIcon = if ($v.Direction -eq "Up") { "&#9650;" } elseif ($v.Direction -eq "Down") { "&#9660;" } else { "&#9679;" }
+        $deltaHtml += "          <tr><td>$key</td><td>$('{0:N2}' -f $v.Prior)</td><td>$('{0:N2}' -f $v.Current)</td><td>$sign$('{0:N2}' -f $v.Delta)</td><td>$dirIcon $($v.Direction)</td></tr>`n"
+      }
+      $deltaHtml += "        </tbody>`n      </table>`n    </div>`n"
+    }
+
+    $htmlParts.Add(@"
+  <details class="section" open>
+    <summary>Changes Since Last Assessment</summary>
+    <div class="section-content">
+$deltaHtml
+    </div>
+  </details>
+"@)
+  }
+
   # Generated Artifacts
   $artifactItems = @"
       <div class="file-item">Summary CSV: $(Split-Path $outSummary -Leaf)</div>
@@ -1340,6 +1464,8 @@ $recsHtml
   if ($Full -and $script:outLicenses) { $artifactItems += "      <div class='file-item'>Licenses CSV: $(Split-Path $script:outLicenses -Leaf)</div>`n" }
   if ($Full -and $script:outFindings) { $artifactItems += "      <div class='file-item'>Findings CSV: $(Split-Path $script:outFindings -Leaf)</div>`n" }
   if ($Full -and $script:outRecommendations) { $artifactItems += "      <div class='file-item'>Recommendations CSV: $(Split-Path $script:outRecommendations -Leaf)</div>`n" }
+  if ($script:outCompliance) { $artifactItems += "      <div class='file-item'>Compliance CSV: $(Split-Path $script:outCompliance -Leaf)</div>`n" }
+  if ($script:outDelta) { $artifactItems += "      <div class='file-item'>Delta CSV: $(Split-Path $script:outDelta -Leaf)</div>`n" }
 
   $htmlParts.Add(@"
   <details class="section">
