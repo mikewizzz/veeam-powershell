@@ -368,6 +368,204 @@ Describe "Get-PrismEntities" {
       { Get-PrismEntities -EndpointKey "Nonexistent" } | Should -Throw "*Unknown Prism endpoint*"
     }
   }
+
+  Context "Return type preservation" {
+    BeforeEach { $script:PrismApiVersion = "v4" }
+    AfterEach { $script:PrismApiVersion = "v4" }
+
+    It "returns array even with single entity (v4)" {
+      Mock Invoke-PrismAPI {
+        return @{
+          data     = @(@{ extId = "only1"; name = "solo-vm" })
+          metadata = @{ totalAvailableResults = 1 }
+        }
+      }
+
+      $result = Get-PrismEntities -EndpointKey "VMs"
+      $result -is [System.Array] | Should -BeTrue
+      $result.Count | Should -Be 1
+    }
+
+    It "returns array even with single entity (v3)" {
+      $script:PrismApiVersion = "v3"
+
+      Mock Invoke-PrismAPI {
+        return @{
+          entities = @(@{ metadata = @{ uuid = "only1" }; spec = @{ name = "solo" } })
+          metadata = @{ total_matches = 1 }
+        }
+      }
+
+      $result = Get-PrismEntities -EndpointKey "VMs"
+      $result -is [System.Array] | Should -BeTrue
+      $result.Count | Should -Be 1
+    }
+
+    It "returns empty array when no entities (v4)" {
+      Mock Invoke-PrismAPI {
+        return @{ data = @(); metadata = @{ totalAvailableResults = 0 } }
+      }
+
+      $result = Get-PrismEntities -EndpointKey "VMs"
+      $result -is [System.Array] | Should -BeTrue
+      $result.Count | Should -Be 0
+    }
+  }
+}
+
+# ============================================================
+Describe "Get-PrismSubnets" {
+  BeforeAll {
+    $script:PrismApiVersion = "v4"
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+  }
+  AfterAll { $script:PrismApiVersion = "v4" }
+
+  Context "v3 fallback" {
+    It "falls back to v3 when Get-PrismEntities throws" {
+      Mock Get-PrismEntities { throw "500 Internal Server Error" }
+
+      Mock Invoke-PrismAPI {
+        return @{
+          entities = @(
+            @{
+              metadata = @{ uuid = "sub-1" }
+              spec     = @{
+                name      = "vlan100"
+                resources = @{ vlan_id = 100; subnet_type = "VLAN" }
+                cluster_reference = @{ uuid = "cluster-1" }
+              }
+            },
+            @{
+              metadata = @{ uuid = "sub-2" }
+              spec     = @{
+                name      = "vlan200"
+                resources = @{ vlan_id = 200; subnet_type = "VLAN" }
+                cluster_reference = @{ uuid = "cluster-2" }
+              }
+            }
+          )
+          metadata = @{ total_matches = 2 }
+        }
+      }
+
+      $result = Get-PrismSubnets
+      $result.Count | Should -Be 2
+      $result[0].extId | Should -Be "sub-1"
+      $result[0].name | Should -Be "vlan100"
+      $result[0].vlanId | Should -Be 100
+      $result[0].subnetType | Should -Be "VLAN"
+      $result[0].clusterReference.extId | Should -Be "cluster-1"
+    }
+
+    It "v3 fallback returns array with single subnet" {
+      Mock Get-PrismEntities { throw "500 Internal Server Error" }
+
+      Mock Invoke-PrismAPI {
+        return @{
+          entities = @(
+            @{
+              metadata = @{ uuid = "sub-solo" }
+              spec     = @{
+                name      = "single-net"
+                resources = @{ vlan_id = 50; subnet_type = "VLAN" }
+                cluster_reference = @{ uuid = "cl-1" }
+              }
+            }
+          )
+          metadata = @{ total_matches = 1 }
+        }
+      }
+
+      $result = Get-PrismSubnets
+      $result -is [System.Array] | Should -BeTrue
+      $result.Count | Should -Be 1
+    }
+
+    It "v3 fallback returns empty array when no subnets" {
+      Mock Get-PrismEntities { throw "500 Internal Server Error" }
+
+      Mock Invoke-PrismAPI {
+        return @{
+          entities = @()
+          metadata = @{ total_matches = 0 }
+        }
+      }
+
+      $result = Get-PrismSubnets
+      $result -is [System.Array] | Should -BeTrue
+      $result.Count | Should -Be 0
+    }
+
+    It "uses v4 path when Get-PrismEntities succeeds" {
+      Mock Get-PrismEntities {
+        return @(
+          @{ extId = "s1"; name = "net1"; vlanId = 10; subnetType = "VLAN" }
+        )
+      }
+
+      Mock Invoke-PrismAPI {}
+
+      Get-PrismSubnets
+      Should -Invoke Invoke-PrismAPI -Times 0 -Exactly
+    }
+
+    It "v2 fallback when v4 fails and v3 returns empty" {
+      Mock Get-PrismEntities { throw "500 Internal Server Error" }
+
+      Mock Invoke-PrismAPI {
+        param($Method, $Endpoint, $Body)
+        if ($Endpoint -match "subnets/list") {
+          return @{
+            entities = @()
+            metadata = @{ total_matches = 0 }
+          }
+        }
+        if ($Endpoint -match "v2\.0/networks") {
+          return @{
+            entities = @(
+              @{ uuid = "v2-net-1"; name = "ce-vlan10"; vlan_id = 10; network_type = "VLAN" },
+              @{ uuid = "v2-net-2"; name = "ce-vlan20"; vlan_id = 20 }
+            )
+          }
+        }
+        throw "Unexpected endpoint: $Endpoint"
+      }
+
+      $result = Get-PrismSubnets
+      $result.Count | Should -Be 2
+      $result[0].extId | Should -Be "v2-net-1"
+      $result[0].name | Should -Be "ce-vlan10"
+      $result[0].vlanId | Should -Be 10
+      $result[0].subnetType | Should -Be "VLAN"
+      $result[0].clusterReference | Should -BeNullOrEmpty
+      # Second network has no network_type — should default to VLAN
+      $result[1].extId | Should -Be "v2-net-2"
+      $result[1].subnetType | Should -Be "VLAN"
+    }
+
+    It "v2 fallback also fails gracefully" {
+      Mock Get-PrismEntities { throw "500 Internal Server Error" }
+
+      Mock Invoke-PrismAPI {
+        param($Method, $Endpoint, $Body)
+        if ($Endpoint -match "subnets/list") {
+          return @{
+            entities = @()
+            metadata = @{ total_matches = 0 }
+          }
+        }
+        if ($Endpoint -match "v2\.0/networks") {
+          throw "Connection refused"
+        }
+        throw "Unexpected endpoint: $Endpoint"
+      }
+
+      $result = Get-PrismSubnets
+      $result -is [System.Array] | Should -BeTrue
+      $result.Count | Should -Be 0
+    }
+  }
 }
 
 # ============================================================
@@ -1649,6 +1847,34 @@ Describe "VBAHV Plugin REST API" {
       $result = Start-AHVFullRestore -RestorePointInfo $rpInfo -IsolatedNetwork $isolatedNet
       $result.Status | Should -Be "Failed"
       $result.Error | Should -BeLike "*no sessionId*"
+    }
+  }
+
+  Context "Get-VBAHVPrismCentralVMs return type" {
+    It "returns array even with single VM" {
+      Mock Invoke-VBAHVPluginAPI {
+        return @{
+          results    = @(@{ id = "v1"; name = "vm1" })
+          totalCount = 1
+        }
+      }
+
+      $result = Get-VBAHVPrismCentralVMs -PrismCentralId "pc-1"
+      $result -is [System.Array] | Should -BeTrue
+      $result.Count | Should -Be 1
+    }
+
+    It "returns empty array when no VMs" {
+      Mock Invoke-VBAHVPluginAPI {
+        return @{
+          results    = @()
+          totalCount = 0
+        }
+      }
+
+      $result = Get-VBAHVPrismCentralVMs -PrismCentralId "pc-1"
+      $result -is [System.Array] | Should -BeTrue
+      $result.Count | Should -Be 0
     }
   }
 
