@@ -325,6 +325,93 @@ function Get-PrismClusters {
   return Get-PrismEntities -EndpointKey "Clusters"
 }
 
+function _GetPrismElementIPs {
+  <#
+  .SYNOPSIS
+    Discover Prism Element cluster virtual IPs from Prism Central cluster data.
+    Filters out the PC host itself so only PE addresses are returned.
+  #>
+  $peIPs = New-Object System.Collections.Generic.List[string]
+  try {
+    $clusters = Get-PrismClusters
+    foreach ($cluster in $clusters) {
+      $ip = $null
+      if ($PrismApiVersion -eq "v4") {
+        # v4 clustermgmt: cluster.network.externalAddress — may be string or object with ipv4.value
+        if ($cluster.network -and $cluster.network.externalAddress) {
+          $addr = $cluster.network.externalAddress
+          if ($addr -is [string]) {
+            $ip = $addr
+          }
+          elseif ($addr.ipv4 -and $addr.ipv4.value) {
+            $ip = $addr.ipv4.value
+          }
+          elseif ($addr.value) {
+            $ip = $addr.value
+          }
+        }
+      }
+      else {
+        # v3: cluster.status.resources.network.external_ip
+        if ($cluster.status -and $cluster.status.resources -and $cluster.status.resources.network) {
+          $ip = $cluster.status.resources.network.external_ip
+        }
+      }
+
+      # Skip null/empty IPs and the PC host itself
+      if ($ip -and $ip -ne $PrismCentral) {
+        $peIPs.Add($ip)
+      }
+    }
+  }
+  catch {
+    Write-Log "Failed to discover PE IPs from cluster data: $($_.Exception.Message)" -Level "WARNING"
+  }
+
+  return ,$peIPs.ToArray()
+}
+
+function _InvokePrismElementV2 {
+  <#
+  .SYNOPSIS
+    Call a Prism Element v2 API endpoint directly (bypasses Invoke-PrismAPI which routes to PC).
+    Reuses the same Basic Auth credentials configured for Prism Central.
+  .PARAMETER PrismElementIP
+    IP address of the Prism Element cluster
+  .PARAMETER Endpoint
+    v2 API endpoint path (e.g. "networks/?count=500")
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$PrismElementIP,
+    [Parameter(Mandatory = $true)][string]$Endpoint
+  )
+
+  $url = "https://${PrismElementIP}:9440/api/nutanix/v2.0/${Endpoint}"
+  $params = @{
+    Method     = "GET"
+    Uri        = $url
+    Headers    = $script:PrismHeaders
+    TimeoutSec = 30
+  }
+  if ($script:SkipCert -and $PSVersionTable.PSVersion.Major -ge 7) {
+    $params.SkipCertificateCheck = $true
+  }
+
+  try {
+    return Invoke-RestMethod @params -ErrorAction Stop
+  }
+  catch {
+    $statusCode = $null
+    if ($_.Exception.Response) {
+      $statusCode = [int]$_.Exception.Response.StatusCode
+    }
+    if ($statusCode -eq 403) {
+      Write-Log "PE v2 $Endpoint returned 403 at $PrismElementIP — grant 'Viewer' or 'Cluster Admin' role on Prism Element for this account to enable subnet discovery" -Level "ERROR"
+    }
+    throw
+  }
+}
+
 function Get-PrismSubnets {
   <#
   .SYNOPSIS
@@ -366,28 +453,36 @@ function Get-PrismSubnets {
         $offset += $pageSize
       } while ($offset -lt $totalMatches)
 
-      # v3 returned 0 — try v2 networks API (required for Nutanix CE)
+      # v3 returned 0 — query Prism Element v2 networks directly (required for Nutanix CE)
       if ($allSubnets.Count -eq 0) {
-        Write-Log "v3 subnets/list returned 0 entities, trying v2 networks API..." -Level "WARNING"
-        try {
-          $v2Raw = Invoke-PrismAPI -Method "GET" -Endpoint "nutanix/v2.0/networks/?count=500"
-          $v2Result = Resolve-PrismResponseBody $v2Raw
-          if ($v2Result.entities) {
-            foreach ($net in $v2Result.entities) {
-              $normalized = [PSCustomObject]@{
-                extId            = $net.uuid
-                name             = $net.name
-                vlanId           = $net.vlan_id
-                subnetType       = if ($net.network_type) { $net.network_type } else { "VLAN" }
-                clusterReference = $null
-              }
-              $allSubnets.Add($normalized)
-            }
-            Write-Log "v2 networks returned $($allSubnets.Count) subnet(s)" -Level "INFO"
-          }
+        Write-Log "v3 subnets/list returned 0 entities" -Level "WARNING"
+        Write-Log "Discovering Prism Element IPs from cluster data..." -Level "INFO"
+        $peIPs = _GetPrismElementIPs
+        if ($peIPs.Count -eq 0) {
+          Write-Log "No Prism Element IPs discovered from cluster data" -Level "WARNING"
         }
-        catch {
-          Write-Log "v2 networks API also failed: $($_.Exception.Message)" -Level "WARNING"
+        foreach ($peIP in $peIPs) {
+          Write-Log "Querying PE v2 networks API at https://${peIP}:9440/api/nutanix/v2.0/networks/" -Level "INFO"
+          try {
+            $v2Response = _InvokePrismElementV2 -PrismElementIP $peIP -Endpoint "networks/?count=500"
+            if ($v2Response.entities) {
+              foreach ($net in $v2Response.entities) {
+                $normalized = [PSCustomObject]@{
+                  extId            = $net.uuid
+                  name             = $net.name
+                  vlanId           = $net.vlan_id
+                  subnetType       = if ($net.network_type) { $net.network_type } else { "VLAN" }
+                  clusterReference = $null
+                }
+                $allSubnets.Add($normalized)
+              }
+              Write-Log "PE v2 networks returned $($allSubnets.Count) subnet(s)" -Level "INFO"
+              break  # Stop after first PE that returns results
+            }
+          }
+          catch {
+            Write-Log "PE v2 networks failed at ${peIP}: $($_.Exception.Message)" -Level "WARNING"
+          }
         }
       }
 
@@ -399,42 +494,40 @@ function Get-PrismSubnets {
   $v3Result = Get-PrismEntities -EndpointKey "Subnets"
   if (@($v3Result).Count -gt 0) { return $v3Result }
 
-  # v3 returned 0 — try v2 networks API (required for Nutanix CE)
-  Write-Log "v3 subnets returned 0 entities, trying v2 networks API..." -Level "WARNING"
+  # v3 returned 0 — query Prism Element v2 networks directly (required for Nutanix CE)
+  Write-Log "v3 subnets returned 0 entities" -Level "WARNING"
+  Write-Log "Discovering Prism Element IPs from cluster data..." -Level "INFO"
   $allSubnets = New-Object System.Collections.Generic.List[object]
-  try {
-    # In v3 mode, base URL is /api/nutanix/v3 — construct v2 URL via PrismOrigin
-    $v2Url = "$($script:PrismOrigin)/api/nutanix/v2.0/networks/?count=500"
-    $v2Params = @{
-      Method     = "GET"
-      Uri        = $v2Url
-      Headers    = $script:PrismHeaders
-      TimeoutSec = 30
-    }
-    if ($script:SkipCert -and $PSVersionTable.PSVersion.Major -ge 7) {
-      $v2Params.SkipCertificateCheck = $true
-    }
-    $v2Response = Invoke-RestMethod @v2Params -ErrorAction Stop
-    if ($v2Response.entities) {
-      foreach ($net in $v2Response.entities) {
-        # Normalize to v3 shape for downstream v3 accessors
-        $allSubnets.Add([PSCustomObject]@{
-          metadata = [PSCustomObject]@{ uuid = $net.uuid; kind = "subnet" }
-          spec = [PSCustomObject]@{
-            name      = $net.name
-            resources = [PSCustomObject]@{
-              vlan_id     = $net.vlan_id
-              subnet_type = if ($net.network_type) { $net.network_type } else { "VLAN" }
-            }
-            cluster_reference = $null
-          }
-        })
-      }
-      Write-Log "v2 networks returned $($allSubnets.Count) subnet(s)" -Level "INFO"
-    }
+  $peIPs = _GetPrismElementIPs
+  if ($peIPs.Count -eq 0) {
+    Write-Log "No Prism Element IPs discovered from cluster data" -Level "WARNING"
   }
-  catch {
-    Write-Log "v2 networks API also failed: $($_.Exception.Message)" -Level "WARNING"
+  foreach ($peIP in $peIPs) {
+    Write-Log "Querying PE v2 networks API at https://${peIP}:9440/api/nutanix/v2.0/networks/" -Level "INFO"
+    try {
+      $v2Response = _InvokePrismElementV2 -PrismElementIP $peIP -Endpoint "networks/?count=500"
+      if ($v2Response.entities) {
+        foreach ($net in $v2Response.entities) {
+          # Normalize to v3 shape for downstream v3 accessors
+          $allSubnets.Add([PSCustomObject]@{
+            metadata = [PSCustomObject]@{ uuid = $net.uuid; kind = "subnet" }
+            spec = [PSCustomObject]@{
+              name      = $net.name
+              resources = [PSCustomObject]@{
+                vlan_id     = $net.vlan_id
+                subnet_type = if ($net.network_type) { $net.network_type } else { "VLAN" }
+              }
+              cluster_reference = $null
+            }
+          })
+        }
+        Write-Log "PE v2 networks returned $($allSubnets.Count) subnet(s)" -Level "INFO"
+        break  # Stop after first PE that returns results
+      }
+    }
+    catch {
+      Write-Log "PE v2 networks failed at ${peIP}: $($_.Exception.Message)" -Level "WARNING"
+    }
   }
   return ,$allSubnets.ToArray()
 }

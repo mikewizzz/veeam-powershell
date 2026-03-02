@@ -510,9 +510,10 @@ Describe "Get-PrismSubnets" {
       Should -Invoke Invoke-PrismAPI -Times 0 -Exactly
     }
 
-    It "v2 fallback when v4 fails and v3 returns empty" {
+    It "PE v2 fallback when v4 fails and v3 returns empty" {
       Mock Get-PrismEntities { throw "500 Internal Server Error" }
 
+      # v3 subnets/list returns 0
       Mock Invoke-PrismAPI {
         param($Method, $Endpoint, $Body)
         if ($Endpoint -match "subnets/list") {
@@ -521,7 +522,16 @@ Describe "Get-PrismSubnets" {
             metadata = @{ total_matches = 0 }
           }
         }
-        if ($Endpoint -match "v2\.0/networks") {
+        throw "Unexpected endpoint: $Endpoint"
+      }
+
+      # PE discovery returns one PE IP
+      Mock _GetPrismElementIPs { return ,@("10.0.0.1") }
+
+      # PE v2 networks returns subnets
+      Mock Invoke-RestMethod {
+        param($Uri)
+        if ($Uri -match "10\.0\.0\.1.*v2\.0/networks") {
           return @{
             entities = @(
               @{ uuid = "v2-net-1"; name = "ce-vlan10"; vlan_id = 10; network_type = "VLAN" },
@@ -529,7 +539,7 @@ Describe "Get-PrismSubnets" {
             )
           }
         }
-        throw "Unexpected endpoint: $Endpoint"
+        throw "Unexpected URI: $Uri"
       }
 
       $result = Get-PrismSubnets
@@ -544,7 +554,7 @@ Describe "Get-PrismSubnets" {
       $result[1].subnetType | Should -Be "VLAN"
     }
 
-    It "v2 fallback also fails gracefully" {
+    It "PE v2 fallback fails gracefully when PE unreachable" {
       Mock Get-PrismEntities { throw "500 Internal Server Error" }
 
       Mock Invoke-PrismAPI {
@@ -555,15 +565,38 @@ Describe "Get-PrismSubnets" {
             metadata = @{ total_matches = 0 }
           }
         }
-        if ($Endpoint -match "v2\.0/networks") {
-          throw "Connection refused"
-        }
         throw "Unexpected endpoint: $Endpoint"
       }
+
+      Mock _GetPrismElementIPs { return ,@("10.0.0.1") }
+      Mock Invoke-RestMethod { throw "Connection refused" }
 
       $result = Get-PrismSubnets
       $result -is [System.Array] | Should -BeTrue
       $result.Count | Should -Be 0
+    }
+
+    It "PE v2 fallback skips when no PE IPs discovered" {
+      Mock Get-PrismEntities { throw "500 Internal Server Error" }
+
+      Mock Invoke-PrismAPI {
+        param($Method, $Endpoint, $Body)
+        if ($Endpoint -match "subnets/list") {
+          return @{
+            entities = @()
+            metadata = @{ total_matches = 0 }
+          }
+        }
+        throw "Unexpected endpoint: $Endpoint"
+      }
+
+      Mock _GetPrismElementIPs { return ,@() }
+      Mock Invoke-RestMethod {}
+
+      $result = Get-PrismSubnets
+      $result -is [System.Array] | Should -BeTrue
+      $result.Count | Should -Be 0
+      Should -Invoke Invoke-RestMethod -Times 0 -Exactly
     }
   }
 }
