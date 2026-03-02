@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
   Get-VeeamRecoverabilityPosture.ps1 - Cross-platform recoverability posture assessment
@@ -13,22 +14,26 @@
     5) Auditor-ready HTML reports with attestation statements
 
   This tool does NOT execute recovery tests. It consumes results from tools that do.
-  The moat is the compliance evidence layer — no recovery vendor builds this.
 
-INGEST FROM FILES (JSON results from prior script runs)
+.EXAMPLE
   .\Get-VeeamRecoverabilityPosture.ps1 -ResultFiles ".\ahv-results.json",".\azure-results.json"
+  Ingest from specific JSON result files produced by prior recovery script runs.
 
-INGEST FROM DIRECTORY (scan for all result files)
+.EXAMPLE
   .\Get-VeeamRecoverabilityPosture.ps1 -ResultDirectory ".\recovery-results\"
+  Scan a directory for all *.json result files and ingest them.
 
-INGEST FROM CSV (manual import from spreadsheet)
+.EXAMPLE
   .\Get-VeeamRecoverabilityPosture.ps1 -CsvImport ".\manual-results.csv"
+  Import recovery test results from a CSV spreadsheet.
 
-COMPLIANCE EVIDENCE PACKAGE
+.EXAMPLE
   .\Get-VeeamRecoverabilityPosture.ps1 -ResultDirectory ".\results\" -Frameworks "NIS2","SOC2"
+  Generate a compliance evidence package mapped to specific frameworks.
 
-TREND ANALYSIS (compare against prior posture)
+.EXAMPLE
   .\Get-VeeamRecoverabilityPosture.ps1 -ResultDirectory ".\results\" -PostureStore ".\posture-history\"
+  Run with trend analysis comparing against the most recent prior posture snapshot.
 
 .NOTES
   Community-maintained tool. Not an official Veeam product.
@@ -39,7 +44,7 @@ TREND ANALYSIS (compare against prior posture)
 param(
   # ===== Input Sources =====
   [string[]]$ResultFiles,                    # Paths to JSON result files from recovery scripts
-  [string]$ResultDirectory,                  # Directory to scan for *RecoveryValidation*.json files
+  [string]$ResultDirectory,                  # Directory to scan for *.json result files
   [string]$CsvImport,                       # Path to CSV with manual recovery test results
 
   # ===== Organization Context =====
@@ -508,12 +513,12 @@ Write-Log "Generating compliance evidence report..."
 $reportParams = @{
   Summary        = $summary
   OutputPath     = $runFolder
-  ReportFileName = "Posture-Report-$stamp.html"
+  FilePrefix     = "Posture-Report"
 }
 if ($OrganizationName) { $reportParams["OrganizationName"] = $OrganizationName }
 
 $reportResult = New-UnifiedComplianceReport @reportParams
-$htmlPath = $reportResult.ReportPath
+$htmlPath = $reportResult.HtmlPath
 
 # =============================
 # Step 8: Advisory Findings Addendum (append to HTML)
@@ -537,10 +542,10 @@ if ($findings.Count -gt 0) {
     $advisoryHtml += "      <div style='margin-bottom: 16px; font-size: 14px; font-weight: 600; color: $sevColor;'>$sev Severity ($($sevFindings.Count))</div>`n"
 
     foreach ($f in $sevFindings) {
-      $escapedTitle = $f.Title -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;'
-      $escapedDetail = $f.Detail -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;'
-      $escapedRec = $f.Recommendation -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;'
-      $escapedFw = $f.Framework -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;'
+      $escapedTitle = _EscapeHtml $f.Title
+      $escapedDetail = _EscapeHtml $f.Detail
+      $escapedRec = _EscapeHtml $f.Recommendation
+      $escapedFw = _EscapeHtml $f.Framework
 
       $advisoryHtml += @"
       <div style="border-left: 4px solid $sevColor; padding: 12px 16px; margin-bottom: 12px; background: #FAF9F8; border-radius: 0 4px 4px 0;">
@@ -588,7 +593,7 @@ if ($findings.Count -gt 0) {
 # =============================
 if ($WebhookUrl -or ($SmtpServer -and $NotifyTo)) {
   Write-Log "Sending posture notifications..."
-  $notifyParams = @{ Summary = $summary }
+  $notifyParams = @{ Summary = $summary; ComplianceScore = $complianceScore }
   if ($WebhookUrl) { $notifyParams["WebhookUrl"] = $WebhookUrl }
   if ($SmtpServer) { $notifyParams["SmtpServer"] = $SmtpServer }
   if ($NotifyTo) { $notifyParams["To"] = $NotifyTo }
