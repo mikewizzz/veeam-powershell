@@ -225,9 +225,9 @@ try {
   Write-Host "  - Azure VMs: $($veeamSizing.TotalVMs)" -ForegroundColor White
   Write-Host "  - SQL Databases: $($veeamSizing.TotalSQLDatabases)" -ForegroundColor White
   Write-Host "  - SQL Managed Instances: $($veeamSizing.TotalSQLManagedInstances)" -ForegroundColor White
-  Write-Host "  - Azure File Shares: $(@($stInv.Files).Count)" -ForegroundColor White
-  Write-Host "  - Blob Containers: $(@($stInv.Blobs).Count)" -ForegroundColor White
-  Write-Host "  - Recovery Services Vaults: $(@($abInv.Vaults).Count)" -ForegroundColor White
+  Write-Host "  - Azure File Shares: $(if ($stInv.Files -is [System.Collections.IList]) { $stInv.Files.Count } else { @($stInv.Files).Count })" -ForegroundColor White
+  Write-Host "  - Blob Containers: $(if ($stInv.Blobs -is [System.Collections.IList]) { $stInv.Blobs.Count } else { @($stInv.Blobs).Count })" -ForegroundColor White
+  Write-Host "  - Recovery Services Vaults: $(if ($abInv.Vaults -is [System.Collections.IList]) { $abInv.Vaults.Count } else { @($abInv.Vaults).Count })" -ForegroundColor White
 
   Write-Host "`nVeeam Sizing Recommendations:" -ForegroundColor Cyan
   Write-Host "  - Snapshot Storage: $([math]::Ceiling($veeamSizing.TotalSnapshotStorageGB)) GB ($([math]::Round($veeamSizing.TotalSnapshotStorageGB / 1024, 2)) TB)" -ForegroundColor Green

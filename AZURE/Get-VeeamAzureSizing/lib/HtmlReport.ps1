@@ -48,6 +48,30 @@ function New-HtmlReport {
   $duration = (Get-Date) - $StartTime
   $durationStr = "$([math]::Floor($duration.TotalMinutes))m $($duration.Seconds)s"
 
+  # Unwrap Generic.List collections to plain arrays
+  if ($null -eq $VmInventory) { $VmInventory = @() }
+  elseif ($VmInventory -is [System.Collections.IList]) { $VmInventory = @($VmInventory.GetEnumerator()) }
+
+  $sqlDbs = if ($null -eq $SqlInventory.Databases) { @() }
+            elseif ($SqlInventory.Databases -is [System.Collections.IList]) { @($SqlInventory.Databases.GetEnumerator()) }
+            else { @($SqlInventory.Databases) }
+
+  $fileShares = if ($null -eq $StorageInventory.Files) { @() }
+                elseif ($StorageInventory.Files -is [System.Collections.IList]) { @($StorageInventory.Files.GetEnumerator()) }
+                else { @($StorageInventory.Files) }
+
+  $blobContainers = if ($null -eq $StorageInventory.Blobs) { @() }
+                    elseif ($StorageInventory.Blobs -is [System.Collections.IList]) { @($StorageInventory.Blobs.GetEnumerator()) }
+                    else { @($StorageInventory.Blobs) }
+
+  $vaults = if ($null -eq $AzureBackupInventory.Vaults) { @() }
+            elseif ($AzureBackupInventory.Vaults -is [System.Collections.IList]) { @($AzureBackupInventory.Vaults.GetEnumerator()) }
+            else { @($AzureBackupInventory.Vaults) }
+
+  $policies = if ($null -eq $AzureBackupInventory.Policies) { @() }
+              elseif ($AzureBackupInventory.Policies -is [System.Collections.IList]) { @($AzureBackupInventory.Policies.GetEnumerator()) }
+              else { @($AzureBackupInventory.Policies) }
+
   # Escape system-controlled values for HTML safety
   $safeReportDate = _EscapeHtml $reportDate
   $safeDurationStr = _EscapeHtml $durationStr
@@ -73,8 +97,8 @@ function New-HtmlReport {
 
   # Build SQL database rows (HTML-encoded)
   $sqlRows = ""
-  if ($SqlInventory.Databases -and $SqlInventory.Databases.Count -gt 0) {
-    $sqlRows = ($SqlInventory.Databases | ForEach-Object {
+  if ($sqlDbs.Count -gt 0) {
+    $sqlRows = ($sqlDbs | ForEach-Object {
       $safeServer = _EscapeHtml $_.ServerName
       $safeDb = _EscapeHtml $_.DatabaseName
       $safeEdition = _EscapeHtml $_.Edition
@@ -102,10 +126,10 @@ function New-HtmlReport {
   $repoStorageTB = [math]::Round($VeeamSizing.TotalRepositoryGB / 1024, 2)
   $overheadPct = [math]::Round(($RepositoryOverhead - 1) * 100, 0)
   $subCount = $Subscriptions.Count
-  $filesCount = @($StorageInventory.Files).Count
-  $blobsCount = @($StorageInventory.Blobs).Count
-  $vaultsCount = @($AzureBackupInventory.Vaults).Count
-  $policiesCount = @($AzureBackupInventory.Policies).Count
+  $filesCount = $fileShares.Count
+  $blobsCount = $blobContainers.Count
+  $vaultsCount = $vaults.Count
+  $policiesCount = $policies.Count
 
   # SQL section HTML (only if databases exist)
   $sqlSectionHtml = ""
