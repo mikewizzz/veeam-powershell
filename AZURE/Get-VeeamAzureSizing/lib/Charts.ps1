@@ -158,13 +158,13 @@ $legendItems
 
 <#
 .SYNOPSIS
-  Generates a 3-bar capacity forecast chart (Current / Projected / MBS Recommended).
+  Generates a 3-bar capacity forecast chart (Current / Projected / Recommended).
 .PARAMETER CurrentGB
   Current dataset size in GB.
 .PARAMETER ProjectedGB
   Projected dataset after growth.
 .PARAMETER RecommendedGB
-  Recommended MBS capacity (with buffer).
+  Recommended capacity (with buffer).
 .EXAMPLE
   New-SvgCapacityForecast -CurrentGB 500 -ProjectedGB 575 -RecommendedGB 820
 #>
@@ -191,7 +191,7 @@ function New-SvgCapacityForecast {
   $bars = @(
     @{ Label = "Current Dataset"; Value = $CurrentGB; Color = "#0078D4"; Y = 20 }
     @{ Label = "Projected (1yr)"; Value = $ProjectedGB; Color = "#106EBE"; Y = 20 + $barH + $gap }
-    @{ Label = "Recommended MBS"; Value = $RecommendedGB; Color = "#00B336"; Y = 20 + 2 * ($barH + $gap) }
+    @{ Label = "Recommended"; Value = $RecommendedGB; Color = "#00B336"; Y = 20 + 2 * ($barH + $gap) }
   )
 
   $barsSvg = ""
