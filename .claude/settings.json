@@ -18,6 +18,10 @@
           {
             "type": "command",
             "command": "./.claude/hooks/lint-ps1.sh"
+          },
+          {
+            "type": "command",
+            "command": "./.claude/hooks/compat-check.sh"
           }
         ]
       }
