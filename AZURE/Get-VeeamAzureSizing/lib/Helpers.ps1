@@ -52,3 +52,16 @@ function _SafeSum($collection, [string]$property) {
   if ($null -eq $val) { return [double]0 }
   return $val
 }
+
+<#
+.SYNOPSIS
+  Formats a GB value as "X.XX TB" or "X GB" depending on magnitude.
+.PARAMETER gb
+  Storage size in gigabytes.
+.OUTPUTS
+  Formatted string (e.g., "1.50 TB" or "512 GB").
+#>
+function _FormatStorageGB([double]$gb) {
+  if ($gb -ge 1024) { return "{0:N2} TB" -f ($gb / 1024) }
+  return "{0:N0} GB" -f $gb
+}

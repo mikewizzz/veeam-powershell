@@ -162,6 +162,7 @@ $requiredLibs = @(
   "DataCollection.ps1",
   "Sizing.ps1",
   "Exports.ps1",
+  "Charts.ps1",
   "HtmlReport.ps1"
 )
 foreach ($lib in $requiredLibs) {
