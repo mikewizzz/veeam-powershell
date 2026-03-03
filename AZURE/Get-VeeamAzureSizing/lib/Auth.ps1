@@ -119,7 +119,7 @@ function Resolve-Subscriptions {
   if ($Subscriptions -and $Subscriptions.Count -gt 0) {
     $resolved = New-Object System.Collections.Generic.List[object]
     foreach ($s in $Subscriptions) {
-      $hit = $all | Where-Object { $_.Id -eq $s -or $_.Name -eq $s }
+      $hit = $all | Where-Object { $_.Id -eq $s -or $_.Name -eq $s } | Select-Object -First 1
       if (-not $hit) {
         Write-Log "Subscription '$s' not found or not accessible" -Level "WARNING"
         continue
@@ -136,5 +136,5 @@ function Resolve-Subscriptions {
   }
 
   Write-Log "Using all accessible subscriptions ($($all.Count) found)" -Level "INFO"
-  return $all
+  return @($all)
 }

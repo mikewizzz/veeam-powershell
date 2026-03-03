@@ -12,7 +12,9 @@
 .OUTPUTS
   [bool] True if the resource matches or no filter is set.
 #>
-function Test-RegionMatch($ResourceRegion) {
+function Test-RegionMatch {
+  [CmdletBinding()]
+  param([string]$ResourceRegion)
   if (-not $Region) { return $true }
   return ($ResourceRegion -ieq $Region)
 }
@@ -25,7 +27,9 @@ function Test-RegionMatch($ResourceRegion) {
 .OUTPUTS
   [bool] True if all tag pairs match or no filter is set.
 #>
-function Test-TagMatch($Tags) {
+function Test-TagMatch {
+  [CmdletBinding()]
+  param([hashtable]$Tags)
   if (-not $TagFilter -or $TagFilter.Keys.Count -eq 0) { return $true }
   if (-not $Tags) { return $false }
 
@@ -146,21 +150,34 @@ function Get-VMInventory {
       }
 
       # Disk analysis
-      $osDiskGB = [int]($vm.StorageProfile.OsDisk.DiskSizeGB)
+      $osDiskGB = $vm.StorageProfile.OsDisk.DiskSizeGB
+      if ($null -eq $osDiskGB) {
+        Write-Log "VM $($vm.Name) has no reported OS disk size - defaulting to 30 GB" -Level "WARNING"
+        $osDiskGB = 30
+      } else {
+        $osDiskGB = [int]$osDiskGB
+      }
       $osDiskType = $vm.StorageProfile.OsDisk.ManagedDisk.StorageAccountType
 
       $dataDisks = @()
       $dataSizeGB = 0
       foreach ($d in $vm.StorageProfile.DataDisks) {
-        $size = [int]$d.DiskSizeGB
+        $size = $d.DiskSizeGB
+        if ($null -eq $size) {
+          Write-Log "VM $($vm.Name) data disk LUN$($d.Lun) has no reported size - defaulting to 0 GB" -Level "WARNING"
+          $size = 0
+        } else {
+          $size = [int]$size
+        }
         $dataSizeGB += $size
         $dataDisks += "LUN$($d.Lun):$($size)GB:$($d.ManagedDisk.StorageAccountType)"
       }
 
       $totalProvGB = $osDiskGB + $dataSizeGB
 
-      # Veeam sizing: 10% daily change rate for snapshot estimation
-      $snapshotStorageGB = [math]::Ceiling($totalProvGB * ($SnapshotRetentionDays / 30.0) * 0.1)
+      # Snapshot sizing: incremental change x retention window
+      # Model: 10% daily change rate applied over retention period
+      $snapshotStorageGB = [math]::Ceiling($totalProvGB * 0.1 * $SnapshotRetentionDays)
       $repositoryGB = [math]::Ceiling($totalProvGB * $RepositoryOverhead)
 
       $results.Add([PSCustomObject]@{
@@ -223,12 +240,12 @@ function Get-SqlInventory {
     foreach ($srv in $servers) {
       if (-not (Test-RegionMatch $srv.Location)) { continue }
 
-      $databases = @(Get-AzSqlDatabase -ServerName $srv.ServerName -ResourceGroupName $srv.ResourceGroupName -ErrorAction SilentlyContinue |
+      $databases = @(Invoke-AzWithRetry { Get-AzSqlDatabase -ServerName $srv.ServerName -ResourceGroupName $srv.ResourceGroupName -ErrorAction Stop } |
         Where-Object { $_.DatabaseName -ne "master" })
 
       foreach ($db in $databases) {
         $maxSizeGB = [math]::Round($db.MaxSizeBytes / 1GB, 2)
-        $veeamRepoGB = [math]::Ceiling($maxSizeGB * 1.3)
+        $veeamRepoGB = [math]::Ceiling($maxSizeGB * $RepositoryOverhead)
 
         $dbs.Add([PSCustomObject]@{
           SubscriptionName = $sub.Name
@@ -253,7 +270,7 @@ function Get-SqlInventory {
       if (-not (Test-RegionMatch $mi.Location)) { continue }
 
       $storageGB = $mi.StorageSizeInGB
-      $veeamRepoGB = [math]::Ceiling($storageGB * 1.3)
+      $veeamRepoGB = [math]::Ceiling($storageGB * $RepositoryOverhead)
 
       $mis.Add([PSCustomObject]@{
         SubscriptionName = $sub.Name
@@ -352,7 +369,7 @@ function Get-StorageInventory {
               foreach ($b in $page) {
                 $sizeBytes += [int64]($b.Length)
               }
-              $token = $page.ContinuationToken
+              $token = if ($page) { ($page | Select-Object -Last 1).ContinuationToken } else { $null }
             } while ($token)
           }
 
@@ -453,7 +470,7 @@ function Get-AzureBackupInventory {
       })
 
       # Policies
-      $pols = @(Get-AzRecoveryServicesBackupProtectionPolicy -ErrorAction SilentlyContinue)
+      $pols = @(Get-AzRecoveryServicesBackupProtectionPolicy -VaultId $v.ID -ErrorAction SilentlyContinue)
       foreach ($p in $pols) {
         $policiesOut.Add([PSCustomObject]@{
           SubscriptionName = $sub.Name

@@ -122,6 +122,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Script-level timing
 $script:StartTime = Get-Date
@@ -155,7 +156,7 @@ $script:logCsv    = Join-Path $OutputPath "execution_log.csv"
 # =============================
 $libPath = Join-Path $PSScriptRoot "lib"
 $requiredLibs = @(
-  "Constants.ps1",
+  "Helpers.ps1",
   "Logging.ps1",
   "Auth.ps1",
   "DataCollection.ps1",
@@ -203,12 +204,13 @@ try {
 
   $htmlPath = $null
   if (-not $SkipHTML) {
-    $htmlPath = Build-HtmlReport -VmInventory $vmInv `
+    $htmlPath = New-HtmlReport -VmInventory $vmInv -SqlInventory $sqlInv `
       -StorageInventory $stInv -AzureBackupInventory $abInv `
-      -VeeamSizing $veeamSizing -OutputPath $OutputPath
+      -VeeamSizing $veeamSizing -OutputPath $OutputPath `
+      -SnapshotRetentionDays $SnapshotRetentionDays `
+      -RepositoryOverhead $RepositoryOverhead `
+      -Subscriptions $script:Subs -StartTime $script:StartTime
   }
-
-  Export-LogData
 
   $zipPath = $null
   if (-not $SkipZip) {
@@ -243,7 +245,7 @@ try {
   Write-Log "Fatal error: $($_.Exception.Message)" -Level "ERROR"
   Write-Log "Stack trace: $($_.ScriptStackTrace)" -Level "ERROR"
   Write-Host "`nAssessment failed. Check execution_log.csv for details." -ForegroundColor Red
-  throw
+  exit 1
 } finally {
   Export-LogData
   Write-Progress -Activity "Veeam Azure Sizing" -Completed
