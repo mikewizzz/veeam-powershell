@@ -36,6 +36,10 @@ function Export-InventoryData {
   $AzureBackupInventory.Policies | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:polCsv
   $VeeamSizing            | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:sizingCsv
 
+  # JSON sizing bundle (machine-readable)
+  $jsonPath = Join-Path $OutputPath "veeam_sizing_summary.json"
+  $VeeamSizing | ConvertTo-Json -Depth 5 | Out-File -FilePath $jsonPath -Encoding UTF8
+
   Write-Log "Exported CSV files to: $OutputPath" -Level "SUCCESS"
 }
 
@@ -44,7 +48,11 @@ function Export-InventoryData {
   Exports the execution log entries to a CSV file.
 #>
 function Export-LogData {
-  $script:LogEntries | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:logCsv
+  try {
+    $script:LogEntries | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:logCsv
+  } catch {
+    Write-Host "Warning: Failed to export log data: $($_.Exception.Message)" -ForegroundColor Yellow
+  }
 }
 
 <#

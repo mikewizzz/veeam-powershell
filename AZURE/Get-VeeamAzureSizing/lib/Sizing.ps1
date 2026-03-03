@@ -20,19 +20,35 @@ function Get-VeeamSizing {
 
   Write-ProgressStep -Activity "Calculating Veeam Sizing" -Status "Analyzing capacity requirements..."
 
+  # Unwrap Generic.List to plain array to avoid Measure-Object type mismatch
+  if ($null -eq $VmInventory) {
+    $VmInventory = @()
+  } elseif ($VmInventory -is [System.Collections.IList]) {
+    $VmInventory = @($VmInventory.GetEnumerator())
+  }
+
   # VM totals
   $totalVMs = @($VmInventory).Count
-  $totalVMStorage = ($VmInventory | Measure-Object -Property TotalProvisionedGB -Sum).Sum
-  $totalSnapshotStorage = ($VmInventory | Measure-Object -Property VeeamSnapshotStorageGB -Sum).Sum
-  $totalVMRepoStorage = ($VmInventory | Measure-Object -Property VeeamRepositoryGB -Sum).Sum
+  $totalVMStorage = _SafeSum $VmInventory 'TotalProvisionedGB'
+  $totalSnapshotStorage = _SafeSum $VmInventory 'VeeamSnapshotStorageGB'
+  $totalVMRepoStorage = _SafeSum $VmInventory 'VeeamRepositoryGB'
+
+  # Unwrap SQL collections
+  $sqlDbs = if ($null -eq $SqlInventory.Databases) { @() }
+            elseif ($SqlInventory.Databases -is [System.Collections.IList]) { @($SqlInventory.Databases.GetEnumerator()) }
+            else { @($SqlInventory.Databases) }
+
+  $sqlMIs = if ($null -eq $SqlInventory.ManagedInstances) { @() }
+            elseif ($SqlInventory.ManagedInstances -is [System.Collections.IList]) { @($SqlInventory.ManagedInstances.GetEnumerator()) }
+            else { @($SqlInventory.ManagedInstances) }
 
   # SQL totals
-  $totalSQLDatabases = @($SqlInventory.Databases).Count
-  $totalSQLMIs = @($SqlInventory.ManagedInstances).Count
-  $totalSQLStorage = ($SqlInventory.Databases | Measure-Object -Property MaxSizeGB -Sum).Sum +
-                     ($SqlInventory.ManagedInstances | Measure-Object -Property StorageSizeGB -Sum).Sum
-  $totalSQLRepoStorage = ($SqlInventory.Databases | Measure-Object -Property VeeamRepositoryGB -Sum).Sum +
-                         ($SqlInventory.ManagedInstances | Measure-Object -Property VeeamRepositoryGB -Sum).Sum
+  $totalSQLDatabases = $sqlDbs.Count
+  $totalSQLMIs = $sqlMIs.Count
+  $totalSQLStorage = (_SafeSum $sqlDbs 'MaxSizeGB') +
+                     (_SafeSum $sqlMIs 'StorageSizeGB')
+  $totalSQLRepoStorage = (_SafeSum $sqlDbs 'VeeamRepositoryGB') +
+                         (_SafeSum $sqlMIs 'VeeamRepositoryGB')
 
   # Combined totals
   $totalSourceStorage = $totalVMStorage + $totalSQLStorage

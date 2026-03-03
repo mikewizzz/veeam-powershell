@@ -17,46 +17,78 @@
   Veeam sizing summary object.
 .PARAMETER OutputPath
   Directory to write the HTML file.
+.PARAMETER SnapshotRetentionDays
+  Snapshot retention days used in sizing calculations.
+.PARAMETER RepositoryOverhead
+  Repository overhead multiplier used in sizing calculations.
+.PARAMETER Subscriptions
+  Array of subscription objects that were analyzed.
+.PARAMETER StartTime
+  Assessment start time for duration calculation.
 .OUTPUTS
   Path to the generated HTML file.
 #>
-function Build-HtmlReport {
+function New-HtmlReport {
   param(
     [Parameter(Mandatory=$true)]$VmInventory,
+    [Parameter(Mandatory=$true)]$SqlInventory,
     [Parameter(Mandatory=$true)]$StorageInventory,
     [Parameter(Mandatory=$true)]$AzureBackupInventory,
     [Parameter(Mandatory=$true)]$VeeamSizing,
-    [Parameter(Mandatory=$true)][string]$OutputPath
+    [Parameter(Mandatory=$true)][string]$OutputPath,
+    [Parameter(Mandatory=$true)][int]$SnapshotRetentionDays,
+    [Parameter(Mandatory=$true)][double]$RepositoryOverhead,
+    [Parameter(Mandatory=$true)][array]$Subscriptions,
+    [Parameter(Mandatory=$true)][datetime]$StartTime
   )
 
   Write-ProgressStep -Activity "Generating HTML Report" -Status "Creating professional report..."
 
   $reportDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-  $duration = (Get-Date) - $script:StartTime
+  $duration = (Get-Date) - $StartTime
   $durationStr = "$([math]::Floor($duration.TotalMinutes))m $($duration.Seconds)s"
 
+  # Escape system-controlled values for HTML safety
+  $safeReportDate = _EscapeHtml $reportDate
+  $safeDurationStr = _EscapeHtml $durationStr
+  $safeRetentionDays = _EscapeHtml "$SnapshotRetentionDays"
+  $safeOverhead = _EscapeHtml "$RepositoryOverhead"
+
   # Build subscription summary (HTML-encoded)
-  $subList = ($script:Subs | ForEach-Object {
-    $safeName = Escape-Html $_.Name
-    $safeId = Escape-Html $_.Id
+  $subList = ($Subscriptions | ForEach-Object {
+    $safeName = _EscapeHtml $_.Name
+    $safeId = _EscapeHtml $_.Id
     "<li>$safeName [$safeId]</li>"
   }) -join "`n"
 
   # Build VM summary by location (HTML-encoded)
   $vmsByLocation = $VmInventory | Group-Object Location | Sort-Object Count -Descending
   $locationRows = ($vmsByLocation | ForEach-Object {
-    $safeLoc = Escape-Html $_.Name
+    $safeLoc = _EscapeHtml $_.Name
     $count = $_.Count
-    $storageGB = [math]::Round(($_.Group | Measure-Object -Property TotalProvisionedGB -Sum).Sum, 0)
+    $sumVal = ($_.Group | Measure-Object -Property TotalProvisionedGB -Sum -ErrorAction SilentlyContinue).Sum
+    $storageGB = if ($null -eq $sumVal) { 0 } else { [math]::Round($sumVal, 0) }
     "<tr><td>$safeLoc</td><td>$count</td><td>$storageGB GB</td></tr>"
   }) -join "`n"
 
+  # Build SQL database rows (HTML-encoded)
+  $sqlRows = ""
+  if ($SqlInventory.Databases -and $SqlInventory.Databases.Count -gt 0) {
+    $sqlRows = ($SqlInventory.Databases | ForEach-Object {
+      $safeServer = _EscapeHtml $_.ServerName
+      $safeDb = _EscapeHtml $_.DatabaseName
+      $safeEdition = _EscapeHtml $_.Edition
+      $safeLoc = _EscapeHtml $_.Location
+      "<tr><td>$safeServer</td><td>$safeDb</td><td>$safeEdition</td><td>$safeLoc</td><td>$($_.MaxSizeGB) GB</td><td>$($_.VeeamRepositoryGB) GB</td></tr>"
+    }) -join "`n"
+  }
+
   # Build recommendations
   $recommendationItems = ($VeeamSizing.Recommendations | ForEach-Object {
-    "<li class='recommendation-item'>$(Escape-Html $_)</li>"
+    "<li class='recommendation-item'>$(_EscapeHtml $_)</li>"
   }) -join "`n"
 
-  # Sizing values (numeric — safe, but kept clean)
+  # Sizing values (numeric — safe, but escaped for discipline)
   $totalVMs = $VeeamSizing.TotalVMs
   $totalSQLDbs = $VeeamSizing.TotalSQLDatabases
   $totalSQLMIs = $VeeamSizing.TotalSQLManagedInstances
@@ -69,11 +101,37 @@ function Build-HtmlReport {
   $snapshotTB = [math]::Round($VeeamSizing.TotalSnapshotStorageGB / 1024, 2)
   $repoStorageTB = [math]::Round($VeeamSizing.TotalRepositoryGB / 1024, 2)
   $overheadPct = [math]::Round(($RepositoryOverhead - 1) * 100, 0)
-  $subCount = $script:Subs.Count
+  $subCount = $Subscriptions.Count
   $filesCount = @($StorageInventory.Files).Count
   $blobsCount = @($StorageInventory.Blobs).Count
   $vaultsCount = @($AzureBackupInventory.Vaults).Count
   $policiesCount = @($AzureBackupInventory.Policies).Count
+
+  # SQL section HTML (only if databases exist)
+  $sqlSectionHtml = ""
+  if ($sqlRows) {
+    $sqlSectionHtml = @"
+
+  <div class="section">
+    <h2 class="section-title">SQL Databases</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Server</th>
+          <th>Database</th>
+          <th>Edition</th>
+          <th>Region</th>
+          <th>Max Size</th>
+          <th>Veeam Repository</th>
+        </tr>
+      </thead>
+      <tbody>
+        $sqlRows
+      </tbody>
+    </table>
+  </div>
+"@
+  }
 
   $html = @"
 <!DOCTYPE html>
@@ -289,8 +347,8 @@ tbody tr:hover {
     <div class="header-title">Veeam Backup for Azure</div>
     <div class="header-subtitle">Professional Sizing Assessment</div>
     <div class="header-meta">
-      <span><strong>Generated:</strong> $reportDate</span>
-      <span><strong>Duration:</strong> $durationStr</span>
+      <span><strong>Generated:</strong> $safeReportDate</span>
+      <span><strong>Duration:</strong> $safeDurationStr</span>
       <span><strong>Subscriptions:</strong> $subCount</span>
     </div>
   </div>
@@ -358,7 +416,7 @@ tbody tr:hover {
       </tbody>
     </table>
   </div>
-
+$sqlSectionHtml
   <div class="section">
     <h2 class="section-title">Veeam Backup for Azure Sizing</h2>
     <table>
@@ -373,7 +431,7 @@ tbody tr:hover {
         <tr>
           <td><strong>Snapshot Storage</strong></td>
           <td class="highlight">$snapshotGB GB</td>
-          <td>Based on $SnapshotRetentionDays days retention with 10% daily change</td>
+          <td>Based on $safeRetentionDays days retention with 10% daily change</td>
         </tr>
         <tr>
           <td><strong>Repository Capacity</strong></td>
@@ -412,8 +470,8 @@ tbody tr:hover {
     <div class="info-card">
       <div class="info-card-title">Veeam Sizing Calculations</div>
       <div class="info-card-text">
-        <strong>Snapshot Storage:</strong> Calculated based on provisioned VM disk capacity x (retention days / 30) x 10% daily change rate.<br><br>
-        <strong>Repository Capacity:</strong> Calculated as source data x $RepositoryOverhead overhead multiplier to account for compression efficiency and retention requirements.<br><br>
+        <strong>Snapshot Storage:</strong> Calculated as provisioned VM disk capacity x 10% daily change rate x $safeRetentionDays retention days.<br><br>
+        <strong>Repository Capacity:</strong> Calculated as source data x $safeOverhead overhead multiplier to account for compression efficiency and retention requirements.<br><br>
         <strong>Note:</strong> These are sizing recommendations for planning purposes. Actual storage consumption will vary based on your backup policies, data change rates, and compression ratios.
       </div>
     </div>
@@ -421,8 +479,8 @@ tbody tr:hover {
 
   <div class="footer">
     <p>Veeam Backup for Azure - Sizing Assessment</p>
-    <p>Generated by Get-VeeamAzureSizing — open-source community tool</p>
-    <p style="margin-top:8px;font-size:11px;color:var(--ms-gray-90);">Community-maintained tool — not an official Veeam product. Sizing estimates are for planning purposes only.</p>
+    <p>Generated by Get-VeeamAzureSizing &mdash; open-source community tool</p>
+    <p style="margin-top:8px;font-size:11px;color:var(--ms-gray-90);">Community-maintained tool &mdash; not an official Veeam product. Sizing estimates are for planning purposes only.</p>
   </div>
 </div>
 </body>
