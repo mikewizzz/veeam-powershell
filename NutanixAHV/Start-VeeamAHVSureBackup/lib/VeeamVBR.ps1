@@ -415,14 +415,14 @@ function Get-VBAHVProtectedVMs {
     }
   }
 
-  $totalCount = @($allVMs).Count
+  $totalCount = $allVMs.Count
   if ($totalCount -eq 0) {
     Write-Log "No protected VMs found across any Prism Central" -Level "WARNING"
     return @()
   }
 
   Write-Log "Discovered $totalCount protected VM(s) across $(@($prismCentrals).Count) Prism Central(s)" -Level "SUCCESS"
-  return @($allVMs)
+  return ,$allVMs.ToArray()
 }
 
 function Get-VBAHVRestorePointMetadata {
