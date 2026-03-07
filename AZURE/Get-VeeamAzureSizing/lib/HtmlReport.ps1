@@ -1115,6 +1115,44 @@ $workloadRows
     $snapGB = if ($null -ne $vm.VeeamSnapshotStorageGB) { [math]::Round($vm.VeeamSnapshotStorageGB, 0) } else { 0 }
     $vmRepoGB = if ($null -ne $vm.VeeamRepositoryGB) { [math]::Round($vm.VeeamRepositoryGB, 0) } else { 0 }
 
+    # Disk type label
+    $diskTypeMap = @{
+      'Premium_LRS'      = 'Premium SSD'
+      'Premium_ZRS'      = 'Premium SSD'
+      'StandardSSD_LRS'  = 'Standard SSD'
+      'StandardSSD_ZRS'  = 'Standard SSD'
+      'Standard_LRS'     = 'Standard HDD'
+      'UltraSSD_LRS'     = 'Ultra SSD'
+      'PremiumV2_LRS'    = 'Premium SSD v2'
+    }
+    $rawOsType = "$($vm.OsDiskType)"
+    $osTypeLabel = if ($diskTypeMap.ContainsKey($rawOsType)) { $diskTypeMap[$rawOsType] } else { $rawOsType }
+
+    # Collect unique data disk types from DataDiskSummary (format: LUN0:128GB:Premium_LRS; LUN1:256GB:Standard_LRS)
+    $allDiskTypes = New-Object System.Collections.Generic.List[string]
+    $allDiskTypes.Add($osTypeLabel)
+    $hasUltra = ($rawOsType -eq 'UltraSSD_LRS')
+    if (-not [string]::IsNullOrWhiteSpace($vm.DataDiskSummary)) {
+      foreach ($entry in ($vm.DataDiskSummary -split ';\s*')) {
+        $parts = $entry -split ':'
+        if ($parts.Count -ge 3) {
+          $rawDataType = $parts[2].Trim()
+          if ($rawDataType -eq 'UltraSSD_LRS') { $hasUltra = $true }
+          $dataLabel = if ($diskTypeMap.ContainsKey($rawDataType)) { $diskTypeMap[$rawDataType] } else { $rawDataType }
+          if (-not $allDiskTypes.Contains($dataLabel)) {
+            $allDiskTypes.Add($dataLabel)
+          }
+        }
+      }
+    }
+
+    $diskTypeDisplay = _EscapeHtml ($allDiskTypes -join ' + ')
+    $diskTypeTd = if ($hasUltra) {
+      "<td><span style=`"background:#D83B01;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85em;`">$diskTypeDisplay</span></td>"
+    } else {
+      "<td>$diskTypeDisplay</td>"
+    }
+
     $vmTableRows += @"
               <tr>
                 <td><strong>$safeName</strong></td>
@@ -1124,6 +1162,7 @@ $workloadRows
                 <td>$safeSize</td>
                 <td><span class="status-dot $dotClass"></span>$powerLabel</td>
                 <td class="mono">${osDiskGB}+${dataDiskCount}d</td>
+                $diskTypeTd
                 <td class="mono">$totalGB GB</td>
                 <td class="mono">$snapGB GB</td>
                 <td class="mono">$vmRepoGB GB</td>
@@ -1148,6 +1187,7 @@ $workloadRows
             <th>VM Size</th>
             <th>Power State</th>
             <th>Disks (OS+Data)</th>
+            <th>Disk Type</th>
             <th>Total Storage</th>
             <th>Veeam Snapshot</th>
             <th>Veeam Repository</th>
