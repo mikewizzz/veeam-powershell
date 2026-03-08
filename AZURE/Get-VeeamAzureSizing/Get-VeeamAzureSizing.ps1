@@ -55,6 +55,9 @@
 .PARAMETER SnapshotRetentionDays
   Snapshot retention for Veeam sizing (default: 14 days).
 
+.PARAMETER DailyChangeRate
+  Daily change rate for snapshot sizing (default: 0.05 = 5%). Range: 0.01-1.0.
+
 .PARAMETER RepositoryOverhead
   Repository overhead multiplier for Veeam sizing (default: 1.2 = 20% overhead).
 
@@ -111,6 +114,8 @@ param(
   # Veeam sizing parameters
   [ValidateRange(1,365)]
   [int]$SnapshotRetentionDays = 14,
+  [ValidateRange(0.01,1.0)]
+  [double]$DailyChangeRate = 0.05,
   [ValidateRange(1.0,3.0)]
   [double]$RepositoryOverhead = 1.2,
 
@@ -134,6 +139,12 @@ $script:Subs = @()
 if (-not $OutputPath) {
   $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
   $OutputPath = ".\VeeamAzureSizing_$timestamp"
+}
+
+# Validate OutputPath: resolve to full path and reject UNC paths
+$OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+if ($OutputPath.StartsWith('\\')) {
+  throw "UNC paths are not supported for OutputPath. Use a local directory."
 }
 
 if (-not (Test-Path $OutputPath)) {
@@ -197,7 +208,7 @@ try {
   $abInv  = Get-AzureBackupInventory
 
   # Sizing
-  $veeamSizing = Get-VeeamSizing -VmInventory $vmInv -SqlInventory $sqlInv
+  $veeamSizing = Get-VeeamSizing -VmInventory $vmInv -SqlInventory $sqlInv -StorageInventory $stInv
 
   # Exports
   Export-InventoryData -VmInventory $vmInv -SqlInventory $sqlInv `
@@ -244,7 +255,13 @@ try {
 
 } catch {
   Write-Log "Fatal error: $($_.Exception.Message)" -Level "ERROR"
-  Write-Log "Stack trace: $($_.ScriptStackTrace)" -Level "ERROR"
+  Write-Log "Stack trace logged to execution_log.csv" -Level "ERROR"
+  # Full stack trace goes to log file only, not console
+  $script:LogEntries.Add([PSCustomObject]@{
+    Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Level = "DEBUG"
+    Message = "Stack trace: $($_.ScriptStackTrace)"
+  })
   Write-Host "`nAssessment failed. Check execution_log.csv for details." -ForegroundColor Red
   exit 1
 } finally {

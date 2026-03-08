@@ -27,14 +27,24 @@ function Export-InventoryData {
 
   Write-ProgressStep -Activity "Exporting Data" -Status "Writing CSV files..."
 
-  $VmInventory            | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:vmCsv
-  $SqlInventory.Databases | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:sqlDbCsv
-  $SqlInventory.ManagedInstances | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:sqlMiCsv
-  $StorageInventory.Files | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:filesCsv
-  $StorageInventory.Blobs | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:blobCsv
-  $AzureBackupInventory.Vaults   | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:vaultsCsv
-  $AzureBackupInventory.Policies | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:polCsv
-  $VeeamSizing            | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $script:sizingCsv
+  # Helper: export collection to CSV, skip if empty to avoid header-less files
+  $csvExports = @(
+    @{ Data = $VmInventory;                       Path = $script:vmCsv }
+    @{ Data = $SqlInventory.Databases;            Path = $script:sqlDbCsv }
+    @{ Data = $SqlInventory.ManagedInstances;     Path = $script:sqlMiCsv }
+    @{ Data = $StorageInventory.Files;            Path = $script:filesCsv }
+    @{ Data = $StorageInventory.Blobs;            Path = $script:blobCsv }
+    @{ Data = $AzureBackupInventory.Vaults;       Path = $script:vaultsCsv }
+    @{ Data = $AzureBackupInventory.Policies;     Path = $script:polCsv }
+    @{ Data = $VeeamSizing;                       Path = $script:sizingCsv }
+  )
+  foreach ($export in $csvExports) {
+    $collection = $export.Data
+    if ($null -eq $collection) { continue }
+    $items = @($collection)
+    if ($items.Count -eq 0) { continue }
+    $items | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $export.Path
+  }
 
   # JSON sizing bundle (machine-readable)
   $jsonPath = Join-Path $OutputPath "veeam_sizing_summary.json"
@@ -64,5 +74,14 @@ function New-OutputArchive {
   $zipPath = Join-Path (Split-Path $OutputPath -Parent) "$(Split-Path $OutputPath -Leaf).zip"
   Compress-Archive -Path (Join-Path $OutputPath "*") -DestinationPath $zipPath -Force
   Write-Log "Created ZIP archive: $zipPath" -Level "SUCCESS"
+
+  # Clean up uncompressed output directory after successful ZIP creation
+  try {
+    Remove-Item -Path $OutputPath -Recurse -Force -ErrorAction Stop
+    Write-Log "Cleaned up uncompressed output: $OutputPath" -Level "INFO"
+  } catch {
+    Write-Log "Could not remove uncompressed output: $($_.Exception.Message)" -Level "WARNING"
+  }
+
   return $zipPath
 }

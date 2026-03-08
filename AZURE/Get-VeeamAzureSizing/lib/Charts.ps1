@@ -190,7 +190,7 @@ function New-SvgCapacityForecast {
 
   $bars = @(
     @{ Label = "Current Dataset"; Value = $CurrentGB; Color = "#0078D4"; Y = 20 }
-    @{ Label = "Projected (1yr)"; Value = $ProjectedGB; Color = "#106EBE"; Y = 20 + $barH + $gap }
+    @{ Label = "Snapshot Storage"; Value = $ProjectedGB; Color = "#106EBE"; Y = 20 + $barH + $gap }
     @{ Label = "Recommended"; Value = $RecommendedGB; Color = "#00B336"; Y = 20 + 2 * ($barH + $gap) }
   )
 

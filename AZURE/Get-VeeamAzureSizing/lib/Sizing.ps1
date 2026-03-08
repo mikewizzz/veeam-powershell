@@ -15,7 +15,8 @@
 function Get-VeeamSizing {
   param(
     [Parameter(Mandatory=$true)]$VmInventory,
-    [Parameter(Mandatory=$true)]$SqlInventory
+    [Parameter(Mandatory=$true)]$SqlInventory,
+    $StorageInventory = $null
   )
 
   Write-ProgressStep -Activity "Calculating Veeam Sizing" -Status "Analyzing capacity requirements..."
@@ -50,8 +51,20 @@ function Get-VeeamSizing {
   $totalSQLRepoStorage = (_SafeSum $sqlDbs 'VeeamRepositoryGB') +
                          (_SafeSum $sqlMIs 'VeeamRepositoryGB')
 
-  # Combined totals
-  $totalSourceStorage = $totalVMStorage + $totalSQLStorage
+  # Azure Files totals
+  $fileShares = @()
+  if ($null -ne $StorageInventory -and $null -ne $StorageInventory.Files) {
+    if ($StorageInventory.Files -is [System.Collections.IList]) {
+      $fileShares = @($StorageInventory.Files.GetEnumerator())
+    } else {
+      $fileShares = @($StorageInventory.Files)
+    }
+  }
+  $totalFileSharesCount = $fileShares.Count
+  $totalFileShareStorageGB = _SafeSum $fileShares 'QuotaGiB'
+
+  # Combined totals (include file shares in source storage)
+  $totalSourceStorage = $totalVMStorage + $totalSQLStorage + $totalFileShareStorageGB
   $totalRepoStorage = $totalVMRepoStorage + $totalSQLRepoStorage
 
   # Recommendations
@@ -76,6 +89,8 @@ function Get-VeeamSizing {
     TotalSQLManagedInstances = $totalSQLMIs
     TotalSQLStorageGB = [math]::Round($totalSQLStorage, 2)
     TotalSQLRepositoryGB = [math]::Ceiling($totalSQLRepoStorage)
+    TotalFileShares = $totalFileSharesCount
+    TotalFileShareStorageGB = [math]::Round($totalFileShareStorageGB, 2)
     TotalSourceStorageGB = [math]::Round($totalSourceStorage, 2)
     TotalRepositoryGB = [math]::Ceiling($totalRepoStorage)
     Recommendations = $recommendations
