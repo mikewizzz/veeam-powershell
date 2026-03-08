@@ -267,12 +267,14 @@ function Test-OrphanVMs {
       if ($raw.data) { $orphans = @($raw.data) }
     }
     else {
+      # v3 filter does not reliably support wildcards — fetch and filter client-side
       $result = Invoke-PrismAPI -Method "POST" -Endpoint "vms/list" -Body @{
         kind   = "vm"
-        length = 50
-        filter = "vm_name==SureBackup_*"
+        length = 100
       }
-      if ($result.entities) { $orphans = @($result.entities) }
+      if ($result.entities) {
+        $orphans = @($result.entities | Where-Object { $_.spec.name -like "SureBackup_*" })
+      }
     }
 
     if ($orphans.Count -gt 0) {

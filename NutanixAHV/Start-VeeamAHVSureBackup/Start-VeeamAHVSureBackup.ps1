@@ -270,9 +270,10 @@ $script:LogEntries = New-Object System.Collections.Generic.List[object]
 $script:TestResults = New-Object System.Collections.Generic.List[object]
 $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
 $script:PrismHeaders = @{}
-$script:TotalSteps = 9
+$script:TotalSteps = 10
 $script:CurrentStep = 0
 $script:FatalError = $false
+$script:CompletedSuccessfully = $false
 
 # API version-aware base URL and endpoint mapping
 $script:PrismOrigin = "https://${PrismCentral}:${PrismPort}"
@@ -367,7 +368,7 @@ try {
       if ($vbrRP) {
         $rpInfo = [PSCustomObject]@{
           VMName         = $vm.name
-          JobName        = if ($vbrRP.BackupName) { $vbrRP.BackupName } elseif ($vm.protectionDomain) { $vm.protectionDomain } else { "N/A" }
+          JobName        = if ($vm.protectionDomain) { $vm.protectionDomain } elseif ($vbrRP.BackupName) { $vbrRP.BackupName } else { "N/A" }
           RestorePointId = $vbrRP.Id
           CreationTime   = $vbrRP.CreationTime
           BackupSize     = if ($vm.vmSize) { $vm.vmSize } else { 0 }
@@ -560,8 +561,18 @@ try {
   $bootOrder = Get-VMBootOrder -RestorePoints $restorePoints
 
   foreach ($groupName in $bootOrder.Keys) {
-    $groupRPs = $bootOrder[$groupName]
+    $groupRPs = @($bootOrder[$groupName])
     Write-Log "--- Processing $groupName ($($groupRPs.Count) VM(s)) ---" -Level "INFO"
+
+    # Handle empty groups (all VMs missing from restore points)
+    if ($groupRPs.Count -eq 0) {
+      Write-Log "--- $groupName has no VMs with restore points — FAILED (all VMs missing) ---" -Level "ERROR"
+      if ($ApplicationGroups -and $groupName -ne "Ungrouped" -and -not $DryRun) {
+        Write-Log "Halting subsequent application groups — $groupName dependency not satisfied" -Level "ERROR"
+        break
+      }
+      continue
+    }
 
     if ($DryRun) {
       # Dry run - just validate and report what would happen
@@ -667,6 +678,8 @@ try {
   Write-Log "  Report:       $OutputPath" -Level "INFO"
   Write-Log "========================================" -Level "INFO"
 
+  $script:CompletedSuccessfully = $true
+
   # Return structured result for pipeline use
   [PSCustomObject]@{
     Success     = ($summary.FailedTests -eq 0)
@@ -689,34 +702,48 @@ catch {
   throw
 }
 finally {
-  # Emergency cleanup — always clean up recovered VMs to prevent production exposure.
-  # Runs in finally to handle Ctrl+C (PipelineStoppedException skips catch on PS 5.1).
-  if ($script:RecoverySessions.Count -gt 0) {
-    $shouldCleanup = $true
-    if (-not $CleanupOnFailure -and $script:FatalError) {
-      Write-Log "Skipping cleanup (-CleanupOnFailure is false) — VMs left for debugging" -Level "WARNING"
-      foreach ($session in $script:RecoverySessions) {
-        if ($session.RecoveryVMUUID -and $session.Status -ne "CleanedUp") {
-          Write-Log "  Orphaned VM: $($session.RecoveryVMName) (UUID: $($session.RecoveryVMUUID))" -Level "WARNING"
-        }
-      }
-      $shouldCleanup = $false
-    }
+  # Ctrl+C (PipelineStoppedException) skips catch on PS 5.1 — detect it here.
+  # Only flag as fatal if the script didn't complete normally.
+  if (-not $script:FatalError -and -not $script:CompletedSuccessfully -and $script:RecoverySessions.Count -gt 0) {
+    $script:FatalError = $true
+  }
 
-    if ($shouldCleanup) {
-      $pendingSessions = @($script:RecoverySessions | Where-Object { $_.Status -ne "CleanedUp" })
-      if ($pendingSessions.Count -gt 0) {
-        Write-Log "Performing cleanup of $($pendingSessions.Count) recovery session(s)..." -Level "WARNING"
-        Invoke-Cleanup
+  # Emergency cleanup — always clean up recovered VMs to prevent production exposure.
+  # Wrapped in try to ensure credential cleanup always runs.
+  try {
+    if ($script:RecoverySessions.Count -gt 0) {
+      $shouldCleanup = $true
+      if (-not $CleanupOnFailure -and $script:FatalError) {
+        Write-Log "Skipping cleanup (-CleanupOnFailure is false) — VMs left for debugging" -Level "WARNING"
+        foreach ($session in $script:RecoverySessions) {
+          if ($session.RecoveryVMUUID -and $session.Status -ne "CleanedUp") {
+            Write-Log "  Orphaned VM: $($session.RecoveryVMName) (UUID: $($session.RecoveryVMUUID))" -Level "WARNING"
+          }
+        }
+        $shouldCleanup = $false
+      }
+
+      if ($shouldCleanup) {
+        $pendingSessions = @($script:RecoverySessions | Where-Object { $_.Status -ne "CleanedUp" })
+        if (@($pendingSessions).Count -gt 0) {
+          Write-Log "Performing cleanup of $(@($pendingSessions).Count) recovery session(s)..." -Level "WARNING"
+          Invoke-Cleanup
+        }
       }
     }
   }
+  catch {
+    # Cleanup itself failed — ensure we still clear credentials below
+  }
 
   # Credential cleanup — clear sensitive tokens and headers from memory
-  if ($script:VBAHVHeaders) { $script:VBAHVHeaders.Clear() }
-  $script:VBAHVRefreshToken = $null
-  $script:VBAHVTokenExpiry = $null
-  if ($script:PrismHeaders) { $script:PrismHeaders.Clear() }
+  try {
+    if ($script:VBAHVHeaders) { $script:VBAHVHeaders.Clear() }
+    $script:VBAHVRefreshToken = $null
+    $script:VBAHVTokenExpiry = $null
+    if ($script:PrismHeaders) { $script:PrismHeaders.Clear() }
+  }
+  catch { }
 
   # Close progress bar
   Write-Progress -Activity "Veeam AHV SureBackup" -Completed

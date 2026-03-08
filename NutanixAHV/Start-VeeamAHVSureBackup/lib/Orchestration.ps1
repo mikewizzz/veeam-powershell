@@ -44,13 +44,12 @@ function Get-VMBootOrder {
         Write-Log "Application group $groupId has $($missingVMs.Count) missing VM(s): $($missingVMs -join ', ') — dependent groups may fail" -Level "WARNING"
       }
 
-      if ($groupRPs.Count -gt 0) {
-        $ordered["Group $groupId"] = $groupRPs
-      }
+      # Always add group to ordered (even if empty) to maintain dependency chain
+      $ordered["Group $groupId"] = @($groupRPs)
     }
 
-    # Add unassigned VMs to catch-all group
-    $unassigned = $RestorePoints | Where-Object { $_.VMName -notin $assignedVMs }
+    # Add unassigned VMs to catch-all group (wrap in @() for PS 5.1 .Count)
+    $unassigned = @($RestorePoints | Where-Object { $_.VMName -notin $assignedVMs })
     if ($unassigned.Count -gt 0) {
       $ordered["Ungrouped"] = @($unassigned)
     }

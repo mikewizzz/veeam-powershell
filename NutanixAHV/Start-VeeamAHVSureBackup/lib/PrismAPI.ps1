@@ -191,8 +191,9 @@ function Invoke-PrismAPI {
       $waitSec = $null
       if ($statusCode -eq 429 -and $_.Exception.Response.Headers) {
         try {
-          $retryAfterRaw = $_.Exception.Response.Headers | Where-Object { $_.Key -eq "Retry-After" } | Select-Object -ExpandProperty Value -First 1
-          # PS 7 returns IEnumerable<string> — extract scalar
+          # PS 5.1: WebHeaderCollection uses indexed access, not key-value enumeration
+          $retryAfterRaw = $_.Exception.Response.Headers["Retry-After"]
+          # PS 7 may return IEnumerable<string> — extract scalar
           $retryAfter = if ($retryAfterRaw -is [System.Collections.IEnumerable] -and $retryAfterRaw -isnot [string]) { $retryAfterRaw[0] } else { $retryAfterRaw }
           if ($retryAfter) { $waitSec = [int]$retryAfter }
         }
@@ -704,7 +705,12 @@ function Assert-VMNetworkIsolation {
         if ($nic.networkInfo -and $nic.networkInfo.subnet) {
           $nicSubnetId = $nic.networkInfo.subnet.extId
         }
-        if (-not $nicSubnetId -or $nicSubnetId -ne $IsolatedNetwork.UUID) {
+        if (-not $nicSubnetId) {
+          # Disconnected/unattached NIC — no network exposure risk
+          Write-Log "  NIC $($nic.extId) has no subnet (disconnected) — skipping" -Level "INFO"
+          continue
+        }
+        if ($nicSubnetId -ne $IsolatedNetwork.UUID) {
           Write-Log "  NIC $($nic.extId) is on subnet '$nicSubnetId' — expected '$($IsolatedNetwork.UUID)'" -Level "ERROR"
           return $false
         }
@@ -791,8 +797,10 @@ function Get-PrismVMIPAddress {
     $vmResult = Get-PrismVMByUUID -UUID $UUID
 
     if ($PrismApiVersion -eq "v4") {
-      $vm = $vmResult.VM
-      $nics = $vm.nics
+      # v4: NICs are a sub-resource, not inline on the VM object
+      $nicsEndpoint = "$($script:PrismEndpoints.VMs)/$UUID/nics"
+      $nicsRaw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $nicsEndpoint)
+      $nics = if ($nicsRaw.data) { @($nicsRaw.data) } else { @() }
       foreach ($nic in $nics) {
         # v4: IPs only under networkInfo.ipv4Info (per VMM v4 SDK Nic model)
         $ipEndpoints = $nic.networkInfo.ipv4Info.learnedIpAddresses
@@ -947,16 +955,18 @@ function Set-PrismVMNIC {
     }
   }
   else {
-    # v3: update nic_list in VM spec
+    # v3: update nic_list in VM spec — preserve full metadata to avoid stripping categories/owner
     $vmSpec = Get-PrismVMByUUID -UUID $VMUUID
     $vmSpec.spec.resources.nic_list = @(
       @{ subnet_reference = @{ kind = "subnet"; uuid = $SubnetUUID }; is_connected = $true }
     )
     $body = @{
-      metadata = @{ kind = "vm"; uuid = $VMUUID; spec_version = $vmSpec.metadata.spec_version }
+      metadata = $vmSpec.metadata
       spec     = $vmSpec.spec
     }
-    Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$VMUUID" -Body $body
+    $putResult = Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$VMUUID" -Body $body
+    $taskId = _ExtractTaskId $putResult
+    if ($taskId) { Wait-PrismTask -TaskUUID $taskId -TimeoutSec 120 }
   }
 }
 
@@ -980,14 +990,16 @@ function Set-PrismVMPowerState {
     if ($taskId) { Wait-PrismTask -TaskUUID $taskId -TimeoutSec 120 }
   }
   else {
-    # v3: GET spec, modify power_state, PUT with spec_version
+    # v3: GET spec, modify power_state, PUT — preserve full metadata
     $vmSpec = Get-PrismVMByUUID -UUID $UUID
     $vmSpec.spec.resources.power_state = $State
     $body = @{
-      metadata = @{ kind = "vm"; uuid = $UUID; spec_version = $vmSpec.metadata.spec_version }
+      metadata = $vmSpec.metadata
       spec     = $vmSpec.spec
     }
-    Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$UUID" -Body $body
+    $putResult = Invoke-PrismAPI -Method "PUT" -Endpoint "vms/$UUID" -Body $body
+    $taskId = _ExtractTaskId $putResult
+    if ($taskId) { Wait-PrismTask -TaskUUID $taskId -TimeoutSec 120 }
   }
 }
 
