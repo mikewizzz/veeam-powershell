@@ -27,6 +27,7 @@ function Get-VMBootOrder {
       $groupVMs = $ApplicationGroups[$groupId]
       $groupRPs = @()
 
+      $missingVMs = @()
       foreach ($vmName in $groupVMs) {
         $rp = $RestorePoints | Where-Object { $_.VMName -eq $vmName }
         if ($rp) {
@@ -34,8 +35,13 @@ function Get-VMBootOrder {
           $assignedVMs += $vmName
         }
         else {
-          Write-Log "Application group $groupId : VM '$vmName' has no restore point - skipping" -Level "WARNING"
+          $missingVMs += $vmName
+          Write-Log "Application group $groupId : VM '$vmName' has no restore point - MISSING" -Level "ERROR"
         }
+      }
+
+      if ($missingVMs.Count -gt 0) {
+        Write-Log "Application group $groupId has $($missingVMs.Count) missing VM(s): $($missingVMs -join ', ') — dependent groups may fail" -Level "WARNING"
       }
 
       if ($groupRPs.Count -gt 0) {

@@ -68,7 +68,13 @@ function Initialize-VBAHVPluginConnection {
     $expiresIn = if ($tokenResponse.expires_in) { [int]$tokenResponse.expires_in } else { 900 }
     $script:VBAHVTokenExpiry = (Get-Date).AddSeconds($expiresIn)
 
+    # VBR Core REST API shares port 9419 and the same OAuth2 token
+    $script:VBRCoreBaseUrl = "https://${vbrHost}:${vbrApiPort}/api/v1"
+
     Write-Log "Veeam AHV Plugin REST API authenticated (API $apiVersion, token expires in ${expiresIn}s)" -Level "SUCCESS"
+
+    # Clear plaintext password from memory
+    $tokenBody.password = $null
   }
   catch {
     throw "Veeam AHV Plugin authentication failed: $($_.Exception.Message). Verify VBR credentials and that the AHV plugin v9 is installed."
@@ -127,6 +133,134 @@ function Refresh-VBAHVToken {
     Initialize-VBAHVPluginConnection
   }
 }
+
+# ============================================================================
+# VBR Core REST API (port 9419) — Restore Point Resolution
+# ============================================================================
+
+function Invoke-VBRCoreAPI {
+  <#
+  .SYNOPSIS
+    Execute a VBR Core REST API call (port 9419) with retry logic
+  .DESCRIPTION
+    Calls the VBR server's built-in REST API to resolve real backup restore
+    points. Uses the same OAuth2 token obtained for the VBAHV Plugin.
+  .PARAMETER Method
+    HTTP method (GET, POST)
+  .PARAMETER Endpoint
+    API endpoint path appended to the VBR Core base URL
+  .PARAMETER Body
+    Request body hashtable (serialized to JSON)
+  .PARAMETER RetryCount
+    Max retries on transient failure (default: 3)
+  .PARAMETER TimeoutSec
+    Per-request timeout (default: 30s)
+  #>
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("GET", "POST")][string]$Method,
+    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$Endpoint,
+    [hashtable]$Body,
+    [ValidateRange(0, 10)][int]$RetryCount = 3,
+    [ValidateRange(1, 600)][int]$TimeoutSec = 30
+  )
+
+  if ($script:VBAHVTokenExpiry -and (Get-Date) -gt $script:VBAHVTokenExpiry.AddMinutes(-5)) {
+    Refresh-VBAHVToken
+  }
+
+  $url = "$($script:VBRCoreBaseUrl)/$Endpoint"
+  $attempt = 0
+
+  while ($attempt -le $RetryCount) {
+    try {
+      $params = @{
+        Method     = $Method
+        Uri        = $url
+        Headers    = @{
+          "Authorization" = $script:VBAHVHeaders["Authorization"]
+          "x-api-version" = "1.3-rev1"
+          "Accept"        = "application/json"
+        }
+        TimeoutSec = $TimeoutSec
+      }
+
+      if ($Body) {
+        $params.Body = ($Body | ConvertTo-Json -Depth 20)
+        $params.Headers["Content-Type"] = "application/json"
+      }
+
+      if ($SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 7) {
+        $params.SkipCertificateCheck = $true
+      }
+
+      return Invoke-RestMethod @params -ErrorAction Stop
+    }
+    catch {
+      $statusCode = $null
+      if ($_.Exception.Response) {
+        $statusCode = [int]$_.Exception.Response.StatusCode
+      }
+
+      if ($statusCode -and $statusCode -ge 400 -and $statusCode -lt 500 -and $statusCode -ne 429) {
+        throw
+      }
+
+      $attempt++
+      if ($attempt -gt $RetryCount) { throw }
+
+      $waitSec = [math]::Min([int]([math]::Pow(2, $attempt)), 30)
+      Start-Sleep -Seconds $waitSec
+    }
+  }
+}
+
+function Get-VBRObjectRestorePoints {
+  <#
+  .SYNOPSIS
+    Look up real restore points for a VM via VBR Core REST API
+  .DESCRIPTION
+    Queries GET /api/v1/objectRestorePoints to find the latest backup restore
+    point for a given VM name. Returns real RestorePointId, CreationTime,
+    BackupSize, and consistency metadata from the VBR database.
+  .PARAMETER VMName
+    VM name to search for in backup restore points
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$VMName
+  )
+
+  try {
+    $encodedName = [System.Uri]::EscapeDataString($VMName)
+    $result = Invoke-VBRCoreAPI -Method "GET" -Endpoint "objectRestorePoints?nameFilter=$encodedName&orderAsc=false&limit=5"
+
+    $points = $result.data
+    if (-not $points) { $points = $result }
+
+    if ($points -and @($points).Count -gt 0) {
+      # Find the most recent restore point matching the exact VM name
+      $match = @($points) | Where-Object { $_.name -eq $VMName } | Select-Object -First 1
+      if (-not $match) { $match = @($points)[0] }
+
+      return [PSCustomObject]@{
+        Id           = $match.id
+        Name         = $match.name
+        CreationTime = [datetime]$match.creationTime
+        BackupId     = $match.backupId
+        BackupName   = if ($match.backupName) { $match.backupName } else { $null }
+        PlatformName = if ($match.platformName) { $match.platformName } else { $null }
+      }
+    }
+  }
+  catch {
+    Write-Log "  VBR Core API restore point lookup failed for '$VMName': $($_.Exception.Message)" -Level "WARNING"
+  }
+
+  return $null
+}
+
+# ============================================================================
+# VBAHV Plugin REST API — API Calls
+# ============================================================================
 
 function Invoke-VBAHVPluginAPI {
   <#
@@ -618,7 +752,7 @@ function Start-AHVFullRestore {
 
     if ($sessionId) {
       Write-Log "  Restore session: $sessionId — polling for completion..." -Level "INFO"
-      $restoreTimeout = 1800  # 30 min max for full disk copy
+      $restoreTimeout = if ($RestoreTimeoutSec) { $RestoreTimeoutSec } else { 1800 }
       $pollInterval = 15
       $elapsed = 0
 
@@ -689,8 +823,16 @@ function Start-AHVFullRestore {
     $vmUUID = if ($PrismApiVersion -eq "v4") { @($recoveredVM)[0].extId } else { @($recoveredVM)[0].metadata.uuid }
     Write-Log "  Restored VM found: $vmUUID" -Level "SUCCESS"
 
-    # Step 7: Power on — VM is already on isolated network (no NIC swap needed)
-    Write-Log "  Powering on VM (already on isolated network '$($IsolatedNetwork.Name)')..." -Level "INFO"
+    # Step 7: Verify network isolation before power-on
+    $isolated = Assert-VMNetworkIsolation -VMUUID $vmUUID -IsolatedNetwork $IsolatedNetwork
+    if (-not $isolated) {
+      Write-Log "  ABORTING: VM '$recoveryName' has NIC(s) NOT on isolated network — cleaning up to prevent production exposure" -Level "ERROR"
+      Remove-PrismVM -UUID $vmUUID
+      throw "Network isolation verification failed for '$vmName' — restored VM had NIC(s) on non-isolated subnet"
+    }
+
+    # Step 8: Power on — VM verified on isolated network
+    Write-Log "  Powering on VM (verified on isolated network '$($IsolatedNetwork.Name)')..." -Level "INFO"
     Set-PrismVMPowerState -UUID $vmUUID -State "ON"
 
     $recoveryInfo = _NewRecoveryInfo -OriginalVMName $vmName -RecoveryVMName $recoveryName -RecoveryVMUUID $vmUUID -Status "Running" -RestoreMethod "FullRestore"
@@ -709,35 +851,89 @@ function Start-AHVFullRestore {
 function Stop-AHVFullRestore {
   <#
   .SYNOPSIS
-    Clean up a full-restore VM (power off + delete from Prism)
+    Clean up a full-restore VM (power off + delete from Prism) with retry logic
   .DESCRIPTION
     Full restore creates an independent VM. Cleanup = power off + Remove-PrismVM.
+    Retries up to 3 times with exponential backoff. On final failure, writes
+    orphan UUID to a file for manual cleanup.
   #>
   param(
     [Parameter(Mandatory = $true)]$RecoveryInfo
   )
 
   $vmName = $RecoveryInfo.OriginalVMName
+  $vmUUID = $RecoveryInfo.RecoveryVMUUID
+  $maxRetries = 3
 
-  try {
-    if ($RecoveryInfo.RecoveryVMUUID) {
-      # Power off
-      Write-Log "  Powering off full-restore VM: $($RecoveryInfo.RecoveryVMName)" -Level "INFO"
+  if (-not $vmUUID) {
+    # No UUID means restore never completed — try by name as fallback
+    if ($RecoveryInfo.RecoveryVMName) {
       try {
-        Set-PrismVMPowerState -UUID $RecoveryInfo.RecoveryVMUUID -State "OFF"
-        Wait-PrismVMPowerState -UUID $RecoveryInfo.RecoveryVMUUID -State "OFF" -TimeoutSec 120 | Out-Null
+        $found = Get-PrismVMByName -Name $RecoveryInfo.RecoveryVMName
+        if ($found) {
+          $vmUUID = if ($PrismApiVersion -eq "v4") { @($found)[0].extId } else { @($found)[0].metadata.uuid }
+          Write-Log "  Found orphan VM by name: $($RecoveryInfo.RecoveryVMName) -> $vmUUID" -Level "WARNING"
+        }
       }
       catch { }
-
-      # Delete VM from Prism
-      Remove-PrismVM -UUID $RecoveryInfo.RecoveryVMUUID
-      Write-Log "Cleaned up full-restore VM for '$vmName'" -Level "SUCCESS"
     }
+    if (-not $vmUUID) {
+      $RecoveryInfo.Status = "CleanedUp"
+      return
+    }
+  }
 
+  # Retry power-off
+  $poweredOff = $false
+  for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+    try {
+      Write-Log "  Powering off full-restore VM: $($RecoveryInfo.RecoveryVMName) (attempt $attempt/$maxRetries)" -Level "INFO"
+      Set-PrismVMPowerState -UUID $vmUUID -State "OFF"
+      $poweredOff = Wait-PrismVMPowerState -UUID $vmUUID -State "OFF" -TimeoutSec 120
+      if ($poweredOff) { break }
+    }
+    catch {
+      if ($attempt -lt $maxRetries) {
+        $waitSec = [math]::Min([int]([math]::Pow(2, $attempt)), 15)
+        Start-Sleep -Seconds $waitSec
+      }
+    }
+  }
+
+  if (-not $poweredOff) {
+    Write-Log "  Power-off failed after $maxRetries attempts for '$vmName' (UUID: $vmUUID)" -Level "WARNING"
+  }
+
+  # Retry delete
+  $deleted = $false
+  for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+    try {
+      $deleted = Remove-PrismVM -UUID $vmUUID
+      if ($deleted) { break }
+    }
+    catch {
+      if ($attempt -lt $maxRetries) {
+        $waitSec = [math]::Min([int]([math]::Pow(2, $attempt)), 15)
+        Write-Log "  Delete retry $attempt/$maxRetries for '$vmName' in ${waitSec}s" -Level "WARNING"
+        Start-Sleep -Seconds $waitSec
+      }
+    }
+  }
+
+  if ($deleted) {
+    Write-Log "Cleaned up full-restore VM for '$vmName'" -Level "SUCCESS"
     $RecoveryInfo.Status = "CleanedUp"
   }
-  catch {
-    Write-Log "Cleanup warning for '$vmName': $($_.Exception.Message)" -Level "WARNING"
+  else {
+    Write-Log "CLEANUP FAILED for '$vmName' (UUID: $vmUUID) after $maxRetries retries — VM may be orphaned" -Level "ERROR"
+    Write-Log "Manual cleanup required: delete VM '$($RecoveryInfo.RecoveryVMName)' (UUID: $vmUUID) from Prism Central" -Level "ERROR"
     $RecoveryInfo.Status = "CleanupFailed"
+
+    # Write orphan UUID to file for automated recovery
+    $orphanFile = Join-Path $OutputPath "SureBackup_OrphanVMs.txt"
+    try {
+      "$vmUUID|$($RecoveryInfo.RecoveryVMName)|$(Get-Date -Format 'o')" | Out-File -FilePath $orphanFile -Append -Encoding UTF8
+    }
+    catch { }
   }
 }

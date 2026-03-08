@@ -82,7 +82,10 @@
   Maximum seconds to wait for VM boot and heartbeat (default: 300).
 
 .PARAMETER TestPing
-  Enable ICMP ping test (default: true).
+  Enable ICMP ping test (default: true). Requires Layer 3 (routed) connectivity
+  from the script host to the isolated network. If the isolated network is truly
+  air-gapped with no routing, ICMP tests will always fail. Set to $false in
+  that case and rely on heartbeat/NGT tests instead.
 
 .PARAMETER TestPorts
   TCP ports to test connectivity on recovered VMs (e.g., 22, 80, 443, 3389).
@@ -118,6 +121,10 @@
 .PARAMETER DryRun
   Simulate the entire SureBackup process without performing actual recovery.
   Validates connectivity, discovers backups, and shows what would be tested.
+
+.PARAMETER RestoreTimeoutSec
+  Maximum seconds to wait for a full VM restore to complete (default: 3600).
+  Large VMs with multi-TB disks may need longer timeouts.
 
 .PARAMETER VBAHVApiVersion
   Veeam Plug-in for Nutanix AHV REST API version (default: "v9").
@@ -162,7 +169,7 @@
   # Interactive mode - search/filter VMs by name, then select which to test
 
 .NOTES
-  Version: 1.1.0
+  Version: 1.2.0
   Author: Community Contributors
   Date: 2026-02-28
   Requires: PowerShell 5.1+ (7.x recommended)
@@ -233,6 +240,10 @@ param(
   [bool]$CleanupOnFailure = $true,
   [switch]$DryRun,
 
+  # Restore Timing
+  [ValidateRange(300, 14400)]
+  [int]$RestoreTimeoutSec = 3600,
+
   # VBAHV Plugin REST API
   [ValidateSet("v9")]
   [string]$VBAHVApiVersion = "v9",
@@ -261,6 +272,7 @@ $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
 $script:PrismHeaders = @{}
 $script:TotalSteps = 9
 $script:CurrentStep = 0
+$script:FatalError = $false
 
 # API version-aware base URL and endpoint mapping
 $script:PrismOrigin = "https://${PrismCentral}:${PrismPort}"
@@ -347,19 +359,39 @@ try {
   $restorePointsList = New-Object System.Collections.Generic.List[object]
 
   if ($allProtectedVMs -and @($allProtectedVMs).Count -gt 0) {
+    Write-Log "Resolving real restore points via VBR Core REST API..." -Level "INFO"
     foreach ($vm in @($allProtectedVMs)) {
-      $rpInfo = [PSCustomObject]@{
-        VMName         = $vm.name
-        JobName        = if ($vm.protectionDomain) { $vm.protectionDomain } else { "N/A" }
-        RestorePointId = $vm.id
-        CreationTime   = Get-Date  # VM discovery doesn't expose backup timestamps
-        BackupSize     = if ($vm.vmSize) { $vm.vmSize } else { 0 }
-        IsConsistent   = $true
-        ClusterId      = $vm.clusterId
-        ClusterName    = $vm.clusterName
+      # Look up real restore point metadata from VBR Core API
+      $vbrRP = Get-VBRObjectRestorePoints -VMName $vm.name
+
+      if ($vbrRP) {
+        $rpInfo = [PSCustomObject]@{
+          VMName         = $vm.name
+          JobName        = if ($vbrRP.BackupName) { $vbrRP.BackupName } elseif ($vm.protectionDomain) { $vm.protectionDomain } else { "N/A" }
+          RestorePointId = $vbrRP.Id
+          CreationTime   = $vbrRP.CreationTime
+          BackupSize     = if ($vm.vmSize) { $vm.vmSize } else { 0 }
+          IsConsistent   = $true
+          ClusterId      = $vm.clusterId
+          ClusterName    = $vm.clusterName
+        }
+      }
+      else {
+        # Fallback: use VBAHV Plugin VM ID if VBR Core API lookup fails
+        Write-Log "  VBR Core API lookup failed for '$($vm.name)' — using plugin VM ID as fallback" -Level "WARNING"
+        $rpInfo = [PSCustomObject]@{
+          VMName         = $vm.name
+          JobName        = if ($vm.protectionDomain) { $vm.protectionDomain } else { "N/A" }
+          RestorePointId = $vm.id
+          CreationTime   = Get-Date
+          BackupSize     = if ($vm.vmSize) { $vm.vmSize } else { 0 }
+          IsConsistent   = $true
+          ClusterId      = $vm.clusterId
+          ClusterName    = $vm.clusterName
+        }
       }
       $restorePointsList.Add($rpInfo)
-      Write-Log "  Found protected VM: '$($rpInfo.VMName)' on cluster '$($rpInfo.ClusterName)'" -Level "INFO"
+      Write-Log "  Found protected VM: '$($rpInfo.VMName)' on cluster '$($rpInfo.ClusterName)' (restore point: $($rpInfo.CreationTime.ToString('yyyy-MM-dd HH:mm')))" -Level "INFO"
     }
   }
 
@@ -367,6 +399,16 @@ try {
 
   if ($restorePoints.Count -eq 0) {
     throw "No protected VMs found in any Prism Central. Ensure AHV backup jobs exist and the VBAHV Plugin is configured."
+  }
+
+  # Filter by backup job names if specified
+  if ($BackupJobNames -and $BackupJobNames.Count -gt 0) {
+    $beforeCount = $restorePoints.Count
+    $restorePoints = @($restorePoints | Where-Object { $_.JobName -in $BackupJobNames })
+    if ($restorePoints.Count -eq 0) {
+      throw "No VMs matched -BackupJobNames filter ($($BackupJobNames -join ', ')). Found $beforeCount VM(s) but none associated with the specified job(s)."
+    }
+    Write-Log "Filtered to $($restorePoints.Count) VM(s) matching -BackupJobNames ($($BackupJobNames -join ', '))" -Level "INFO"
   }
 
   Write-Log "Discovered $($restorePoints.Count) protected VM(s)" -Level "SUCCESS"
@@ -407,11 +449,13 @@ try {
       $matchLabel = if ($filter -ne "") { "Matching VMs ($($filteredRPs.Count) of $totalVMs)" } else { "All VMs ($totalVMs)" }
       Write-Log "" -Level "INFO"
       Write-Log "${matchLabel}:" -Level "INFO"
+      $nameWidth = [math]::Max(15, ($filteredRPs | ForEach-Object { $_.VMName.Length } | Measure-Object -Maximum).Maximum + 2)
+      $jobWidth = [math]::Max(20, ($filteredRPs | ForEach-Object { $_.JobName.Length } | Measure-Object -Maximum).Maximum + 2)
       for ($i = 0; $i -lt $filteredRPs.Count; $i++) {
         $rp = $filteredRPs[$i]
         $age = _FormatTimeAgo -DateTime $rp.CreationTime
         $consistent = if ($rp.IsConsistent) { "App-Consistent" } else { "Crash-Consistent" }
-        $line = "  [{0}] {1,-15} | Job: {2,-20} | {3,-15} | {4}" -f ($i + 1), $rp.VMName, $rp.JobName, $age, $consistent
+        $line = "  [{0}] {1,-$nameWidth} | Job: {2,-$jobWidth} | {3,-15} | {4}" -f ($i + 1), $rp.VMName, $rp.JobName, $age, $consistent
         Write-Log $line -Level "INFO"
       }
 
@@ -457,6 +501,15 @@ try {
   Write-Log "Restore method: Full VM Restore (VBAHV REST API)" -Level "INFO"
   Write-Log "Isolated network: $($isolatedNet.Name) (VLAN $($isolatedNet.VlanId))" -Level "INFO"
   Write-Log "Tests: Heartbeat$(if($TestPing){', Ping'})$(if($TestPorts){', Ports: '+($TestPorts -join ',')})$(if($TestDNS){', DNS'})$(if($TestHttpEndpoints){', HTTP'})$(if($TestCustomScript){', Custom Script'})" -Level "INFO"
+
+  # Runtime estimate
+  $vmCount = $restorePoints.Count
+  $batchCount = [math]::Ceiling($vmCount / $MaxConcurrentVMs)
+  # Estimate: ~5 min restore + boot + tests per batch, plus ~2 min cleanup per batch
+  $estimatedMinutes = $batchCount * 7
+  if ($estimatedMinutes -gt 0 -and -not $DryRun) {
+    Write-Log "Estimated runtime: ~$estimatedMinutes minutes ($vmCount VMs, $batchCount batch(es) of $MaxConcurrentVMs)" -Level "INFO"
+  }
   Write-Log "" -Level "INFO"
 
   # ---- Step 6: Preflight health checks ----
@@ -632,15 +685,45 @@ catch {
   Write-Log "FATAL ERROR: $($_.Exception.Message)" -Level "ERROR"
   Write-Log "Stack trace: $($_.ScriptStackTrace)" -Level "ERROR"
 
-  # Emergency cleanup — always clean up recovered VMs to prevent production exposure.
-  if ($script:RecoverySessions.Count -gt 0) {
-    Write-Log "Performing emergency cleanup of $($script:RecoverySessions.Count) recovery session(s)..." -Level "WARNING"
-    Invoke-Cleanup
-  }
-
+  $script:FatalError = $true
   throw
 }
 finally {
+  # Emergency cleanup — always clean up recovered VMs to prevent production exposure.
+  # Runs in finally to handle Ctrl+C (PipelineStoppedException skips catch on PS 5.1).
+  if ($script:RecoverySessions.Count -gt 0) {
+    $shouldCleanup = $true
+    if (-not $CleanupOnFailure -and $script:FatalError) {
+      Write-Log "Skipping cleanup (-CleanupOnFailure is false) — VMs left for debugging" -Level "WARNING"
+      foreach ($session in $script:RecoverySessions) {
+        if ($session.RecoveryVMUUID -and $session.Status -ne "CleanedUp") {
+          Write-Log "  Orphaned VM: $($session.RecoveryVMName) (UUID: $($session.RecoveryVMUUID))" -Level "WARNING"
+        }
+      }
+      $shouldCleanup = $false
+    }
+
+    if ($shouldCleanup) {
+      $pendingSessions = @($script:RecoverySessions | Where-Object { $_.Status -ne "CleanedUp" })
+      if ($pendingSessions.Count -gt 0) {
+        Write-Log "Performing cleanup of $($pendingSessions.Count) recovery session(s)..." -Level "WARNING"
+        Invoke-Cleanup
+      }
+    }
+  }
+
+  # Credential cleanup — clear sensitive tokens and headers from memory
+  if ($script:VBAHVHeaders) { $script:VBAHVHeaders.Clear() }
+  $script:VBAHVRefreshToken = $null
+  $script:VBAHVTokenExpiry = $null
+  if ($script:PrismHeaders) { $script:PrismHeaders.Clear() }
+
   # Close progress bar
   Write-Progress -Activity "Veeam AHV SureBackup" -Completed
+
+  # Set process exit code for automation/CI
+  if ($script:FatalError) {
+    $LASTEXITCODE = 1
+    if ($Host.Name -eq 'ConsoleHost') { $host.SetShouldExit(1) }
+  }
 }
