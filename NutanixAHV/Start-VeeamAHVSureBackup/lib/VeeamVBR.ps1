@@ -732,7 +732,8 @@ function Start-AHVFullRestore {
         $remap = @{
           originalMacAddress = if ($nic.macAddress) { $nic.macAddress } else { "" }
           value              = @{
-            networkId = $IsolatedNetwork.UUID
+            networkId   = $IsolatedNetwork.UUID
+            ipAddresses = @()
           }
         }
         $networkAdapterRemaps += $remap
