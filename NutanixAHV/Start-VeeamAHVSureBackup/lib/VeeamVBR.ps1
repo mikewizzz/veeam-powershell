@@ -219,9 +219,10 @@ function Get-VBRObjectRestorePoints {
   .SYNOPSIS
     Look up real restore points for a VM via VBR Core REST API
   .DESCRIPTION
-    Queries GET /api/v1/objectRestorePoints to find the latest backup restore
-    point for a given VM name. Returns real RestorePointId, CreationTime,
-    BackupSize, and consistency metadata from the VBR database.
+    Two-step lookup via VBR Core REST API:
+    1. GET /api/v1/backupObjects?nameFilter={name} — find the backup object
+    2. GET /api/v1/backupObjects/{id}/restorePoints — get latest restore point
+    Returns real RestorePointId, CreationTime, and metadata from the VBR database.
   .PARAMETER VMName
     VM name to search for in backup restore points
   #>
@@ -230,16 +231,31 @@ function Get-VBRObjectRestorePoints {
   )
 
   try {
+    # Two-step lookup: find backup object by name, then get its restore points
+    # Step 1: GET /api/v1/backupObjects?nameFilter={name}
     $encodedName = [System.Uri]::EscapeDataString($VMName)
-    $result = Invoke-VBRCoreAPI -Method "GET" -Endpoint "objectRestorePoints?nameFilter=$encodedName&orderAsc=false&limit=5"
+    $objectResult = Invoke-VBRCoreAPI -Method "GET" -Endpoint "backupObjects?nameFilter=$encodedName"
 
-    $points = $result.data
-    if ($null -eq $result.data) { $points = $result }
+    $objects = $objectResult.data
+    if ($null -eq $objectResult.data) { $objects = $objectResult }
+
+    if (-not $objects -or @($objects).Count -eq 0) { return $null }
+
+    # Find exact name match among backup objects
+    $backupObj = @($objects) | Where-Object { $_.name -eq $VMName } | Select-Object -First 1
+    if (-not $backupObj) { $backupObj = @($objects)[0] }
+
+    $objectId = $backupObj.id
+    if (-not $objectId) { return $null }
+
+    # Step 2: GET /api/v1/backupObjects/{id}/restorePoints?orderAsc=false&limit=1
+    $rpResult = Invoke-VBRCoreAPI -Method "GET" -Endpoint "backupObjects/$objectId/restorePoints?orderAsc=false&limit=1"
+
+    $points = $rpResult.data
+    if ($null -eq $rpResult.data) { $points = $rpResult }
 
     if ($points -and @($points).Count -gt 0) {
-      # Find the most recent restore point matching the exact VM name
-      $match = @($points) | Where-Object { $_.name -eq $VMName } | Select-Object -First 1
-      if (-not $match) { $match = @($points)[0] }
+      $match = @($points)[0]
 
       # Parse creation time with culture-invariant format (VBR returns ISO 8601)
       $parsedTime = Get-Date
@@ -250,7 +266,7 @@ function Get-VBRObjectRestorePoints {
 
       return [PSCustomObject]@{
         Id           = $match.id
-        Name         = $match.name
+        Name         = if ($match.name) { $match.name } else { $VMName }
         CreationTime = $parsedTime
         BackupId     = $match.backupId
         BackupName   = if ($match.backupName) { $match.backupName } else { $null }

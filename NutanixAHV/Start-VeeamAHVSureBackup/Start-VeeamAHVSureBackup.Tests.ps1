@@ -1648,6 +1648,95 @@ Describe "Preflight Health Checks" {
 }
 
 # ============================================================
+Describe "Get-VBRObjectRestorePoints" {
+
+  BeforeEach {
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
+    $script:VBRCoreBaseUrl = "https://vbr01:9419/api/v1"
+    $script:VBAHVHeaders = @{
+      "Authorization" = "Bearer test-token"
+      "Content-Type"  = "application/json"
+    }
+  }
+
+  It "returns latest restore point for exact VM name match" {
+    Mock Invoke-VBRCoreAPI {
+      @{ data = @(@{ id = "obj1"; name = "dc01" }) }
+    } -ParameterFilter { $Endpoint -like "backupObjects?nameFilter=*" }
+
+    Mock Invoke-VBRCoreAPI {
+      @{ data = @(@{ id = "rp1"; name = "dc01"; creationTime = "2026-03-07T10:00:00Z"; backupId = "b1"; backupName = "Daily Backup" }) }
+    } -ParameterFilter { $Endpoint -like "backupObjects/*/restorePoints*" }
+
+    $result = Get-VBRObjectRestorePoints -VMName "dc01"
+    $result.Id | Should -Be "rp1"
+    $result.Name | Should -Be "dc01"
+    $result.BackupName | Should -Be "Daily Backup"
+  }
+
+  It "returns null when no backup objects found" {
+    Mock Invoke-VBRCoreAPI {
+      @{ data = @() }
+    } -ParameterFilter { $Endpoint -like "backupObjects?nameFilter=*" }
+
+    $result = Get-VBRObjectRestorePoints -VMName "nonexistent-vm"
+    $result | Should -BeNullOrEmpty
+  }
+
+  It "returns null when backup object has no restore points" {
+    Mock Invoke-VBRCoreAPI {
+      @{ data = @(@{ id = "obj1"; name = "dc01" }) }
+    } -ParameterFilter { $Endpoint -like "backupObjects?nameFilter=*" }
+
+    Mock Invoke-VBRCoreAPI {
+      @{ data = @() }
+    } -ParameterFilter { $Endpoint -like "backupObjects/*/restorePoints*" }
+
+    $result = Get-VBRObjectRestorePoints -VMName "dc01"
+    $result | Should -BeNullOrEmpty
+  }
+
+  It "falls back gracefully on API error" {
+    Mock Invoke-VBRCoreAPI { throw "API connection failed" }
+    Mock Write-Log {}
+
+    $result = Get-VBRObjectRestorePoints -VMName "dc01"
+    $result | Should -BeNullOrEmpty
+    Should -Invoke Write-Log -ParameterFilter { $Level -eq "WARNING" }
+  }
+
+  It "picks first result when no exact name match" {
+    Mock Invoke-VBRCoreAPI {
+      @{ data = @(@{ id = "obj-other"; name = "dc01-replica" }, @{ id = "obj-second"; name = "dc01-clone" }) }
+    } -ParameterFilter { $Endpoint -like "backupObjects?nameFilter=*" }
+
+    Mock Invoke-VBRCoreAPI {
+      @{ data = @(@{ id = "rp-fallback"; name = "dc01-replica"; creationTime = "2026-03-07T10:00:00Z"; backupId = "b2"; backupName = "Replica Job" }) }
+    } -ParameterFilter { $Endpoint -like "backupObjects/*/restorePoints*" }
+
+    $result = Get-VBRObjectRestorePoints -VMName "dc01"
+    $result.Id | Should -Be "rp-fallback"
+    $result.Name | Should -Be "dc01-replica"
+  }
+
+  It "parses ISO 8601 creationTime correctly" {
+    Mock Invoke-VBRCoreAPI {
+      @{ data = @(@{ id = "obj1"; name = "dc01" }) }
+    } -ParameterFilter { $Endpoint -like "backupObjects?nameFilter=*" }
+
+    Mock Invoke-VBRCoreAPI {
+      @{ data = @(@{ id = "rp1"; name = "dc01"; creationTime = "2026-03-07T14:30:00Z"; backupId = "b1"; backupName = "Job1" }) }
+    } -ParameterFilter { $Endpoint -like "backupObjects/*/restorePoints*" }
+
+    $result = Get-VBRObjectRestorePoints -VMName "dc01"
+    $result.CreationTime | Should -BeOfType [datetime]
+    $result.CreationTime.Year | Should -Be 2026
+    $result.CreationTime.Month | Should -Be 3
+    $result.CreationTime.Day | Should -Be 7
+  }
+}
+
+# ============================================================
 Describe "VBAHV Plugin REST API" {
 
   BeforeEach {

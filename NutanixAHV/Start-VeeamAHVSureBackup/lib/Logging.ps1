@@ -5,7 +5,7 @@
 
 function Write-Log {
   param(
-    [Parameter(Mandatory = $true)][string]$Message,
+    [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Message,
     [ValidateSet("INFO", "WARNING", "ERROR", "SUCCESS", "TEST-PASS", "TEST-FAIL")]
     [string]$Level = "INFO"
   )
