@@ -234,17 +234,24 @@ function Get-VBRObjectRestorePoints {
     $result = Invoke-VBRCoreAPI -Method "GET" -Endpoint "objectRestorePoints?nameFilter=$encodedName&orderAsc=false&limit=5"
 
     $points = $result.data
-    if (-not $points) { $points = $result }
+    if ($null -eq $result.data) { $points = $result }
 
     if ($points -and @($points).Count -gt 0) {
       # Find the most recent restore point matching the exact VM name
       $match = @($points) | Where-Object { $_.name -eq $VMName } | Select-Object -First 1
       if (-not $match) { $match = @($points)[0] }
 
+      # Parse creation time with culture-invariant format (VBR returns ISO 8601)
+      $parsedTime = Get-Date
+      if ($match.creationTime) {
+        try { $parsedTime = [datetime]::Parse("$($match.creationTime)", [System.Globalization.CultureInfo]::InvariantCulture) }
+        catch { }
+      }
+
       return [PSCustomObject]@{
         Id           = $match.id
         Name         = $match.name
-        CreationTime = [datetime]$match.creationTime
+        CreationTime = $parsedTime
         BackupId     = $match.backupId
         BackupName   = if ($match.backupName) { $match.backupName } else { $null }
         PlatformName = if ($match.platformName) { $match.platformName } else { $null }
@@ -789,7 +796,7 @@ function Start-AHVFullRestore {
           }
         }
         catch {
-          if ($_.Exception.Message -imatch "Full restore session failed") { throw }
+          if ($_.Exception.Message -imatch "Full restore session (failed|was cancelled)") { throw }
           Write-Log "  Session poll error (attempt will retry): $($_.Exception.Message)" -Level "WARNING"
         }
       }
@@ -842,7 +849,7 @@ function Start-AHVFullRestore {
   catch {
     Write-Log "Full restore failed for '$vmName': $($_.Exception.Message)" -Level "ERROR"
 
-    $recoveryInfo = _NewRecoveryInfo -OriginalVMName $vmName -RecoveryVMName $recoveryName -Status "Failed" -ErrorMessage $_.Exception.Message -RestoreMethod "FullRestore"
+    $recoveryInfo = _NewRecoveryInfo -OriginalVMName $vmName -RecoveryVMName $recoveryName -RecoveryVMUUID $vmUUID -Status "Failed" -ErrorMessage $_.Exception.Message -RestoreMethod "FullRestore"
     $script:RecoverySessions.Add($recoveryInfo)
     return $recoveryInfo
   }
@@ -930,10 +937,13 @@ function Stop-AHVFullRestore {
     $RecoveryInfo.Status = "CleanupFailed"
 
     # Write orphan UUID to file for automated recovery
-    $orphanFile = Join-Path $OutputPath "SureBackup_OrphanVMs.txt"
+    $orphanDir = if ($OutputPath -and (Test-Path $OutputPath)) { (Resolve-Path $OutputPath).Path } else { $PSScriptRoot }
+    $orphanFile = Join-Path $orphanDir "SureBackup_OrphanVMs.txt"
     try {
       "$vmUUID|$($RecoveryInfo.RecoveryVMName)|$(Get-Date -Format 'o')" | Out-File -FilePath $orphanFile -Append -Encoding UTF8
     }
-    catch { }
+    catch {
+      Write-Log "  Could not write orphan file '$orphanFile': $($_.Exception.Message) — record UUID manually: $vmUUID" -Level "WARNING"
+    }
   }
 }
