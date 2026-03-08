@@ -42,10 +42,9 @@ function Test-AzSession {
   try {
     $ctx = Get-AzContext -ErrorAction SilentlyContinue
     if (-not $ctx) { return $false }
+    if (-not $ctx.Account) { return $false }
 
-    # Verify context is usable
-    $null = Get-AzSubscription -ErrorAction Stop | Select-Object -First 1
-    Write-Log "Reusing existing Azure session (Account: $($ctx.Account.Id))" -Level "SUCCESS"
+    Write-Log "Reusing existing Azure session" -Level "SUCCESS"
     return $true
   } catch {
     Write-Log "No valid Azure session found" -Level "INFO"
@@ -98,7 +97,10 @@ function Connect-AzureModern {
   try {
     Connect-AzAccount @connectParams | Out-Null
     $ctx = Get-AzContext
-    Write-Log "Successfully authenticated (Account: $($ctx.Account.Id), Tenant: $($ctx.Tenant.Id))" -Level "SUCCESS"
+    # Mask sensitive identifiers in log output
+    $maskedAccount = if ($ctx.Account.Id -and $ctx.Account.Id.Length -gt 8) { $ctx.Account.Id.Substring(0, 4) + "****" + $ctx.Account.Id.Substring($ctx.Account.Id.Length - 4) } else { "****" }
+    $maskedTenant = if ($ctx.Tenant.Id -and $ctx.Tenant.Id.Length -gt 12) { $ctx.Tenant.Id.Substring(0, 8) + "..." } else { "****" }
+    Write-Log "Successfully authenticated (Account: $maskedAccount, Tenant: $maskedTenant)" -Level "SUCCESS"
   } catch {
     Write-Log "Authentication failed: $($_.Exception.Message)" -Level "ERROR"
     throw

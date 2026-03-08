@@ -54,6 +54,7 @@ Install-Module Az.Accounts, Az.Resources, Az.Compute, Az.Network, Az.Sql, Az.Sto
 | Role | Scope | Purpose |
 |------|-------|---------|
 | `Reader` | Subscription(s) | VM, SQL, Storage inventory |
+| `Storage Account Key Operator` | Storage account(s) | File share and blob enumeration (optional — accounts using RBAC-only auth are skipped with a warning) |
 | `Backup Reader` | Subscription(s) | Recovery Services Vault analysis (optional) |
 | `Storage Blob Data Reader` | Storage account(s) | Blob size enumeration (optional, with `-CalculateBlobSizes`) |
 
@@ -116,6 +117,7 @@ The script checks for an existing valid session before authenticating — no rep
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `-SnapshotRetentionDays` | int | 14 | Snapshot retention period (1-365) |
+| `-DailyChangeRate` | double | 0.05 | Daily change rate for snapshot sizing (0.01-1.0). 0.05 = 5% |
 | `-RepositoryOverhead` | double | 1.2 | Repository overhead multiplier (1.0-3.0) |
 
 ### Discovery Options
@@ -189,7 +191,7 @@ The script checks for an existing valid session before authenticating — no rep
 
 **Snapshot Storage:**
 ```
-Provisioned Capacity (GB) x (Retention Days / 30) x 10% daily change rate
+Provisioned Capacity (GB) x (Retention Days / 30) x Daily Change Rate
 ```
 
 **Repository Capacity:**
@@ -206,9 +208,9 @@ Max DB Size (GB) x 1.3 (30% overhead for compression/retention)
 
 | Workload | Source | Retention | Result |
 |----------|--------|-----------|--------|
-| 500 GB VM | 500 GB | 14 days | 24 GB snapshot + 600 GB repository |
-| 100 GB SQL DB | 100 GB | N/A | 130 GB repository |
-| 10 VMs x 200 GB | 2,000 GB | 30 days | 200 GB snapshot + 2,400 GB repository |
+| 500 GB VM | 500 GB | 14 days | 12 GB snapshot + 600 GB repository |
+| 100 GB SQL DB | 100 GB | N/A | 120 GB repository |
+| 10 VMs x 200 GB | 2,000 GB | 30 days | 100 GB snapshot + 2,400 GB repository |
 
 These are sizing estimates for capacity planning. Actual consumption varies based on backup configuration, data change rates, and compression ratios.
 
@@ -241,11 +243,12 @@ The script checks for all 7 required modules at startup and provides the exact i
 
 ## Known Limitations
 
-1. **Blob size calculation is slow** — `-CalculateBlobSizes` enumerates every blob in every container. For large storage accounts with millions of blobs, this can take hours.
-2. **Snapshot sizing assumes 10% daily change** — This is a conservative default. Actual change rates vary by workload.
-3. **SQL sizing uses max provisioned size** — Not actual used space. Actual backup sizes will typically be smaller.
-4. **Azure Backup item counts require vault context** — Each vault is queried individually, which adds time in environments with many vaults.
+1. **Blob size calculation is slow** — `-CalculateBlobSizes` enumerates every blob in every container. For large storage accounts with millions of blobs, this can take hours. Enumeration is capped at 10,000 pages per container.
+2. **Snapshot sizing uses configurable daily change rate** — Default is 5% (`-DailyChangeRate 0.05`). Actual change rates vary by workload. Deallocated VMs are automatically excluded from snapshot sizing.
+3. **SQL sizing prefers actual size over max provisioned** — When `CurrentSizeBytes` is available, it is used instead of `MaxSizeBytes`. Hyperscale databases without a known size are flagged for manual sizing.
+4. **Azure Backup item counts require vault context** — Each vault is queried individually, which adds time in environments with many vaults. Inaccessible vaults are skipped with a warning.
 5. **Tag filtering applies to VMs only** — SQL, Storage, and Backup resources are not filtered by tags.
+6. **RBAC-only storage accounts are skipped** — Accounts with key access disabled produce null storage context and cannot be enumerated.
 
 ## License
 

@@ -66,6 +66,15 @@ function Invoke-AzWithRetry {
       return (& $ScriptBlock)
     } catch {
       $attempt++
+      # Do not retry non-transient errors (403 Forbidden, 404 Not Found, 401 Unauthorized)
+      $statusCode = $null
+      if ($_.Exception.Response) {
+        $statusCode = [int]$_.Exception.Response.StatusCode
+      }
+      if ($statusCode -eq 403 -or $statusCode -eq 404 -or $statusCode -eq 401) {
+        Write-Log "Non-retryable error ($statusCode): $($_.Exception.Message)" -Level "WARNING"
+        throw
+      }
       if ($attempt -gt $MaxRetries) { throw }
       $sleep = [Math]::Min([int]([Math]::Pow(2, $attempt)), 30)
       Write-Log "Retry $attempt/$MaxRetries after ${sleep}s: $($_.Exception.Message)" -Level "WARNING"
@@ -88,8 +97,6 @@ function Get-VMInventory {
   Write-ProgressStep -Activity "Discovering Azure VMs" -Status "Scanning subscriptions..."
 
   $results = New-Object System.Collections.Generic.List[object]
-  $nicsCache = @{}
-  $pipsCache = @{}
   $vmCount = 0
 
   foreach ($sub in $script:Subs) {
@@ -101,7 +108,23 @@ function Get-VMInventory {
       continue
     }
 
-    $vms = @(Invoke-AzWithRetry { Get-AzVM -Status -ErrorAction Stop })
+    # Batch-fetch all NICs and PIPs for this subscription to avoid N+1 API calls
+    $nicsCache = @{}
+    $pipsCache = @{}
+    try {
+      $allNics = @(Get-AzNetworkInterface -ErrorAction Stop)
+      foreach ($nic in $allNics) {
+        $nicsCache[$nic.Id] = $nic
+      }
+      Write-Log "Cached $($allNics.Count) NICs for subscription $($sub.Name)" -Level "INFO"
+    } catch {
+      Write-Log "Failed to batch-fetch NICs for $($sub.Name), falling back to per-VM: $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Server-side region filter when specified
+    $getVmParams = @{ Status = $true; ErrorAction = "Stop" }
+    if ($Region) { $getVmParams.Location = $Region }
+    $vms = @(Invoke-AzWithRetry { Get-AzVM @getVmParams })
 
     foreach ($vm in $vms) {
       if (-not (Test-RegionMatch $vm.Location)) { continue }
@@ -119,6 +142,7 @@ function Get-VMInventory {
       foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
         $nicId = $nicRef.Id
 
+        # Use batch cache, fall back to individual fetch
         if (-not $nicsCache.ContainsKey($nicId)) {
           try {
             $nicsCache[$nicId] = Get-AzNetworkInterface -ResourceId $nicId -ErrorAction Stop
@@ -175,10 +199,18 @@ function Get-VMInventory {
 
       $totalProvGB = $osDiskGB + $dataSizeGB
 
-      # Snapshot sizing: incremental change x retention window
-      # Model: 10% daily change rate applied over retention period
-      $snapshotStorageGB = [math]::Ceiling($totalProvGB * 0.1 * $SnapshotRetentionDays)
+      # Snapshot sizing: provisioned capacity x (retention / 30) x daily change rate
+      # Deallocated VMs have zero I/O, so change rate = 0
+      $powerState = ($vm.PowerState -replace 'PowerState/', '')
+      $effectiveChangeRate = $DailyChangeRate
+      if ($powerState -like "*deallocated*" -or $powerState -like "*stopped*") {
+        $effectiveChangeRate = 0
+      }
+      $snapshotStorageGB = [math]::Ceiling($totalProvGB * ($SnapshotRetentionDays / 30) * $effectiveChangeRate)
       $repositoryGB = [math]::Ceiling($totalProvGB * $RepositoryOverhead)
+
+      # Default zone to N/A for non-zonal VMs
+      $zoneValue = if ($vm.Zones -and $vm.Zones.Count -gt 0) { ($vm.Zones -join ',') } else { "N/A" }
 
       $results.Add([PSCustomObject]@{
         SubscriptionName = $sub.Name
@@ -187,8 +219,8 @@ function Get-VMInventory {
         VmName = $vm.Name
         VmId = $vm.Id
         Location = $vm.Location
-        Zone = ($vm.Zones -join ',')
-        PowerState = ($vm.PowerState -replace 'PowerState/', '')
+        Zone = $zoneValue
+        PowerState = $powerState
         OsType = $vm.StorageProfile.OsDisk.OsType
         VmSize = $vm.HardwareProfile.VmSize
         PrivateIPs = ($privateIps -join ', ')
@@ -244,8 +276,30 @@ function Get-SqlInventory {
         Where-Object { $_.DatabaseName -ne "master" })
 
       foreach ($db in $databases) {
+        # Hyperscale tier has no fixed max size (MaxSizeBytes = 0)
+        $isHyperscale = ($db.Edition -eq 'Hyperscale')
         $maxSizeGB = [math]::Round($db.MaxSizeBytes / 1GB, 2)
-        $veeamRepoGB = [math]::Ceiling($maxSizeGB * $RepositoryOverhead)
+
+        # Capture actual current size where available
+        $currentSizeGB = $null
+        if ($null -ne $db.CurrentSizeBytes -and $db.CurrentSizeBytes -gt 0) {
+          $currentSizeGB = [math]::Round($db.CurrentSizeBytes / 1GB, 2)
+        }
+
+        # Use current size for sizing when available, otherwise max size
+        $sizingGB = $maxSizeGB
+        if ($null -ne $currentSizeGB -and $currentSizeGB -gt 0) {
+          $sizingGB = $currentSizeGB
+        }
+
+        # Hyperscale: flag for manual sizing if no current size available
+        $hyperscaleNote = $null
+        if ($isHyperscale -and $maxSizeGB -eq 0 -and ($null -eq $currentSizeGB -or $currentSizeGB -eq 0)) {
+          $hyperscaleNote = "Hyperscale: requires manual sizing"
+          Write-Log "SQL DB $($db.DatabaseName) on $($srv.ServerName) is Hyperscale with unknown size — requires manual sizing" -Level "WARNING"
+        }
+
+        $veeamRepoGB = [math]::Ceiling($sizingGB * $RepositoryOverhead)
 
         $dbs.Add([PSCustomObject]@{
           SubscriptionName = $sub.Name
@@ -257,6 +311,8 @@ function Get-SqlInventory {
           Edition = $db.Edition
           ServiceObjective = $db.CurrentServiceObjectiveName
           MaxSizeGB = $maxSizeGB
+          CurrentSizeGB = $currentSizeGB
+          SizingNote = $hyperscaleNote
           ZoneRedundant = $db.ZoneRedundant
           BackupStorageRedundancy = $db.BackupStorageRedundancy
           VeeamRepositoryGB = $veeamRepoGB
@@ -324,7 +380,18 @@ function Get-StorageInventory {
     foreach ($acct in $accts) {
       if (-not (Test-RegionMatch $acct.Location)) { continue }
 
-      $ctx = $acct.Context
+      # Storage context requires listkeys (Storage Account Contributor or higher)
+      # RBAC-only accounts (no key access) produce null context
+      $ctx = $null
+      try {
+        $ctx = $acct.Context
+      } catch {
+        Write-Log "Cannot access storage account key for $($acct.StorageAccountName) — requires Storage Account Key Operator or Contributor role" -Level "WARNING"
+      }
+      if ($null -eq $ctx) {
+        Write-Log "Skipping $($acct.StorageAccountName) — null context (likely RBAC-only or insufficient permissions)" -Level "WARNING"
+        continue
+      }
 
       # Azure Files
       try {
@@ -364,12 +431,24 @@ function Get-StorageInventory {
           if ($CalculateBlobSizes) {
             $sizeBytes = 0
             $token = $null
+            $pageCount = 0
+            $maxPages = 10000
             do {
-              $page = Get-AzStorageBlob -Container $c.Name -Context $ctx -MaxCount 5000 -ContinuationToken $token -ErrorAction SilentlyContinue
+              try {
+                $page = Get-AzStorageBlob -Container $c.Name -Context $ctx -MaxCount 5000 -ContinuationToken $token -ErrorAction Stop
+              } catch {
+                Write-Log "Blob enumeration error in $($c.Name) on $($acct.StorageAccountName): $($_.Exception.Message)" -Level "WARNING"
+                break
+              }
               foreach ($b in $page) {
                 $sizeBytes += [int64]($b.Length)
               }
               $token = if ($page) { ($page | Select-Object -Last 1).ContinuationToken } else { $null }
+              $pageCount++
+              if ($pageCount -ge $maxPages) {
+                Write-Log "Blob enumeration capped at $maxPages pages for container $($c.Name) in $($acct.StorageAccountName) — size is approximate" -Level "WARNING"
+                break
+              }
             } while ($token)
           }
 
@@ -430,7 +509,13 @@ function Get-AzureBackupInventory {
     foreach ($v in $vaults) {
       if (-not (Test-RegionMatch $v.Location)) { continue }
 
-      Set-AzRecoveryServicesVaultContext -Vault $v | Out-Null
+      # Wrap vault context in try/catch — one inaccessible vault should not kill the script
+      try {
+        Set-AzRecoveryServicesVaultContext -Vault $v | Out-Null
+      } catch {
+        Write-Log "Cannot access vault $($v.Name): $($_.Exception.Message) — skipping" -Level "WARNING"
+        continue
+      }
 
       # Count protected items by workload type
       $vmCount = 0
@@ -445,7 +530,8 @@ function Get-AzureBackupInventory {
 
       foreach ($wq in $workloadQueries) {
         try {
-          $items = @(Get-AzRecoveryServicesBackupItem -VaultId $v.ID -BackupManagementType $wq.BackupManagementType -WorkloadType $wq.WorkloadType -ErrorAction SilentlyContinue)
+          # Use ErrorAction Stop to detect throttling/failures (SilentlyContinue would silently drop to 0)
+          $items = @(Get-AzRecoveryServicesBackupItem -VaultId $v.ID -BackupManagementType $wq.BackupManagementType -WorkloadType $wq.WorkloadType -ErrorAction Stop)
           switch ($wq.Counter) {
             "vm"  { $vmCount = $items.Count }
             "sql" { $sqlCount = $items.Count }

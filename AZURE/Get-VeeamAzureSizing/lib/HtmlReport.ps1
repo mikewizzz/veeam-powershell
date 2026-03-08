@@ -889,7 +889,14 @@ td.mono {
   # ---- KPI Grid (6 cards with mini-rings) ----
   $vmRing = New-SvgMiniRing -Percent 100 -Color "#0078D4"
   $sqlRing = New-SvgMiniRing -Percent $sqlPct -Color "#8661C5"
-  $storageRing = New-SvgMiniRing -Percent 75 -Color "#F7630C"
+  # Storage discovery completeness: ratio of enumerated vs total containers
+  $storageDiscoveryPct = 0
+  $totalStorageItems = $filesCount + $blobsCount
+  if ($totalStorageItems -gt 0) {
+    $enumeratedItems = @($fileShares | Where-Object { $null -ne $_.UsageGiB }).Count + @($blobContainers | Where-Object { $null -ne $_.EstimatedGiB }).Count
+    $storageDiscoveryPct = [math]::Min([math]::Round(($enumeratedItems / $totalStorageItems) * 100, 0), 100)
+  }
+  $storageRing = New-SvgMiniRing -Percent $storageDiscoveryPct -Color "#F7630C"
   $vaultRing = New-SvgMiniRing -Percent $coveragePct -Color "#107C10"
   $sourceRing = New-SvgMiniRing -Percent $sourceRepoRatio -Color "#0078D4"
   $repoRing = New-SvgMiniRing -Percent 100 -Color "#00B336"
@@ -1083,7 +1090,18 @@ $workloadRows
 "@
 
   # ---- Section 03: VM Inventory ----
-  $vmTableRows = ""
+  # Hoist disk type map above the loop to avoid rebuilding per VM
+  $diskTypeMap = @{
+    'Premium_LRS'      = 'Premium SSD'
+    'Premium_ZRS'      = 'Premium SSD'
+    'StandardSSD_LRS'  = 'Standard SSD'
+    'StandardSSD_ZRS'  = 'Standard SSD'
+    'Standard_LRS'     = 'Standard HDD'
+    'UltraSSD_LRS'     = 'Ultra SSD'
+    'PremiumV2_LRS'    = 'Premium SSD v2'
+  }
+
+  $vmRowsList = New-Object System.Collections.Generic.List[string]
   foreach ($vm in $VmInventory) {
     $safeName = _EscapeHtml $vm.VmName
     $safeSub = _EscapeHtml $vm.SubscriptionName
@@ -1096,8 +1114,9 @@ $workloadRows
     if ($safeOs -eq "Windows") { $osIcon = "&#9638;" }
     elseif ($safeOs -eq "Linux") { $osIcon = "&#9650;" }
 
-    # Power state dot
+    # Power state dot — default to "Unknown" for null
     $powerState = "$($vm.PowerState)"
+    if ([string]::IsNullOrWhiteSpace($powerState)) { $powerState = "Unknown" }
     $powerState = $powerState.ToLower()
     $dotClass = "orange"
     $powerLabel = _EscapeHtml $vm.PowerState
@@ -1115,16 +1134,7 @@ $workloadRows
     $snapGB = if ($null -ne $vm.VeeamSnapshotStorageGB) { [math]::Round($vm.VeeamSnapshotStorageGB, 0) } else { 0 }
     $vmRepoGB = if ($null -ne $vm.VeeamRepositoryGB) { [math]::Round($vm.VeeamRepositoryGB, 0) } else { 0 }
 
-    # Disk type label
-    $diskTypeMap = @{
-      'Premium_LRS'      = 'Premium SSD'
-      'Premium_ZRS'      = 'Premium SSD'
-      'StandardSSD_LRS'  = 'Standard SSD'
-      'StandardSSD_ZRS'  = 'Standard SSD'
-      'Standard_LRS'     = 'Standard HDD'
-      'UltraSSD_LRS'     = 'Ultra SSD'
-      'PremiumV2_LRS'    = 'Premium SSD v2'
-    }
+    # Disk type label (using hoisted $diskTypeMap)
     $rawOsType = "$($vm.OsDiskType)"
     $osTypeLabel = if ($diskTypeMap.ContainsKey($rawOsType)) { $diskTypeMap[$rawOsType] } else { $rawOsType }
 
@@ -1153,7 +1163,7 @@ $workloadRows
       "<td>$diskTypeDisplay</td>"
     }
 
-    $vmTableRows += @"
+    $vmRowsList.Add(@"
               <tr>
                 <td><strong>$safeName</strong></td>
                 <td>$safeSub</td>
@@ -1167,8 +1177,9 @@ $workloadRows
                 <td class="mono">$snapGB GB</td>
                 <td class="mono">$vmRepoGB GB</td>
               </tr>
-"@
+"@)
   }
+  $vmTableRows = $vmRowsList -join "`n"
 
   $vmInventoryHtml = ""
   if ($VmInventory.Count -gt 0) {
@@ -1535,7 +1546,7 @@ $backupCoverageContent
           <tr>
             <td><strong>Snapshot Storage</strong></td>
             <td class="mono" style="color: var(--ms-blue); font-weight: 700;">$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalSnapshotStorageGB))</td>
-            <td>Based on $safeRetentionDays days retention with 10% daily change rate</td>
+            <td>Based on $safeRetentionDays days retention with $([math]::Round($DailyChangeRate * 100, 0))% daily change rate</td>
           </tr>
           <tr>
             <td><strong>SQL Source Storage</strong></td>
@@ -1663,8 +1674,8 @@ $subTableRows
       </div>
     </div>
     <div class="code-block">
-      <span class="code-line">SnapshotStorageGB = ProvisionedDiskGB x DailyChangeRate x RetentionDays</span>
-      <span class="code-line">                  = TotalVMStorageGB x 0.10 x $SnapshotRetentionDays</span>
+      <span class="code-line">SnapshotStorageGB = ProvisionedDiskGB x (RetentionDays / 30) x DailyChangeRate</span>
+      <span class="code-line">                  = TotalVMStorageGB x ($SnapshotRetentionDays / 30) x $DailyChangeRate</span>
       <span class="code-line"></span>
       <span class="code-line">RepositoryGB      = SourceDataGB x OverheadMultiplier</span>
       <span class="code-line">                  = TotalSourceGB x $RepositoryOverhead</span>
@@ -1690,7 +1701,7 @@ $subTableRows
   <footer class="footer">
     <div class="footer-conf">This report is confidential and intended for authorized recipients only.</div>
     <div class="footer-conf">Community-maintained tool &mdash; not an official Veeam product.</div>
-    <div class="footer-stamp">$(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC | Veeam Backup for Azure Sizing Tool</div>
+    <div class="footer-stamp">$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm')) UTC | Veeam Backup for Azure Sizing Tool</div>
   </footer>
 "@
 
@@ -1703,6 +1714,7 @@ $subTableRows
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
 <title>Veeam Backup for Azure - Sizing Assessment</title>
 <style>
 $cssBlock
