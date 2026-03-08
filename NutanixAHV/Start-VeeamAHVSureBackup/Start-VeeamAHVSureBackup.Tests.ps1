@@ -859,22 +859,47 @@ Describe "Test-VMPing" {
     $script:LogEntries = New-Object System.Collections.Generic.List[object]
   }
 
-  It "returns PASS when ping succeeds" {
-    Mock Test-Connection { return $true } -ParameterFilter { $Quiet }
+  It "returns PASS when ping succeeds (PS 5.1 style)" {
     Mock Test-Connection {
       return @(
         [PSCustomObject]@{ ResponseTime = 1.5 },
         [PSCustomObject]@{ ResponseTime = 2.0 }
       )
-    } -ParameterFilter { -not $Quiet }
+    }
 
     $result = Test-VMPing -IPAddress "10.0.1.1" -VMName "vm1"
     $result.Passed | Should -Be $true
     $result.Details | Should -Match "Reply from"
   }
 
-  It "returns FAIL when ping fails" {
-    Mock Test-Connection { return $false } -ParameterFilter { $Quiet }
+  It "returns PASS when ping succeeds (PS 7 style with Status)" {
+    Mock Test-Connection {
+      return @(
+        [PSCustomObject]@{ Status = 'Success'; Latency = 1.5 },
+        [PSCustomObject]@{ Status = 'Success'; Latency = 2.0 }
+      )
+    }
+
+    $result = Test-VMPing -IPAddress "10.0.1.1" -VMName "vm1"
+    $result.Passed | Should -Be $true
+    $result.Details | Should -Match "Reply from"
+  }
+
+  It "returns FAIL when all pings time out (PS 7 style)" {
+    Mock Test-Connection {
+      return @(
+        [PSCustomObject]@{ Status = 'TimedOut'; Latency = 0 },
+        [PSCustomObject]@{ Status = 'TimedOut'; Latency = 0 }
+      )
+    }
+
+    $result = Test-VMPing -IPAddress "10.0.1.1" -VMName "vm1"
+    $result.Passed | Should -Be $false
+    $result.Details | Should -Match "No reply"
+  }
+
+  It "returns FAIL when ping returns null" {
+    Mock Test-Connection { return $null }
 
     $result = Test-VMPing -IPAddress "10.0.1.1" -VMName "vm1"
     $result.Passed | Should -Be $false

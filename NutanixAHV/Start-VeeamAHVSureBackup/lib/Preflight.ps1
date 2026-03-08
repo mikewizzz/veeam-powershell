@@ -132,7 +132,7 @@ function Test-RestorePointConsistency {
   $issues = @()
   $warnings = @()
 
-  $inconsistent = $RestorePoints | Where-Object { -not $_.IsConsistent }
+  $inconsistent = @($RestorePoints | Where-Object { -not $_.IsConsistent })
   if ($inconsistent.Count -gt 0) {
     foreach ($rp in $inconsistent) {
       $warnings += "Restore point for '$($rp.VMName)' (job: $($rp.JobName), $($rp.CreationTime.ToString('yyyy-MM-dd HH:mm'))) is crash-consistent, not application-consistent"
@@ -160,7 +160,7 @@ function Test-RestorePointRecency {
   $warnings = @()
 
   $cutoff = (Get-Date).AddDays(-$MaxAgeDays)
-  $stale = $RestorePoints | Where-Object { $_.CreationTime -lt $cutoff }
+  $stale = @($RestorePoints | Where-Object { $_.CreationTime -lt $cutoff })
 
   if ($stale.Count -gt 0) {
     foreach ($rp in $stale) {

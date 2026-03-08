@@ -60,12 +60,29 @@ function Test-VMPing {
   try {
     # Single call to avoid doubling ICMP traffic (PS 5.1 sends synchronously)
     $pingResults = Test-Connection -ComputerName $IPAddress -Count 4 -ErrorAction SilentlyContinue
-    $passed = ($null -ne $pingResults -and @($pingResults).Count -gt 0)
+
+    if ($null -ne $pingResults -and @($pingResults).Count -gt 0) {
+      # PS 7 returns objects even for timed-out pings — check Status property
+      if ($pingResults[0].PSObject.Properties['Status']) {
+        # PS 7: filter to successful replies only
+        $successfulPings = @($pingResults | Where-Object { $_.Status -eq 'Success' })
+        $passed = ($successfulPings.Count -gt 0)
+      }
+      else {
+        # PS 5.1: presence of results means success
+        $successfulPings = @($pingResults)
+        $passed = $true
+      }
+    }
+    else {
+      $successfulPings = @()
+      $passed = $false
+    }
 
     if ($passed) {
       # PS 7 uses 'Latency', PS 5.1 uses 'ResponseTime'
-      $latencyProp = if ($pingResults[0].PSObject.Properties['Latency']) { 'Latency' } else { 'ResponseTime' }
-      $avgLatency = ($pingResults | Measure-Object -Property $latencyProp -Average).Average
+      $latencyProp = if ($successfulPings[0].PSObject.Properties['Latency']) { 'Latency' } else { 'ResponseTime' }
+      $avgLatency = ($successfulPings | Measure-Object -Property $latencyProp -Average).Average
       $details = "Reply from $IPAddress - Avg latency: $([math]::Round($avgLatency, 1))ms"
     }
     else {
@@ -188,7 +205,10 @@ function Test-VMHttpEndpoint {
     }
     $response = Invoke-WebRequest @webParams
     $passed = ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400)
-    $details = "HTTP $($response.StatusCode) - Content-Length: $($response.Headers.'Content-Length')"
+    # PS 7 returns header values as string[] — extract scalar
+    $contentLen = $response.Headers.'Content-Length'
+    if ($contentLen -is [System.Collections.IEnumerable] -and $contentLen -isnot [string]) { $contentLen = $contentLen[0] }
+    $details = "HTTP $($response.StatusCode) - Content-Length: $contentLen"
 
     _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
   }
@@ -256,8 +276,9 @@ function Invoke-VMVerificationTests {
 
   if (-not $vmUUID) {
     $now = Get-Date
-    $vmResults += (_NewTestResult -VMName $vmName -TestName "VM Recovery" -Passed $false -Details "VM not recovered - $($RecoveryInfo.Error)" -StartTime $now)
-    return $vmResults
+    $result = _NewTestResult -VMName $vmName -TestName "VM Recovery" -Passed $false -Details "VM not recovered - $($RecoveryInfo.Error)" -StartTime $now
+    $script:TestResults.Add($result)
+    return
   }
 
   # Test 1: Heartbeat / Power State

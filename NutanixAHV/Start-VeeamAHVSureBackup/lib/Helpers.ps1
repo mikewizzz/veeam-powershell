@@ -46,8 +46,8 @@ function _GetTestSummary {
     Calculate test pass/fail/rate summary from results collection (DRY helper)
   #>
   param($TestResults)
-  $total = $TestResults.Count
-  $passed = ($TestResults | Where-Object { $_.Passed }).Count
+  $total = @($TestResults).Count
+  $passed = @($TestResults | Where-Object { $_.Passed }).Count
   $failed = $total - $passed
   [PSCustomObject]@{
     TotalTests  = $total
@@ -67,7 +67,7 @@ function _NewRecoveryInfo {
     [string]$RecoveryVMName,
     [string]$RecoveryVMUUID,
     [string]$Status,
-    [string]$Error,
+    [string]$ErrorMessage,
     [string]$RestoreMethod = "FullRestore"
   )
   [PSCustomObject]@{
@@ -76,7 +76,7 @@ function _NewRecoveryInfo {
     RecoveryVMUUID = $RecoveryVMUUID
     StartTime      = Get-Date
     Status         = $Status
-    Error          = $Error
+    Error          = $ErrorMessage
     RestoreMethod  = $RestoreMethod
   }
 }

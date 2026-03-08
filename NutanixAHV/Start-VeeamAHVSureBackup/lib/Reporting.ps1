@@ -44,12 +44,12 @@ function New-HTMLReport {
   $failedTests = $summary.FailedTests
   $passRate = $summary.PassRate
 
-  $uniqueVMs = ($TestResults | Select-Object -ExpandProperty VMName -Unique)
+  $uniqueVMs = @($TestResults | Select-Object -ExpandProperty VMName -Unique)
   $totalVMs = $uniqueVMs.Count
   $fullyPassedVMs = 0
   foreach ($vm in $uniqueVMs) {
-    $vmTests = $TestResults | Where-Object { $_.VMName -eq $vm }
-    if (($vmTests | Where-Object { -not $_.Passed }).Count -eq 0) {
+    $vmTests = @($TestResults | Where-Object { $_.VMName -eq $vm })
+    if (@($vmTests | Where-Object { -not $_.Passed }).Count -eq 0) {
       $fullyPassedVMs++
     }
   }
@@ -61,14 +61,14 @@ function New-HTMLReport {
   # Build VM detail rows
   $vmDetailRows = ""
   foreach ($vm in $uniqueVMs) {
-    $vmTests = $TestResults | Where-Object { $_.VMName -eq $vm }
-    $vmPassed = ($vmTests | Where-Object { $_.Passed }).Count
+    $vmTests = @($TestResults | Where-Object { $_.VMName -eq $vm })
+    $vmPassed = @($vmTests | Where-Object { $_.Passed }).Count
     $vmTotal = $vmTests.Count
     $vmStatus = if ($vmPassed -eq $vmTotal) { "PASS" } else { "FAIL" }
     $vmStatusClass = if ($vmPassed -eq $vmTotal) { "status-pass" } else { "status-fail" }
 
     # Get restore point info
-    $rpInfo = $RestorePoints | Where-Object { $_.VMName -eq $vm }
+    $rpInfo = $RestorePoints | Where-Object { $_.VMName -eq $vm } | Select-Object -First 1
     $rpDate = if ($rpInfo) { $rpInfo.CreationTime.ToString("yyyy-MM-dd HH:mm") } else { "N/A" }
     $rpJob = if ($rpInfo) { $rpInfo.JobName } else { "N/A" }
 
