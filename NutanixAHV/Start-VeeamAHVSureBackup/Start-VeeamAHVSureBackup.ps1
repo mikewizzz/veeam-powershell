@@ -169,14 +169,21 @@
   # Interactive mode - search/filter VMs by name, then select which to test
 
 .NOTES
-  Version: 1.2.0
+  Version: 1.3.0
   Author: Community Contributors
-  Date: 2026-02-28
+  Date: 2026-03-08
   Requires: PowerShell 5.1+ (7.x recommended)
   Modules: None
   Nutanix: Prism Central v4 API (pc.2024.3+ GA, default) or v3 (legacy)
   VBR: Veeam Backup & Replication v12.2+ with Nutanix AHV Plugin v9
   AHV Plugin REST API: https://helpcenter.veeam.com/references/vbahv/9/rest/
+
+  Static IP handling:
+    VMs with static IPs boot on the isolated VLAN but retain their production IP.
+    The script detects when a VM's IP is outside the isolated subnet CIDR and
+    automatically skips network tests (ping, port, DNS, HTTP) to avoid false failures.
+    Backup integrity is still verified via heartbeat/NGT. For full network testing of
+    static IP VMs, pre-configure DHCP on the isolated VLAN or use -TestCustomScript.
 #>
 
 [CmdletBinding(DefaultParameterSetName = "NetworkByName")]

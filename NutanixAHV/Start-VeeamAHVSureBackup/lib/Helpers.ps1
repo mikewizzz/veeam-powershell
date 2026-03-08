@@ -127,3 +127,35 @@ function _FormatTimeAgo {
   if ($span.TotalDays -lt 365)      { $n = [math]::Floor($span.TotalDays / 30); return "$n month$(if($n -ne 1){'s'}) ago" }
   $n = [math]::Floor($span.TotalDays / 365); return "$n year$(if($n -ne 1){'s'}) ago"
 }
+
+function _TestIPInSubnet {
+  <#
+  .SYNOPSIS
+    Check if an IP address falls within a given subnet (PS 5.1 compatible)
+  .PARAMETER IPAddress
+    The IP address to test (e.g. "192.168.1.50")
+  .PARAMETER NetworkAddress
+    The network address of the subnet (e.g. "192.168.1.0")
+  .PARAMETER PrefixLength
+    The CIDR prefix length (e.g. 24)
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$IPAddress,
+    [Parameter(Mandatory = $true)][string]$NetworkAddress,
+    [Parameter(Mandatory = $true)][int]$PrefixLength
+  )
+
+  # Convert dotted-quad IP string to UInt32 (network byte order)
+  $ipBytes = ([System.Net.IPAddress]::Parse($IPAddress)).GetAddressBytes()
+  $netBytes = ([System.Net.IPAddress]::Parse($NetworkAddress)).GetAddressBytes()
+
+  # .NET returns bytes in network order (big-endian) — shift into a UInt32
+  [uint32]$ipInt = ([uint32]$ipBytes[0] -shl 24) -bor ([uint32]$ipBytes[1] -shl 16) -bor ([uint32]$ipBytes[2] -shl 8) -bor [uint32]$ipBytes[3]
+  [uint32]$netInt = ([uint32]$netBytes[0] -shl 24) -bor ([uint32]$netBytes[1] -shl 16) -bor ([uint32]$netBytes[2] -shl 8) -bor [uint32]$netBytes[3]
+
+  # Build subnet mask from prefix length
+  if ($PrefixLength -eq 0) { [uint32]$mask = 0 }
+  else { [uint32]$mask = [uint32]::MaxValue -shl (32 - $PrefixLength) }
+
+  return (($ipInt -band $mask) -eq ($netInt -band $mask))
+}

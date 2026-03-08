@@ -598,21 +598,35 @@ function Resolve-IsolatedNetwork {
 
   # Normalize to a common structure regardless of API version
   if ($PrismApiVersion -eq "v4") {
+    # Extract IPAM subnet config for static IP detection (may be $null if no IPAM)
+    $v4IpConfig = $target.ipConfig
+    $netAddr = if ($v4IpConfig -and $v4IpConfig.ipv4Config) { $v4IpConfig.ipv4Config.networkAddress } else { $null }
+    $prefixLen = if ($v4IpConfig -and $v4IpConfig.ipv4Config) { $v4IpConfig.ipv4Config.prefixLength } else { $null }
+
     $networkInfo = [PSCustomObject]@{
-      Name       = $target.name
-      UUID       = $target.extId
-      VlanId     = $target.vlanId
-      SubnetType = $target.subnetType
-      ClusterRef = if ($target.clusterReference) { $target.clusterReference.extId } else { $null }
+      Name           = $target.name
+      UUID           = $target.extId
+      VlanId         = $target.vlanId
+      SubnetType     = $target.subnetType
+      ClusterRef     = if ($target.clusterReference) { $target.clusterReference.extId } else { $null }
+      NetworkAddress = $netAddr
+      PrefixLength   = $prefixLen
     }
   }
   else {
+    # Extract IPAM subnet config for static IP detection (may be $null if no IPAM)
+    $v3IpConfig = $target.spec.resources.ip_config
+    $netAddr = if ($v3IpConfig) { $v3IpConfig.network_address } else { $null }
+    $prefixLen = if ($v3IpConfig) { $v3IpConfig.prefix_length } else { $null }
+
     $networkInfo = [PSCustomObject]@{
-      Name       = $target.spec.name
-      UUID       = $target.metadata.uuid
-      VlanId     = $target.spec.resources.vlan_id
-      SubnetType = $target.spec.resources.subnet_type
-      ClusterRef = if ($target.spec.cluster_reference) { $target.spec.cluster_reference.uuid } else { $null }
+      Name           = $target.spec.name
+      UUID           = $target.metadata.uuid
+      VlanId         = $target.spec.resources.vlan_id
+      SubnetType     = $target.spec.resources.subnet_type
+      ClusterRef     = if ($target.spec.cluster_reference) { $target.spec.cluster_reference.uuid } else { $null }
+      NetworkAddress = $netAddr
+      PrefixLength   = $prefixLen
     }
   }
 

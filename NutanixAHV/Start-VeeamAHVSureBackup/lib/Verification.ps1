@@ -313,25 +313,41 @@ function Invoke-VMVerificationTests {
   $vmResults += (_NewTestResult -VMName $vmName -TestName "IP Address Assignment" -Passed $true -Details "VM obtained IP: $ipAddress" -StartTime $ipWaitStart)
   Write-Log "  [$vmName] IP address obtained: $ipAddress" -Level "TEST-PASS"
 
+  # Static IP detection — if VM IP is outside the isolated subnet, skip network tests
+  $skipNetworkTests = $false
+  if ($IsolatedNetwork.NetworkAddress -and $IsolatedNetwork.PrefixLength) {
+    $subnetStart = Get-Date
+    $inSubnet = _TestIPInSubnet -IPAddress $ipAddress -NetworkAddress $IsolatedNetwork.NetworkAddress -PrefixLength $IsolatedNetwork.PrefixLength
+    if (-not $inSubnet) {
+      $cidr = "$($IsolatedNetwork.NetworkAddress)/$($IsolatedNetwork.PrefixLength)"
+      $skipNetworkTests = $true
+      Write-Log "  [$vmName] Static IP detected: $ipAddress is outside isolated subnet $cidr — skipping network tests" -Level "WARNING"
+      $vmResults += (_NewTestResult -VMName $vmName -TestName "Subnet Validation" -Passed $true -Details "Static IP $ipAddress detected — outside isolated network $cidr, network tests skipped. Backup integrity verified via heartbeat/NGT." -StartTime $subnetStart)
+    }
+    else {
+      Write-Log "  [$vmName] IP $ipAddress is within isolated subnet — proceeding with all tests" -Level "INFO"
+    }
+  }
+
   # Test 3: ICMP Ping
-  if ($TestPing) {
+  if ($TestPing -and -not $skipNetworkTests) {
     $vmResults += Test-VMPing -IPAddress $ipAddress -VMName $vmName
   }
 
   # Test 4: TCP Port checks
-  if ($TestPorts -and $TestPorts.Count -gt 0) {
+  if ($TestPorts -and $TestPorts.Count -gt 0 -and -not $skipNetworkTests) {
     foreach ($port in $TestPorts) {
       $vmResults += Test-VMPort -IPAddress $ipAddress -Port $port -VMName $vmName
     }
   }
 
   # Test 5: DNS resolution
-  if ($TestDNS) {
+  if ($TestDNS -and -not $skipNetworkTests) {
     $vmResults += Test-VMDNS -IPAddress $ipAddress -VMName $vmName
   }
 
   # Test 6: HTTP endpoint checks
-  if ($TestHttpEndpoints -and $TestHttpEndpoints.Count -gt 0) {
+  if ($TestHttpEndpoints -and $TestHttpEndpoints.Count -gt 0 -and -not $skipNetworkTests) {
     foreach ($endpoint in $TestHttpEndpoints) {
       $vmResults += Test-VMHttpEndpoint -IPAddress $ipAddress -Url $endpoint -VMName $vmName
     }
