@@ -53,7 +53,7 @@ function _GetTestSummary {
     TotalTests  = $total
     PassedTests = $passed
     FailedTests = $failed
-    PassRate    = if ($total -gt 0) { [math]::Round(([double]$passed / $total) * 100, 1) } else { 0 }
+    PassRate    = if ($total -gt 0) { [math]::Round([double](([double]$passed / $total) * 100), [int]1) } else { 0 }
   }
 }
 

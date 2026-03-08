@@ -83,7 +83,7 @@ function Test-VMPing {
       # PS 7 uses 'Latency', PS 5.1 uses 'ResponseTime'
       $latencyProp = if ($successfulPings[0].PSObject.Properties['Latency']) { 'Latency' } else { 'ResponseTime' }
       $avgLatency = ($successfulPings | Measure-Object -Property $latencyProp -Average).Average
-      $details = "Reply from $IPAddress - Avg latency: $([math]::Round($avgLatency, 1))ms"
+      $details = "Reply from $IPAddress - Avg latency: $([math]::Round([double]$avgLatency, [int]1))ms"
     }
     else {
       $details = "No reply from $IPAddress (4 packets sent, 0 received)"
