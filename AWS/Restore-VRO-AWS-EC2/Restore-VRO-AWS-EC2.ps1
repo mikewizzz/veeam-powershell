@@ -34,7 +34,6 @@
   SUPPORTED BACKUP SOURCES:
   - S3 Direct Repository (Veeam S3 Object Storage Repository)
   - SOBR with S3 Capacity Tier (Scale-Out Backup Repository)
-  - Veeam Backup for AWS (VBA) snapshots tiered to S3
 
   AWS SECURITY MODEL:
   - IAM Instance Profile (recommended for VBR on EC2)
@@ -44,7 +43,6 @@
   - No plaintext credentials accepted
 
   PERFORMANCE OPTIMIZATIONS:
-  - Parallel AWS resource discovery via runspaces
   - Connection reuse across Veeam and AWS sessions
   - Streaming progress with minimal API polling overhead
   - Regional S3 endpoint selection for lowest latency
@@ -107,7 +105,7 @@
 
 .PARAMETER RestoreMode
   FullRestore: Complete disk-level restore (default, most reliable).
-  InstantRestore: Instant VM Recovery to EC2 (requires VBR 12+ with direct S3 support).
+  InstantRestore: Reserved for future use (not yet implemented).
 
 .PARAMETER EC2InstanceName
   Name tag for the restored EC2 instance. Default: Restored-<VMName>-<timestamp>.
@@ -250,7 +248,7 @@
   VBR Compatibility: Veeam Backup & Replication 12.0+ (12.1+ recommended)
 #>
 
-[CmdletBinding(SupportsShouldProcess)]
+[CmdletBinding()]
 param(
   # ===== VBR Server Connection =====
   [string]$VBRServer = "localhost",
@@ -282,7 +280,7 @@ param(
   [string]$VPCId,
   [ValidatePattern('^subnet-[a-f0-9]+$')]
   [string]$SubnetId,
-  [ValidateScript({ $_ | ForEach-Object { $_ -match '^sg-[a-f0-9]+$' } })]
+  [ValidateScript({ @($_ | Where-Object { $_ -notmatch '^sg-[a-f0-9]+$' }).Count -eq 0 })]
   [string[]]$SecurityGroupIds,
   [ValidatePattern('^\w+\.\w+$')]
   [string]$InstanceType = "t3.medium",
@@ -314,6 +312,7 @@ param(
   [int]$ValidationTimeoutMinutes = 15,
 
   # ===== Application Health Checks =====
+  [ValidateRange(1,65535)]
   [int[]]$HealthCheckPorts,
   [string[]]$HealthCheckUrls,
   [string]$SSMHealthCheckCommand,
@@ -390,15 +389,16 @@ $script:TotalSteps = 8
 $script:CurrentStep = 0
 
 # Output folder
-$stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+$script:stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+$stamp = $script:stamp
 if (-not $OutputPath) {
-  $OutputPath = Join-Path "." "VRORestoreOutput_$stamp"
+  $OutputPath = Join-Path $PSScriptRoot "VRORestoreOutput_$stamp"
 }
 New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
 
-$logFile = Join-Path $OutputPath "Restore-Log-$stamp.txt"
-$reportFile = Join-Path $OutputPath "Restore-Report-$stamp.html"
-$jsonFile = Join-Path $OutputPath "Restore-Result-$stamp.json"
+$script:logFile = Join-Path $OutputPath "Restore-Log-$stamp.txt"
+$script:reportFile = Join-Path $OutputPath "Restore-Report-$stamp.html"
+$script:jsonFile = Join-Path $OutputPath "Restore-Result-$stamp.json"
 
 # =============================
 # Load Library Files
@@ -472,7 +472,7 @@ try {
   else {
     # Step 7: Monitor restore
     Write-ProgressStep -Activity "Restore Monitoring" -Status "Waiting for completion..."
-    $finalSession = Wait-RestoreCompletion -Session $session
+    $null = Wait-RestoreCompletion -Session $session
 
     # Step 8: Validate and tag
     Write-ProgressStep -Activity "Validation & Tagging" -Status "Checking instance health..."
@@ -486,29 +486,44 @@ try {
 
     # Optional: CloudWatch Alarms
     if ($CreateCloudWatchAlarms -and $instance) {
-      Write-Log "Optional: CloudWatch Alarms"
-      New-EC2CloudWatchAlarms -InstanceId $instance.InstanceId
+      try {
+        Write-Log "Optional: CloudWatch Alarms"
+        New-EC2CloudWatchAlarms -InstanceId $instance.InstanceId
+      }
+      catch {
+        Write-Log "CloudWatch alarm creation failed: $($_.Exception.Message)" -Level WARNING
+      }
     }
 
     # Optional: Route53 DNS Update
     if ($Route53HostedZoneId -and $Route53RecordName -and $instance) {
-      Write-Log "Optional: Route53 DNS Update"
-      $dnsIP = if ($AssociatePublicIP -and $instance.PublicIpAddress) {
-        $instance.PublicIpAddress
+      try {
+        Write-Log "Optional: Route53 DNS Update"
+        $dnsIP = if ($AssociatePublicIP -and $instance.PublicIpAddress) {
+          $instance.PublicIpAddress
+        }
+        else {
+          $instance.PrivateIpAddress
+        }
+        Update-Route53Record -InstanceIP $dnsIP
       }
-      else {
-        $instance.PrivateIpAddress
+      catch {
+        Write-Log "Route53 DNS update failed: $($_.Exception.Message)" -Level WARNING
       }
-      Update-Route53Record -InstanceIP $dnsIP
     }
 
     # Optional: SSM Post-Restore Script
     if ($PostRestoreSSMDocument -and $instance) {
-      Write-Log "Optional: Post-Restore SSM Document"
-      $ssmResult = Invoke-PostRestoreSSMDocument -InstanceId $instance.InstanceId `
-        -DocumentName $PostRestoreSSMDocument -Parameters $PostRestoreSSMParameters
-      $ssmLevel = if ($ssmResult.Status -eq "Success") { "SUCCESS" } else { "WARNING" }
-      Write-Log "SSM document completed: $($ssmResult.Status)" -Level $ssmLevel
+      try {
+        Write-Log "Optional: Post-Restore SSM Document"
+        $ssmResult = Invoke-PostRestoreSSMDocument -InstanceId $instance.InstanceId `
+          -DocumentName $PostRestoreSSMDocument -Parameters $PostRestoreSSMParameters
+        $ssmLevel = if ($ssmResult.Status -eq "Success") { "SUCCESS" } else { "WARNING" }
+        Write-Log "SSM document completed: $($ssmResult.Status)" -Level $ssmLevel
+      }
+      catch {
+        Write-Log "Post-restore SSM document failed: $($_.Exception.Message)" -Level WARNING
+      }
     }
 
     $success = $true
@@ -584,7 +599,7 @@ finally {
     timestamp        = (Get-Date -Format "o")
   }
 
-  $result | ConvertTo-Json -Depth 5 | Set-Content -Path $jsonFile -Encoding UTF8
+  $result | ConvertTo-Json -Depth 5 | Set-Content -Path $script:jsonFile -Encoding UTF8
 
   # Export audit trail
   if ($EnableAuditTrail -and $script:AuditTrail.Count -gt 0) {
@@ -606,7 +621,7 @@ finally {
 
   # Disconnect VBR (non-fatal)
   if ($script:VBRConnected) {
-    try { Disconnect-VBRServer -ErrorAction SilentlyContinue } catch {}
+    try { Disconnect-VBRServer -ErrorAction SilentlyContinue } catch { <# Best-effort disconnect — non-fatal #> }
   }
 
   # Summary

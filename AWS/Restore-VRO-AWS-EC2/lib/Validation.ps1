@@ -244,8 +244,14 @@ function Test-EC2SSMCommand {
   $details = ""
 
   try {
+    # Detect platform to select correct SSM document
+    $platformInfo = Get-EC2Instance -InstanceId $InstanceId -Region $AWSRegion
+    $platform = if ($platformInfo.Instances[0].Platform -eq "Windows") { "Windows" } else { "Linux" }
+    $ssmDocument = if ($platform -eq "Windows") { "AWS-RunPowerShellScript" } else { "AWS-RunShellScript" }
+    Write-Log "  SSM platform: $platform (document: $ssmDocument)"
+
     $ssmResult = Send-SSMCommand -InstanceId $InstanceId `
-      -DocumentName "AWS-RunShellScript" `
+      -DocumentName $ssmDocument `
       -Parameter @{ commands = @($Command) } `
       -TimeoutSecond $TimeoutSeconds `
       -Region $AWSRegion

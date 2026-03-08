@@ -29,9 +29,14 @@ function Find-RestorePoint {
   Write-Log "Found backup: $($backup.Name) (ID: $($backup.Id))"
 
   # Get the repository info
-  $repo = $backup.GetRepository()
-  if ($repo) {
-    Write-Log "Repository: $($repo.Name) (Type: $($repo.Type))"
+  try {
+    $repo = $backup.GetRepository()
+    if ($repo) {
+      Write-Log "Repository: $($repo.Name) (Type: $($repo.Type))"
+    }
+  }
+  catch {
+    Write-Log "Could not query repository info: $($_.Exception.Message)" -Level WARNING
   }
 
   # Get restore points
@@ -40,7 +45,7 @@ function Find-RestorePoint {
     $rpParams["Name"] = $VMName
   }
 
-  $restorePoints = Get-VBRRestorePoint @rpParams | Sort-Object CreationTime -Descending
+  $restorePoints = @(Get-VBRRestorePoint @rpParams | Sort-Object CreationTime -Descending)
   if (-not $restorePoints -or $restorePoints.Count -eq 0) {
     throw "No restore points found for backup '$BackupName'$(if($VMName){" / VM '$VMName'"})."
   }
@@ -289,11 +294,19 @@ function New-IsolatedSecurityGroup {
     -Description "Veeam VRO isolated recovery - all traffic blocked" `
     -VpcId $VpcId -Region $AWSRegion
 
-  # Revoke the default outbound "allow all" rule
-  $defaultEgress = Get-EC2SecurityGroup -GroupId $sgId -Region $AWSRegion |
-    Select-Object -ExpandProperty IpPermissionsEgress
-  if ($defaultEgress) {
-    Revoke-EC2SecurityGroupEgress -GroupId $sgId -IpPermission $defaultEgress -Region $AWSRegion
+  # Revoke the default outbound "allow all" rule — critical for true isolation
+  try {
+    $defaultEgress = Get-EC2SecurityGroup -GroupId $sgId -Region $AWSRegion |
+      Select-Object -ExpandProperty IpPermissionsEgress
+    if ($defaultEgress) {
+      Revoke-EC2SecurityGroupEgress -GroupId $sgId -IpPermission $defaultEgress -Region $AWSRegion
+    }
+  }
+  catch {
+    # Isolation failed — delete the SG to prevent using a non-isolated group
+    Write-Log "Failed to revoke egress rules on SG $sgId. Deleting to prevent non-isolated restore." -Level ERROR
+    try { Remove-EC2SecurityGroup -GroupId $sgId -Region $AWSRegion -Force } catch {}
+    throw "Network isolation failed: could not revoke default egress on SG $sgId. $($_.Exception.Message)"
   }
 
   # Tag the SG for identification
@@ -303,7 +316,8 @@ function New-IsolatedSecurityGroup {
     (New-Object Amazon.EC2.Model.Tag("veeam:purpose", "network-isolation")),
     (New-Object Amazon.EC2.Model.Tag("veeam:restore-timestamp", $stamp))
   )
-  New-EC2Tag -Resource $sgId -Tag $sgTags -Region $AWSRegion
+  try { New-EC2Tag -Resource $sgId -Tag $sgTags -Region $AWSRegion }
+  catch { Write-Log "Failed to tag isolated SG $sgId`: $($_.Exception.Message)" -Level WARNING }
 
   $script:CreatedResources.Add([PSCustomObject]@{ Type = "SecurityGroup"; Id = $sgId })
   Write-AuditEvent -EventType "CONFIG" -Action "Created isolated security group" -Resource $sgId
@@ -373,10 +387,10 @@ function Start-EC2Restore {
     throw "Subnet '$($EC2Config.SubnetId)' not found in VBR for VPC '$($EC2Config.VpcId)'."
   }
 
-  $securityGroups = @()
+  $securityGroups = New-Object System.Collections.Generic.List[object]
   foreach ($sgId in $EC2Config.SecurityGroupIds) {
     $sg = Get-VBRAmazonEC2SecurityGroup -VPC $vpc | Where-Object { $_.SecurityGroupId -eq $sgId }
-    if ($sg) { $securityGroups += $sg }
+    if ($sg) { $securityGroups.Add($sg) }
   }
 
   # Build disk configuration
@@ -461,7 +475,14 @@ function Wait-RestoreCompletion {
   Write-Log "Monitoring restore session (timeout: $RestoreTimeoutMinutes minutes)..."
 
   while ((Get-Date) -lt $deadline) {
-    $current = Get-VBRSession -Id $Session.Id
+    try {
+      $current = Get-VBRSession -Id $Session.Id
+    }
+    catch {
+      Write-Log "Transient VBR session query error: $($_.Exception.Message). Retrying..." -Level WARNING
+      Start-Sleep -Seconds $pollInterval
+      continue
+    }
 
     if (-not $current) {
       throw "Restore session lost: session ID $($Session.Id) no longer exists."

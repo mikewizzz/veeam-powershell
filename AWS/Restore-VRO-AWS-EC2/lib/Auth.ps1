@@ -52,7 +52,7 @@ function Connect-VBRSession {
 <#
 .SYNOPSIS
   Initializes AWS PowerShell session using IAM best practices.
-  Priority: IAM Instance Profile > STS AssumeRole > Named Profile > Environment.
+  Priority: STS AssumeRole > Named Profile > IAM Instance Profile / Environment.
 #>
 function Connect-AWSSession {
   Write-Log "Initializing AWS session for region: $AWSRegion"
@@ -68,7 +68,7 @@ function Connect-AWSSession {
     $assumeParams = @{
       RoleArn         = $AWSRoleArn
       RoleSessionName = "VRORestore-$stamp"
-      DurationSecond  = $AWSSessionDuration
+      DurationInSeconds = $AWSSessionDuration
     }
     if ($AWSExternalId) {
       $assumeParams["ExternalId"] = $AWSExternalId
@@ -87,7 +87,9 @@ function Connect-AWSSession {
       throw
     }
 
-    Set-AWSCredential -Credential $stsResult.Credentials
+    Set-AWSCredential -AccessKey $stsResult.Credentials.AccessKeyId `
+      -SecretKey $stsResult.Credentials.SecretAccessKey `
+      -SessionToken $stsResult.Credentials.SessionToken
     $script:STSExpiration = $stsResult.Credentials.Expiration
     $script:STSAssumeParams = $assumeParams
     Write-Log "STS AssumeRole succeeded (expires: $($stsResult.Credentials.Expiration))" -Level SUCCESS
@@ -140,13 +142,15 @@ function Update-AWSCredentialIfNeeded {
     Write-Log "STS credentials expiring soon. Refreshing..." -Level WARNING
     try {
       $stsResult = Use-STSRole @script:STSAssumeParams
-      Set-AWSCredential -Credential $stsResult.Credentials
+      Set-AWSCredential -AccessKey $stsResult.Credentials.AccessKeyId `
+        -SecretKey $stsResult.Credentials.SecretAccessKey `
+        -SessionToken $stsResult.Credentials.SessionToken
       $script:STSExpiration = $stsResult.Credentials.Expiration
       Write-Log "STS credentials refreshed (new expiry: $($script:STSExpiration))" -Level SUCCESS
       Write-AuditEvent -EventType "AUTH" -Action "STS Credential Refresh" -Resource $AWSRoleArn
     }
     catch {
-      Write-Log "Failed to refresh STS credentials: $($_.Exception.Message)" -Level ERROR
+      Write-Log "Failed to refresh STS credentials: $($_.Exception.Message). Subsequent AWS API calls may fail." -Level ERROR
     }
   }
 }

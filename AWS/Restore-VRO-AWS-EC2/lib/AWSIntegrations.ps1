@@ -51,21 +51,36 @@ function Set-EC2ResourceTags {
   }
 
   # Tag the instance
-  New-EC2Tag -Resource $Instance.InstanceId -Tag $awsTags -Region $AWSRegion
-  Write-Log "Tagged instance $($Instance.InstanceId) with $($awsTags.Count) tags"
+  try {
+    New-EC2Tag -Resource $Instance.InstanceId -Tag $awsTags -Region $AWSRegion
+    Write-Log "Tagged instance $($Instance.InstanceId) with $($awsTags.Count) tags"
+  }
+  catch {
+    Write-Log "Failed to tag instance $($Instance.InstanceId): $($_.Exception.Message)" -Level WARNING
+  }
 
   # Tag all attached EBS volumes
   $volumeIds = $Instance.BlockDeviceMappings | ForEach-Object { $_.Ebs.VolumeId } | Where-Object { $_ }
   foreach ($volId in $volumeIds) {
-    New-EC2Tag -Resource $volId -Tag $awsTags -Region $AWSRegion
-    Write-Log "Tagged volume $volId"
+    try {
+      New-EC2Tag -Resource $volId -Tag $awsTags -Region $AWSRegion
+      Write-Log "Tagged volume $volId"
+    }
+    catch {
+      Write-Log "Failed to tag volume $volId`: $($_.Exception.Message)" -Level WARNING
+    }
   }
 
   # Tag network interfaces
   $eniIds = $Instance.NetworkInterfaces | ForEach-Object { $_.NetworkInterfaceId } | Where-Object { $_ }
   foreach ($eniId in $eniIds) {
-    New-EC2Tag -Resource $eniId -Tag $awsTags -Region $AWSRegion
-    Write-Log "Tagged network interface $eniId"
+    try {
+      New-EC2Tag -Resource $eniId -Tag $awsTags -Region $AWSRegion
+      Write-Log "Tagged network interface $eniId"
+    }
+    catch {
+      Write-Log "Failed to tag ENI $eniId`: $($_.Exception.Message)" -Level WARNING
+    }
   }
 
   Write-Log "All resources tagged" -Level SUCCESS
@@ -92,9 +107,14 @@ function New-EC2CloudWatchAlarms {
     $alarmActions = @($CloudWatchSNSTopicArn)
   }
 
+  $instanceDimension = New-Object Amazon.CloudWatch.Model.Dimension
+  $instanceDimension.Name = "InstanceId"
+  $instanceDimension.Value = $InstanceId
+
   # Status check alarm
+  $statusAlarmName = "VeeamRestore-StatusCheck-$InstanceId"
   $statusAlarmParams = @{
-    AlarmName          = "VeeamRestore-StatusCheck-$InstanceId"
+    AlarmName          = $statusAlarmName
     AlarmDescription   = "VRO restore: EC2 status check failed for $InstanceId"
     Namespace          = "AWS/EC2"
     MetricName         = "StatusCheckFailed"
@@ -103,18 +123,25 @@ function New-EC2CloudWatchAlarms {
     EvaluationPeriod   = 2
     Threshold          = 1
     ComparisonOperator = "GreaterThanOrEqualToThreshold"
-    Dimension          = @{ Name = "InstanceId"; Value = $InstanceId }
+    Dimension          = $instanceDimension
     Region             = $AWSRegion
   }
   if ($alarmActions.Count -gt 0) {
     $statusAlarmParams["AlarmAction"] = $alarmActions
   }
-  Write-CWMetricAlarm @statusAlarmParams
-  Write-Log "Created StatusCheckFailed alarm"
+  try {
+    Write-CWMetricAlarm @statusAlarmParams
+    $script:CreatedResources.Add([PSCustomObject]@{ Type = "CloudWatchAlarm"; Id = $statusAlarmName })
+    Write-Log "Created StatusCheckFailed alarm"
+  }
+  catch {
+    Write-Log "Failed to create StatusCheckFailed alarm: $($_.Exception.Message)" -Level WARNING
+  }
 
   # CPU utilization alarm
+  $cpuAlarmName = "VeeamRestore-HighCPU-$InstanceId"
   $cpuAlarmParams = @{
-    AlarmName          = "VeeamRestore-HighCPU-$InstanceId"
+    AlarmName          = $cpuAlarmName
     AlarmDescription   = "VRO restore: CPU > 90% for $InstanceId"
     Namespace          = "AWS/EC2"
     MetricName         = "CPUUtilization"
@@ -123,14 +150,20 @@ function New-EC2CloudWatchAlarms {
     EvaluationPeriod   = 3
     Threshold          = 90
     ComparisonOperator = "GreaterThanThreshold"
-    Dimension          = @{ Name = "InstanceId"; Value = $InstanceId }
+    Dimension          = $instanceDimension
     Region             = $AWSRegion
   }
   if ($alarmActions.Count -gt 0) {
     $cpuAlarmParams["AlarmAction"] = $alarmActions
   }
-  Write-CWMetricAlarm @cpuAlarmParams
-  Write-Log "Created CPUUtilization alarm"
+  try {
+    Write-CWMetricAlarm @cpuAlarmParams
+    $script:CreatedResources.Add([PSCustomObject]@{ Type = "CloudWatchAlarm"; Id = $cpuAlarmName })
+    Write-Log "Created CPUUtilization alarm"
+  }
+  catch {
+    Write-Log "Failed to create CPUUtilization alarm: $($_.Exception.Message)" -Level WARNING
+  }
 
   Write-Log "CloudWatch alarms created" -Level SUCCESS
   Write-AuditEvent -EventType "ALARM" -Action "Created CloudWatch alarms" -Resource $InstanceId
@@ -151,32 +184,45 @@ function Update-Route53Record {
 
   Write-Log "Updating Route53 DNS: $Route53RecordName -> $InstanceIP ($Route53RecordType)"
 
-  $recordValue = if ($Route53RecordType -eq "A") { $InstanceIP } else { $InstanceIP }
+  $resourceRecord = New-Object Amazon.Route53.Model.ResourceRecord
+  $resourceRecord.Value = $InstanceIP
 
-  $change = @{
-    Action            = "UPSERT"
-    ResourceRecordSet = @{
-      Name            = $Route53RecordName
-      Type            = $Route53RecordType
-      TTL             = 60
-      ResourceRecords = @(@{ Value = $recordValue })
+  $recordSet = New-Object Amazon.Route53.Model.ResourceRecordSet
+  $recordSet.Name = $Route53RecordName
+  $recordSet.Type = $Route53RecordType
+  $recordSet.TTL = 60
+  $recordSet.ResourceRecords = New-Object System.Collections.Generic.List[Amazon.Route53.Model.ResourceRecord]
+  $recordSet.ResourceRecords.Add($resourceRecord)
+
+  $change = New-Object Amazon.Route53.Model.Change
+  $change.Action = "UPSERT"
+  $change.ResourceRecordSet = $recordSet
+
+  try {
+    $changeResult = Edit-R53ResourceRecordSet -HostedZoneId $Route53HostedZoneId `
+      -ChangeBatch_Change $change -Region $AWSRegion
+
+    $script:CreatedResources.Add([PSCustomObject]@{ Type = "Route53Record"; Id = "$Route53HostedZoneId/$Route53RecordName" })
+    Write-Log "Route53 change submitted: $($changeResult.ChangeInfo.Id) (Status: $($changeResult.ChangeInfo.Status))"
+
+    # Wait for propagation (max 60s)
+    $r53Deadline = (Get-Date).AddSeconds(60)
+    $propagated = $false
+    while ((Get-Date) -lt $r53Deadline) {
+      $changeStatus = Get-R53Change -Id $changeResult.ChangeInfo.Id -Region $AWSRegion
+      if ($changeStatus.ChangeInfo.Status -eq "INSYNC") {
+        Write-Log "Route53 DNS record propagated: $Route53RecordName -> $InstanceIP" -Level SUCCESS
+        $propagated = $true
+        break
+      }
+      Start-Sleep -Seconds 5
+    }
+    if (-not $propagated) {
+      Write-Log "Route53 propagation timed out after 60s — record may still be pending" -Level WARNING
     }
   }
-
-  $changeResult = Edit-R53ResourceRecordSet -HostedZoneId $Route53HostedZoneId `
-    -ChangeBatch_Change $change -Region $AWSRegion
-
-  Write-Log "Route53 change submitted: $($changeResult.ChangeInfo.Id) (Status: $($changeResult.ChangeInfo.Status))"
-
-  # Wait for propagation (max 60s)
-  $r53Deadline = (Get-Date).AddSeconds(60)
-  while ((Get-Date) -lt $r53Deadline) {
-    $changeStatus = Get-R53Change -Id $changeResult.ChangeInfo.Id -Region $AWSRegion
-    if ($changeStatus.ChangeInfo.Status -eq "INSYNC") {
-      Write-Log "Route53 DNS record propagated: $Route53RecordName -> $InstanceIP" -Level SUCCESS
-      break
-    }
-    Start-Sleep -Seconds 5
+  catch {
+    Write-Log "Failed to update Route53 record: $($_.Exception.Message)" -Level WARNING
   }
 
   Write-AuditEvent -EventType "DNS" -Action "Route53 record updated" -Resource $Route53RecordName -Details @{
@@ -224,7 +270,9 @@ function Invoke-PostRestoreSSMDocument {
     $sendParams["Parameter"] = $Parameters
   }
 
-  $ssmResult = Send-SSMCommand @sendParams
+  $ssmResult = Invoke-WithRetry -OperationName "SSM SendCommand" -ScriptBlock {
+    Send-SSMCommand @sendParams
+  }
   $commandId = $ssmResult.CommandId
   $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
 
@@ -318,6 +366,19 @@ function Invoke-RestoreCleanup {
     }
   }
 
+  # Delete CloudWatch alarms created during this restore
+  $cwAlarms = @($script:CreatedResources | Where-Object { $_.Type -eq "CloudWatchAlarm" })
+  foreach ($alarm in $cwAlarms) {
+    try {
+      Remove-CWAlarm -AlarmName $alarm.Id -Force -Region $AWSRegion
+      Write-Log "Deleted CloudWatch alarm: $($alarm.Id)" -Level SUCCESS
+      Write-AuditEvent -EventType "CLEANUP" -Action "CloudWatch alarm deleted" -Resource $alarm.Id
+    }
+    catch {
+      Write-Log "Failed to delete CloudWatch alarm $($alarm.Id): $($_.Exception.Message)" -Level WARNING
+    }
+  }
+
   Write-Log "Cleanup completed" -Level WARNING
 }
 
@@ -355,7 +416,8 @@ function Invoke-DRDrill {
   while ((Get-Date) -lt $drillDeadline) {
     $remaining = [Math]::Round(($drillDeadline - (Get-Date)).TotalMinutes, 0)
     Write-Log "DR Drill: $remaining minutes remaining before cleanup"
-    Start-Sleep -Seconds ([Math]::Min(60, ($drillDeadline - (Get-Date)).TotalSeconds))
+    $sleepSec = [Math]::Max(0, [Math]::Min(60, ($drillDeadline - (Get-Date)).TotalSeconds))
+    if ($sleepSec -gt 0) { Start-Sleep -Seconds $sleepSec }
     Update-AWSCredentialIfNeeded
   }
 

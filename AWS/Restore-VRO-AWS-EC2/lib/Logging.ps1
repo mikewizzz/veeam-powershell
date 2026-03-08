@@ -34,7 +34,7 @@ function Write-Log {
 
   $line = "[$ts] [$Level] $Message"
   Write-Host $line -ForegroundColor $color
-  $line | Add-Content -Path $logFile -Encoding UTF8
+  $line | Add-Content -Path $script:logFile -Encoding UTF8 -ErrorAction SilentlyContinue
 }
 
 <#
@@ -58,18 +58,6 @@ function Write-VROOutput {
 # Compliance Audit Trail
 # =============================
 
-<#
-.SYNOPSIS
-  Records a structured audit event to the compliance event log.
-.PARAMETER EventType
-  Category: AUTH, RESTORE, VALIDATE, TAG, CLEANUP, CONFIG, DNS, ALARM, SSM, DRILL.
-.PARAMETER Action
-  Specific action taken.
-.PARAMETER Resource
-  AWS resource identifier affected.
-.PARAMETER Details
-  Additional details hashtable.
-#>
 <#
 .SYNOPSIS
   Displays a visual startup banner with version, mode, and key parameters.
@@ -176,6 +164,18 @@ Power On:         $powerLabel
   Write-Log "Restore plan displayed — target: $($EC2Config.InstanceType) in $($EC2Config.AvailabilityZone)"
 }
 
+<#
+.SYNOPSIS
+  Records a structured audit event to the compliance event log.
+.PARAMETER EventType
+  Category: AUTH, RESTORE, VALIDATE, TAG, CLEANUP, CONFIG, DNS, ALARM, SSM, DRILL.
+.PARAMETER Action
+  Specific action taken.
+.PARAMETER Resource
+  AWS resource identifier affected.
+.PARAMETER Details
+  Additional details hashtable.
+#>
 function Write-AuditEvent {
   param(
     [Parameter(Mandatory)][string]$EventType,
