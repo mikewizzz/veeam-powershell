@@ -113,6 +113,7 @@ $groups = @{ 1 = @("dc01","dns01"); 2 = @("sql01"); 3 = @("app01","web01") }
 | "No AHV backup jobs found" | Verify jobs exist in VBR and credentials have API access |
 | "Isolated network not found" | Create a subnet with `isolated`/`surebackup`/`lab` in the name, or use `-IsolatedNetworkName` |
 | "VM did not obtain IP" | Increase `-TestBootTimeoutSec`, ensure DHCP on isolated VLAN, verify NGT installed |
+| Network tests fail on static IP VMs | Automatic — VMs with IPs outside the isolated subnet CIDR are detected and network tests (ping/port/DNS/HTTP) are skipped. Backup integrity is verified via heartbeat/NGT. For full testing, configure DHCP or use `-TestCustomScript` |
 | "Prism Central connection failed" | Check hostname/port, try `-SkipCertificateCheck`, verify admin role |
 | "VBAHV Plugin auth failed" | Verify VBR credentials, ensure port 9419 reachable, plugin installed |
 
