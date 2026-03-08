@@ -53,7 +53,7 @@ function New-HTMLReport {
       $fullyPassedVMs++
     }
   }
-  $vmPassRate = if ($totalVMs -gt 0) { [math]::Round([double](([double]$fullyPassedVMs / $totalVMs) * 100), [int]1) } else { 0 }
+  $vmPassRate = if ($totalVMs -gt 0) { [math]::Round(([double]$fullyPassedVMs / $totalVMs) * 100, 1) } else { 0 }
 
   $overallStatus = if ($failedTests -eq 0) { "ALL TESTS PASSED" } else { "$failedTests TEST(S) FAILED" }
   $statusColor = if ($failedTests -eq 0) { "#00B336" } else { "#D13438" }
@@ -92,7 +92,7 @@ function New-HTMLReport {
   foreach ($result in $TestResults) {
     $statusClass = if ($result.Passed) { "status-pass" } else { "status-fail" }
     $statusText = if ($result.Passed) { "PASS" } else { "FAIL" }
-    $durationText = "$([math]::Round([double]$result.Duration, [int]1))s"
+    $durationText = "$([math]::Round([double]$result.Duration, 1))s"
 
     $safeVMName = _EscapeHTML $result.VMName
     $safeTestName = _EscapeHTML $result.TestName
