@@ -47,7 +47,7 @@ BeforeAll {
 
 Describe "Write-Log" {
   BeforeAll {
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
     $script:logFile = Join-Path $TestDrive "test-log.txt"
     $logFile = $script:logFile
   }
@@ -101,7 +101,7 @@ Describe "Write-VROOutput" {
 
 Describe "Write-AuditEvent" {
   BeforeAll {
-    $script:AuditTrail = [System.Collections.Generic.List[object]]::new()
+    $script:AuditTrail = New-Object System.Collections.Generic.List[object]
   }
 
   Context "When EnableAuditTrail is false" {
@@ -145,7 +145,7 @@ Describe "Write-AuditEvent" {
 
 Describe "Invoke-WithRetry" {
   BeforeAll {
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
     $script:logFile = Join-Path $TestDrive "retry-log.txt"
     $logFile = $script:logFile
   }
@@ -179,10 +179,10 @@ Describe "Invoke-WithRetry" {
 
 Describe "Start-EC2Restore" {
   BeforeAll {
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
     $script:logFile = Join-Path $TestDrive "restore-log.txt"
     $logFile = $script:logFile
-    $script:AuditTrail = [System.Collections.Generic.List[object]]::new()
+    $script:AuditTrail = New-Object System.Collections.Generic.List[object]
   }
 
   Context "InstantRestore mode" {
@@ -201,10 +201,10 @@ Describe "Start-EC2Restore" {
 
 Describe "Set-EC2ResourceTags" {
   BeforeAll {
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
     $script:logFile = Join-Path $TestDrive "tag-log.txt"
     $logFile = $script:logFile
-    $script:AuditTrail = [System.Collections.Generic.List[object]]::new()
+    $script:AuditTrail = New-Object System.Collections.Generic.List[object]
 
     # Mock AWS tag cmdlets
     Mock New-EC2Tag {}
@@ -260,7 +260,7 @@ Describe "Set-EC2ResourceTags" {
 
 Describe "Test-EC2Port" {
   BeforeAll {
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
     $script:logFile = Join-Path $TestDrive "port-log.txt"
     $logFile = $script:logFile
   }
@@ -286,7 +286,7 @@ Describe "Test-EC2Port" {
 
 Describe "Test-EC2HttpEndpoint" {
   BeforeAll {
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
     $script:logFile = Join-Path $TestDrive "http-log.txt"
     $logFile = $script:logFile
   }
@@ -323,10 +323,10 @@ Describe "Test-EC2HttpEndpoint" {
 
 Describe "Invoke-EC2HealthChecks" {
   BeforeAll {
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
     $script:logFile = Join-Path $TestDrive "hc-log.txt"
     $logFile = $script:logFile
-    $script:AuditTrail = [System.Collections.Generic.List[object]]::new()
+    $script:AuditTrail = New-Object System.Collections.Generic.List[object]
   }
 
   It "Should run port checks for each configured port" {
@@ -350,10 +350,10 @@ Describe "Invoke-EC2HealthChecks" {
 
 Describe "Measure-RTOCompliance" {
   BeforeAll {
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
     $script:logFile = Join-Path $TestDrive "rto-log.txt"
     $logFile = $script:logFile
-    $script:AuditTrail = [System.Collections.Generic.List[object]]::new()
+    $script:AuditTrail = New-Object System.Collections.Generic.List[object]
   }
 
   Context "When no RTO target is set" {
@@ -397,10 +397,10 @@ Describe "Measure-RTOCompliance" {
 
 Describe "Update-AWSCredentialIfNeeded" {
   BeforeAll {
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
     $script:logFile = Join-Path $TestDrive "cred-log.txt"
     $logFile = $script:logFile
-    $script:AuditTrail = [System.Collections.Generic.List[object]]::new()
+    $script:AuditTrail = New-Object System.Collections.Generic.List[object]
 
     Mock Use-STSRole {
       return @{
@@ -454,10 +454,10 @@ Describe "Update-AWSCredentialIfNeeded" {
 
 Describe "Invoke-RestoreCleanup" {
   BeforeAll {
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
     $script:logFile = Join-Path $TestDrive "cleanup-log.txt"
     $logFile = $script:logFile
-    $script:AuditTrail = [System.Collections.Generic.List[object]]::new()
+    $script:AuditTrail = New-Object System.Collections.Generic.List[object]
 
     Mock Remove-EC2Instance {}
     Mock Remove-EC2SecurityGroup {}
@@ -485,11 +485,11 @@ Describe "Invoke-RestoreCleanup" {
 
 Describe "New-IsolatedSecurityGroup" {
   BeforeAll {
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
+    $script:LogEntries = New-Object System.Collections.Generic.List[object]
     $script:logFile = Join-Path $TestDrive "iso-log.txt"
     $logFile = $script:logFile
-    $script:AuditTrail = [System.Collections.Generic.List[object]]::new()
-    $script:CreatedResources = [System.Collections.Generic.List[object]]::new()
+    $script:AuditTrail = New-Object System.Collections.Generic.List[object]
+    $script:CreatedResources = New-Object System.Collections.Generic.List[object]
     Set-Variable -Name stamp -Value "2026-02-22_120000" -Scope Script
     Set-Variable -Name IsolatedSGName -Value "" -Scope Script
     Set-Variable -Name AWSRegion -Value "us-east-1" -Scope Script

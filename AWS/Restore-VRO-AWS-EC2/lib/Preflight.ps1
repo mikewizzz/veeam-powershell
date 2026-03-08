@@ -103,14 +103,12 @@ function Test-Prerequisites {
     Write-Log "Loaded AWS module: AWS.Tools.S3 (optional)"
   }
 
-  # Optional: AWS.Tools.SecurityToken for STS AssumeRole
-  if ($AWSRoleArn) {
-    if (-not (Get-Module -ListAvailable -Name "AWS.Tools.SecurityToken")) {
-      throw "AWS.Tools.SecurityToken module required for AssumeRole. Install via: Install-Module AWS.Tools.SecurityToken -Scope CurrentUser"
-    }
-    Import-Module AWS.Tools.SecurityToken -ErrorAction Stop
-    Write-Log "Loaded AWS module: AWS.Tools.SecurityToken"
+  # AWS.Tools.SecurityToken — always loaded (Get-STSCallerIdentity used for connectivity check)
+  if (-not (Get-Module -ListAvailable -Name "AWS.Tools.SecurityToken")) {
+    throw "AWS.Tools.SecurityToken module required. Install via: Install-Module AWS.Tools.SecurityToken -Scope CurrentUser"
   }
+  Import-Module AWS.Tools.SecurityToken -ErrorAction Stop
+  Write-Log "Loaded AWS module: AWS.Tools.SecurityToken"
 
   # Optional: AWS.Tools.SimpleSystemsManagement for SSM integration
   if ($SSMHealthCheckCommand -or $PostRestoreSSMDocument) {

@@ -46,24 +46,24 @@ function New-RestoreReport {
       "SUCCESS" { "#00B336" }
       default   { "#6C757D" }
     }
-    "<tr><td style='white-space:nowrap'>$($_.Timestamp)</td><td><span style='color:$levelColor;font-weight:600'>$($_.Level)</span></td><td>$([System.Web.HttpUtility]::HtmlEncode($_.Message))</td></tr>"
+    "<tr><td style='white-space:nowrap'>$($_.Timestamp)</td><td><span style='color:$levelColor;font-weight:600'>$($_.Level)</span></td><td>$([System.Net.WebUtility]::HtmlEncode($_.Message))</td></tr>"
   }) -join "`n"
 
   # HTML-encode all user-controlled values for XSS prevention
-  $safeBackupName = [System.Web.HttpUtility]::HtmlEncode($BackupName)
-  $safeVMName = [System.Web.HttpUtility]::HtmlEncode($VMName)
-  $safeRestoreMode = [System.Web.HttpUtility]::HtmlEncode($RestoreMode)
-  $safeInstanceId = [System.Web.HttpUtility]::HtmlEncode($instanceId)
-  $safeInstanceType = [System.Web.HttpUtility]::HtmlEncode($InstanceType)
-  $safeAWSRegion = [System.Web.HttpUtility]::HtmlEncode($AWSRegion)
-  $safePrivateIp = [System.Web.HttpUtility]::HtmlEncode($privateIp)
-  $safePublicIp = [System.Web.HttpUtility]::HtmlEncode($publicIp)
-  $safeDiskType = [System.Web.HttpUtility]::HtmlEncode($DiskType)
-  $safeVpcId = [System.Web.HttpUtility]::HtmlEncode($(if($EC2Config){$EC2Config.VpcId}else{"N/A"}))
-  $safeSubnetId = [System.Web.HttpUtility]::HtmlEncode($(if($EC2Config){$EC2Config.SubnetId}else{"N/A"}))
-  $safeVROPlanName = [System.Web.HttpUtility]::HtmlEncode($(if($VROPlanName){$VROPlanName}else{"N/A"}))
-  $safeVROStepName = [System.Web.HttpUtility]::HtmlEncode($(if($VROStepName){$VROStepName}else{"N/A"}))
-  $safeVBRServer = [System.Web.HttpUtility]::HtmlEncode($VBRServer)
+  $safeBackupName = [System.Net.WebUtility]::HtmlEncode($BackupName)
+  $safeVMName = [System.Net.WebUtility]::HtmlEncode($VMName)
+  $safeRestoreMode = [System.Net.WebUtility]::HtmlEncode($RestoreMode)
+  $safeInstanceId = [System.Net.WebUtility]::HtmlEncode($instanceId)
+  $safeInstanceType = [System.Net.WebUtility]::HtmlEncode($InstanceType)
+  $safeAWSRegion = [System.Net.WebUtility]::HtmlEncode($AWSRegion)
+  $safePrivateIp = [System.Net.WebUtility]::HtmlEncode($privateIp)
+  $safePublicIp = [System.Net.WebUtility]::HtmlEncode($publicIp)
+  $safeDiskType = [System.Net.WebUtility]::HtmlEncode($DiskType)
+  $safeVpcId = [System.Net.WebUtility]::HtmlEncode($(if($EC2Config){$EC2Config.VpcId}else{"N/A"}))
+  $safeSubnetId = [System.Net.WebUtility]::HtmlEncode($(if($EC2Config){$EC2Config.SubnetId}else{"N/A"}))
+  $safeVROPlanName = [System.Net.WebUtility]::HtmlEncode($(if($VROPlanName){$VROPlanName}else{"N/A"}))
+  $safeVROStepName = [System.Net.WebUtility]::HtmlEncode($(if($VROStepName){$VROStepName}else{"N/A"}))
+  $safeVBRServer = [System.Net.WebUtility]::HtmlEncode($VBRServer)
 
   $html = @"
 <!DOCTYPE html>
@@ -104,7 +104,7 @@ function New-RestoreReport {
         <h1>VRO AWS EC2 Restore Report</h1>
         <div class="subtitle">Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")</div>
       </div>
-      <div class="status-banner">Restore Status: $statusText$(if($ErrorMessage){ " - $([System.Web.HttpUtility]::HtmlEncode($ErrorMessage))" })</div>
+      <div class="status-banner">Restore Status: $statusText$(if($ErrorMessage){ " - $([System.Net.WebUtility]::HtmlEncode($ErrorMessage))" })</div>
 
       <div class="section">
         <h2>Restore Summary</h2>
@@ -165,7 +165,7 @@ function New-RestoreReport {
         $hcRows = ($script:HealthCheckResults | ForEach-Object {
           $hcColor = if ($_.Passed) { "#00B336" } else { "#E74C3C" }
           $hcResult = if ($_.Passed) { "PASS" } else { "FAIL" }
-          "<tr><td>$($_.TestName)</td><td style='color:$hcColor;font-weight:600'>$hcResult</td><td>$([System.Web.HttpUtility]::HtmlEncode($_.Details))</td><td>$([Math]::Round($_.Duration, 1))s</td></tr>"
+          "<tr><td>$([System.Net.WebUtility]::HtmlEncode($_.TestName))</td><td style='color:$hcColor;font-weight:600'>$hcResult</td><td>$([System.Net.WebUtility]::HtmlEncode($_.Details))</td><td>$([Math]::Round($_.Duration, 1))s</td></tr>"
         }) -join "`n"
 @"
       <div class="section">
@@ -186,12 +186,12 @@ function New-RestoreReport {
         </table>
       </div>
     </div>
-    <div class="footer">Veeam Recovery Orchestrator &middot; AWS EC2 Restore Plugin v2.0.0</div>
+    <div class="footer">Veeam Recovery Orchestrator &middot; AWS EC2 Restore Plugin v2.1.0</div>
   </div>
 </body>
 </html>
 "@
 
-  $html | Set-Content -Path $reportFile -Encoding UTF8
-  Write-Log "Report saved: $reportFile" -Level SUCCESS
+  $html | Set-Content -Path $script:reportFile -Encoding UTF8
+  Write-Log "Report saved: $script:reportFile" -Level SUCCESS
 }

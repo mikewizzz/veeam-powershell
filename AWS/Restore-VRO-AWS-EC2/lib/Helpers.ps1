@@ -33,7 +33,7 @@ function Invoke-WithRetry {
         Write-Log "$OperationName failed after $MaxAttempts attempts: $($_.Exception.Message)" -Level ERROR
         throw
       }
-      $delay = $BaseDelay * [Math]::Pow(2, $attempt - 1)
+      $delay = [Math]::Min($BaseDelay * [Math]::Pow(2, $attempt - 1), 30)
       Write-Log "$OperationName attempt $attempt/$MaxAttempts failed: $($_.Exception.Message). Retrying in ${delay}s..." -Level WARNING
       Start-Sleep -Seconds $delay
     }
