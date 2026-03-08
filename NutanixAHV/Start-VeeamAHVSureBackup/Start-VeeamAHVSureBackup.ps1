@@ -363,7 +363,7 @@ try {
     }
   }
 
-  $restorePoints = @($restorePointsList)
+  $restorePoints = ,$restorePointsList.ToArray()
 
   if ($restorePoints.Count -eq 0) {
     throw "No protected VMs found in any Prism Central. Ensure AHV backup jobs exist and the VBAHV Plugin is configured."
