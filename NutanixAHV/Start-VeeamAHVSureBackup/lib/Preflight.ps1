@@ -164,7 +164,7 @@ function Test-RestorePointRecency {
 
   if ($stale.Count -gt 0) {
     foreach ($rp in $stale) {
-      $ageDays = [math]::Round(((Get-Date) - $rp.CreationTime).TotalDays, 1)
+      $ageDays = [math]::Round([double](((Get-Date) - $rp.CreationTime).TotalDays), [int]1)
       $warnings += "Restore point for '$($rp.VMName)' is $ageDays days old (threshold: $MaxAgeDays days)"
     }
   }
@@ -315,7 +315,7 @@ function Test-StorageCapacity {
     }
 
     if ($totalRestoreSize -gt 0) {
-      $totalGB = [math]::Round($totalRestoreSize / 1GB, 1)
+      $totalGB = [math]::Round([double]($totalRestoreSize / 1GB), [int]1)
       Write-Log "  [Preflight] Estimated storage needed for restores: ${totalGB} GB" -Level "INFO"
     }
   }
@@ -472,7 +472,7 @@ function Test-PreflightRequirements {
   }
 
   if ($allIssues.Count -eq 0) {
-    Write-Log "  Preflight checks passed ($($allWarnings.Count) warning(s)) in $([math]::Round($durationSec, 1))s" -Level "SUCCESS"
+    Write-Log "  Preflight checks passed ($($allWarnings.Count) warning(s)) in $([math]::Round([double]$durationSec, [int]1))s" -Level "SUCCESS"
   }
 
   return [PSCustomObject]@{

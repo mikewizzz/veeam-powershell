@@ -699,18 +699,41 @@ function Start-AHVFullRestore {
     Write-Log "  Retrieving restore point metadata..." -Level "INFO"
     $metadata = Get-VBAHVRestorePointMetadata -RestorePointId $pluginRPId
 
-    # Extract cluster ID from metadata for targetVmClusterId
+    # Always resolve cluster through plugin's current cluster list
     $targetClusterId = $null
-    if ($metadata.clusterId) {
-      $targetClusterId = $metadata.clusterId
-    }
-    elseif ($TargetClusterName) {
-      # Resolve cluster by name via GET /clusters
-      $clusters = Get-VBAHVClusters
+    $clusters = Get-VBAHVClusters
+
+    if ($TargetClusterName) {
+      # User-specified override takes priority
       $targetCluster = $clusters | Where-Object { $_.name -imatch [regex]::Escape($TargetClusterName) } | Select-Object -First 1
+      if (-not $targetCluster) {
+        throw "Target cluster '$TargetClusterName' not found. Available: $(($clusters | ForEach-Object { $_.name }) -join ', ')"
+      }
+      $targetClusterId = $targetCluster.id
+    }
+    elseif ($metadata.clusterId) {
+      # Validate metadata cluster ID against current plugin clusters
+      $targetCluster = $clusters | Where-Object { $_.id -eq $metadata.clusterId } | Select-Object -First 1
       if ($targetCluster) {
         $targetClusterId = $targetCluster.id
       }
+      elseif ($metadata.clusterName) {
+        # Stale ID — fall back to name match
+        $targetCluster = $clusters | Where-Object { $_.name -eq $metadata.clusterName } | Select-Object -First 1
+        if ($targetCluster) {
+          Write-Log "  Cluster ID '$($metadata.clusterId)' not found in plugin — resolved by name '$($metadata.clusterName)'" -Level "WARNING"
+          $targetClusterId = $targetCluster.id
+        }
+      }
+      # Last resort: single-cluster environment
+      if (-not $targetClusterId -and @($clusters).Count -eq 1) {
+        Write-Log "  Cluster ID '$($metadata.clusterId)' not found — using only available cluster '$($clusters[0].name)'" -Level "WARNING"
+        $targetClusterId = $clusters[0].id
+      }
+    }
+
+    if (-not $targetClusterId) {
+      throw "Cannot resolve target cluster. Metadata cluster '$($metadata.clusterName)' (ID: $($metadata.clusterId)) not found in plugin. Available clusters: $(($clusters | ForEach-Object { "$($_.name) ($($_.id))" }) -join ', '). Use -TargetClusterName to specify."
     }
 
     # Resolve storage container ID
