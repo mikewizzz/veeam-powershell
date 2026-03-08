@@ -80,18 +80,19 @@ function Invoke-Cleanup {
     Clean up all restored VMs and temporary resources
   .DESCRIPTION
     Iterates over all tracked recovery sessions and stops any that are still
-    running or in a failed state. Each session is cleaned up independently
-    so a failure in one does not block cleanup of others.
-    All sessions use Stop-AHVFullRestore (power off + delete via Prism API).
+    running, failed, or previously failed cleanup. Each session is cleaned up
+    independently so a failure in one does not block cleanup of others.
+    All sessions use Stop-AHVFullRestore (power off + delete via Prism API
+    with built-in retry logic).
   #>
   Write-Log "Starting cleanup of $($script:RecoverySessions.Count) recovery session(s)..." -Level "INFO"
 
   $cleanedCount = 0
   foreach ($session in $script:RecoverySessions) {
-    if ($session.Status -eq "Running" -or $session.Status -eq "Failed") {
+    if ($session.Status -eq "Running" -or $session.Status -eq "Failed" -or $session.Status -eq "CleanupFailed") {
       try {
         Stop-AHVFullRestore -RecoveryInfo $session
-        $cleanedCount++
+        if ($session.Status -eq "CleanedUp") { $cleanedCount++ }
       }
       catch {
         Write-Log "  Cleanup failed for '$($session.OriginalVMName)': $($_.Exception.Message)" -Level "ERROR"
@@ -100,6 +101,11 @@ function Invoke-Cleanup {
     elseif ($session.Status -eq "CleanedUp") {
       $cleanedCount++
     }
+  }
+
+  $orphanCount = @($script:RecoverySessions | Where-Object { $_.Status -eq "CleanupFailed" }).Count
+  if ($orphanCount -gt 0) {
+    Write-Log "WARNING: $orphanCount VM(s) could not be cleaned up — check SureBackup_OrphanVMs.txt for manual cleanup" -Level "ERROR"
   }
 
   Write-Log "Cleanup complete: $cleanedCount / $($script:RecoverySessions.Count) session(s) cleaned up" -Level "SUCCESS"

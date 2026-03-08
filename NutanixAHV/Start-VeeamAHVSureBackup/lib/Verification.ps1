@@ -149,18 +149,22 @@ function Test-VMPort {
 function Test-VMDNS {
   <#
   .SYNOPSIS
-    Test DNS resolution capability
+    Test reverse DNS lookup for a recovered VM's IP (from script host)
+  .DESCRIPTION
+    Performs a reverse DNS lookup of the VM's IP address from the machine running
+    this script. This validates that the script host can resolve the VM's IP via
+    DNS, NOT that the VM itself has DNS capability. For true in-guest DNS testing,
+    use a custom script via -TestCustomScript.
   #>
   param(
     [Parameter(Mandatory = $true)][string]$IPAddress,
     [Parameter(Mandatory = $true)][string]$VMName
   )
 
-  $testName = "DNS Resolution"
+  $testName = "Reverse DNS (from script host)"
   $startTime = Get-Date
 
   try {
-    # Test if the VM can be resolved by its name and if DNS is functional
     $resolved = [System.Net.Dns]::GetHostEntry($IPAddress)
     $passed = ($null -ne $resolved)
     $details = "Reverse DNS: $($resolved.HostName)"
@@ -169,7 +173,7 @@ function Test-VMDNS {
   }
   catch {
     $passed = $false
-    $details = "DNS resolution failed for ${IPAddress}: $($_.Exception.Message)"
+    $details = "Reverse DNS lookup failed for ${IPAddress}: $($_.Exception.Message)"
     _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
   }
 
@@ -236,14 +240,24 @@ function Test-VMCustomScript {
   $testName = "Custom Script: $(Split-Path $ScriptPath -Leaf)"
   $startTime = Get-Date
 
-  if (-not (Test-Path $ScriptPath)) {
+  # Canonicalize path and reject UNC/network paths
+  try {
+    $resolvedScriptPath = (Resolve-Path $ScriptPath -ErrorAction Stop).Path
+  }
+  catch {
     $details = "Script not found: $ScriptPath"
     _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
     return (_NewTestResult -VMName $VMName -TestName $testName -Passed $false -Details $details -StartTime $startTime)
   }
 
+  if ($resolvedScriptPath -match '^\\\\') {
+    $details = "UNC/network paths are not allowed for security: $resolvedScriptPath"
+    _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
+    return (_NewTestResult -VMName $VMName -TestName $testName -Passed $false -Details $details -StartTime $startTime)
+  }
+
   try {
-    $result = & $ScriptPath -VMName $VMName -VMIPAddress $VMIPAddress -VMUuid $VMUuid
+    $result = & $resolvedScriptPath -VMName $VMName -VMIPAddress $VMIPAddress -VMUuid $VMUuid
     $passed = ($result -eq $true)
     $details = if ($passed) { "Custom script returned success" } else { "Custom script returned failure: $result" }
 

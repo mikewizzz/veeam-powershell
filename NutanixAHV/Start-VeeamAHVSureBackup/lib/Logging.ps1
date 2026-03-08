@@ -46,7 +46,7 @@ function Write-Banner {
   $banner = @"
 
   ╔══════════════════════════════════════════════════════════════════╗
-  ║          Veeam SureBackup for Nutanix AHV  v1.1.0              ║
+  ║          Veeam SureBackup for Nutanix AHV  v1.2.0              ║
   ║          Automated Backup Verification & Recovery Testing       ║
   ╚══════════════════════════════════════════════════════════════════╝
 

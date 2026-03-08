@@ -667,6 +667,75 @@ function Test-NetworkIsolation {
   }
 }
 
+function Assert-VMNetworkIsolation {
+  <#
+  .SYNOPSIS
+    Verify ALL NICs on a restored VM are connected to the isolated subnet
+  .DESCRIPTION
+    Safety-critical function called after restore, before power-on. Queries
+    the VM's NIC configuration and verifies every NIC is on the expected
+    isolated subnet UUID. Returns $false if any NIC is on a different subnet,
+    preventing production network exposure.
+  .PARAMETER VMUUID
+    UUID of the restored VM to verify
+  .PARAMETER IsolatedNetwork
+    Resolved isolated network object with UUID property
+  .OUTPUTS
+    $true if all NICs are on the isolated network, $false otherwise
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$VMUUID,
+    [Parameter(Mandatory = $true)]$IsolatedNetwork
+  )
+
+  try {
+    if ($PrismApiVersion -eq "v4") {
+      $nicsEndpoint = "$($script:PrismEndpoints.VMs)/$VMUUID/nics"
+      $nicsRaw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $nicsEndpoint)
+      $nics = if ($nicsRaw.data) { @($nicsRaw.data) } else { @() }
+
+      if ($nics.Count -eq 0) {
+        Write-Log "  VM has no NICs — network isolation verified (no network exposure)" -Level "INFO"
+        return $true
+      }
+
+      foreach ($nic in $nics) {
+        $nicSubnetId = $null
+        if ($nic.networkInfo -and $nic.networkInfo.subnet) {
+          $nicSubnetId = $nic.networkInfo.subnet.extId
+        }
+        if (-not $nicSubnetId -or $nicSubnetId -ne $IsolatedNetwork.UUID) {
+          Write-Log "  NIC $($nic.extId) is on subnet '$nicSubnetId' — expected '$($IsolatedNetwork.UUID)'" -Level "ERROR"
+          return $false
+        }
+      }
+    }
+    else {
+      $vmResult = Get-PrismVMByUUID -UUID $VMUUID
+      $nicList = $vmResult.spec.resources.nic_list
+      if (-not $nicList -or @($nicList).Count -eq 0) {
+        Write-Log "  VM has no NICs — network isolation verified (no network exposure)" -Level "INFO"
+        return $true
+      }
+
+      foreach ($nic in $nicList) {
+        $nicSubnetId = if ($nic.subnet_reference) { $nic.subnet_reference.uuid } else { $null }
+        if (-not $nicSubnetId -or $nicSubnetId -ne $IsolatedNetwork.UUID) {
+          Write-Log "  NIC is on subnet '$nicSubnetId' — expected '$($IsolatedNetwork.UUID)'" -Level "ERROR"
+          return $false
+        }
+      }
+    }
+
+    Write-Log "  Network isolation verified: all NICs on '$($IsolatedNetwork.Name)'" -Level "SUCCESS"
+    return $true
+  }
+  catch {
+    Write-Log "  Network isolation check failed: $($_.Exception.Message) — blocking power-on for safety" -Level "ERROR"
+    return $false
+  }
+}
+
 function Get-PrismVMByName {
   <#
   .SYNOPSIS
@@ -925,7 +994,7 @@ function Set-PrismVMPowerState {
 function Remove-PrismVM {
   <#
   .SYNOPSIS
-    Delete a VM from Nutanix (cleanup, v3/v4)
+    Delete a VM from Nutanix and wait for the async task to complete (cleanup, v3/v4)
   #>
   param([Parameter(Mandatory = $true)][string]$UUID)
 
@@ -934,10 +1003,21 @@ function Remove-PrismVM {
       # v4 DELETE requires ETag via If-Match
       $vmResult = Get-PrismVMByUUID -UUID $UUID
       $etag = if ($vmResult.ETag) { $vmResult.ETag } else { $null }
-      Invoke-PrismAPI -Method "DELETE" -Endpoint "$($script:PrismEndpoints.VMs)/$UUID" -IfMatch $etag
+      $deleteResult = Invoke-PrismAPI -Method "DELETE" -Endpoint "$($script:PrismEndpoints.VMs)/$UUID" -IfMatch $etag
+      $taskId = _ExtractTaskId $deleteResult
+      if ($taskId) {
+        Wait-PrismTask -TaskUUID $taskId -TimeoutSec 300
+      }
     }
     else {
-      Invoke-PrismAPI -Method "DELETE" -Endpoint "vms/$UUID"
+      $deleteResult = Invoke-PrismAPI -Method "DELETE" -Endpoint "vms/$UUID"
+      $taskId = $null
+      if ($deleteResult.status -and $deleteResult.status.execution_context -and $deleteResult.status.execution_context.task_uuid) {
+        $taskId = $deleteResult.status.execution_context.task_uuid
+      }
+      if ($taskId) {
+        Wait-PrismTask -TaskUUID $taskId -TimeoutSec 300
+      }
     }
     Write-Log "Deleted VM: $UUID" -Level "INFO"
     return $true
@@ -988,6 +1068,9 @@ function Wait-PrismTask {
         if ($task.error_detail) { $task.error_detail } else { "unknown" }
       }
       throw "Prism task $TaskUUID failed: $errorMsg"
+    }
+    elseif ($status -imatch "CANCEL|ABORT") {
+      throw "Prism task $TaskUUID was cancelled/aborted (status: $status)"
     }
 
     Start-Sleep -Seconds 5

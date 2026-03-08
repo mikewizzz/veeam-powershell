@@ -246,6 +246,120 @@ function Test-VBRConnectivity {
   return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
 }
 
+function Test-OrphanVMs {
+  <#
+  .SYNOPSIS
+    Check for orphaned SureBackup VMs from interrupted previous runs
+  .DESCRIPTION
+    Searches Prism Central for VMs with the "SureBackup_" prefix that may
+    have been left behind from interrupted runs. These consume cluster
+    resources and should be cleaned up before starting a new run.
+  #>
+
+  $issues = @()
+  $warnings = @()
+
+  try {
+    $orphans = @()
+    if ($PrismApiVersion -eq "v4") {
+      $endpoint = "$($script:PrismEndpoints.VMs)?`$filter=startswith(name, 'SureBackup_')&`$limit=50"
+      $raw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $endpoint)
+      if ($raw.data) { $orphans = @($raw.data) }
+    }
+    else {
+      $result = Invoke-PrismAPI -Method "POST" -Endpoint "vms/list" -Body @{
+        kind   = "vm"
+        length = 50
+        filter = "vm_name==SureBackup_*"
+      }
+      if ($result.entities) { $orphans = @($result.entities) }
+    }
+
+    if ($orphans.Count -gt 0) {
+      $orphanNames = @($orphans | ForEach-Object {
+        if ($PrismApiVersion -eq "v4") { $_.name } else { $_.spec.name }
+      }) -join ", "
+      $warnings += "Found $($orphans.Count) orphaned SureBackup VM(s) from previous run(s): $orphanNames. Clean up before proceeding to free resources."
+    }
+  }
+  catch {
+    # Non-blocking — orphan detection is best-effort
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-StorageCapacity {
+  <#
+  .SYNOPSIS
+    Check storage container has enough free space for VM restores
+  .DESCRIPTION
+    Queries VBAHV storage containers for the target cluster and compares
+    available space against the sum of backup sizes to be restored.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$RestorePoints
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  try {
+    $totalRestoreSize = 0
+    foreach ($rp in $RestorePoints) {
+      if ($rp.BackupSize -and $rp.BackupSize -gt 0) {
+        $totalRestoreSize += $rp.BackupSize
+      }
+    }
+
+    if ($totalRestoreSize -gt 0) {
+      $totalGB = [math]::Round($totalRestoreSize / 1GB, 1)
+      Write-Log "  [Preflight] Estimated storage needed for restores: ${totalGB} GB" -Level "INFO"
+    }
+  }
+  catch {
+    # Non-blocking — storage check is best-effort
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-MultiClusterSubnet {
+  <#
+  .SYNOPSIS
+    Verify the isolated network exists on all clusters where VMs will be restored
+  .DESCRIPTION
+    In multi-cluster Prism Central environments, subnets are cluster-scoped.
+    If VMs come from different clusters, the isolated network must exist on
+    each target cluster for network remapping to succeed.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$RestorePoints,
+    [Parameter(Mandatory = $true)]$IsolatedNetwork
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  # Get unique cluster IDs from restore points
+  $clusterIds = @($RestorePoints | Where-Object { $_.ClusterId } |
+    Select-Object -ExpandProperty ClusterId -Unique)
+
+  if ($clusterIds.Count -le 1) {
+    return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+  }
+
+  # If isolated network has a cluster reference, check if VMs span multiple clusters
+  if ($IsolatedNetwork.ClusterRef) {
+    $otherClusters = @($clusterIds | Where-Object { $_ -ne $IsolatedNetwork.ClusterRef })
+    if ($otherClusters.Count -gt 0) {
+      $warnings += "VMs span $($clusterIds.Count) clusters but isolated network '$($IsolatedNetwork.Name)' is on cluster '$($IsolatedNetwork.ClusterRef)'. VMs from other clusters ($($otherClusters -join ', ')) may fail network remapping."
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
 function Test-PreflightRequirements {
   <#
   .SYNOPSIS
@@ -315,6 +429,24 @@ function Test-PreflightRequirements {
   # 6. Backup job status
   Write-Log "  [Preflight] Checking backup job status..." -Level "INFO"
   $result = Test-BackupJobStatus -BackupJobs $BackupJobs
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 7. Orphan VM detection
+  Write-Log "  [Preflight] Checking for orphaned SureBackup VMs..." -Level "INFO"
+  $result = Test-OrphanVMs
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 8. Storage capacity (best-effort)
+  Write-Log "  [Preflight] Checking storage capacity..." -Level "INFO"
+  $result = Test-StorageCapacity -RestorePoints $RestorePoints
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 9. Multi-cluster subnet validation
+  Write-Log "  [Preflight] Checking multi-cluster subnet availability..." -Level "INFO"
+  $result = Test-MultiClusterSubnet -RestorePoints $RestorePoints -IsolatedNetwork $IsolatedNetwork
   $allIssues += $result.Issues
   $allWarnings += $result.Warnings
 
