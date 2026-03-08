@@ -9,6 +9,9 @@
 # Scratch/planning files
 TEST_PLAN.md
 
+# Script output folders
+AZURE/Get-VeeamAzureSizing/VeeamAzureSizing_*/
+
 # OS files
 .DS_Store
 Thumbs.db
