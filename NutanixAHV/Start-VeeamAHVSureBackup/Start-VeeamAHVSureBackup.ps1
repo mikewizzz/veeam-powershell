@@ -363,7 +363,7 @@ try {
     }
   }
 
-  $restorePoints = ,$restorePointsList.ToArray()
+  $restorePoints = @($restorePointsList.ToArray())
 
   if ($restorePoints.Count -eq 0) {
     throw "No protected VMs found in any Prism Central. Ensure AHV backup jobs exist and the VBAHV Plugin is configured."
@@ -554,7 +554,7 @@ try {
 
         # Run verification tests on each recovered VM
         foreach ($recovery in $recoveries) {
-          Invoke-VMVerificationTests -RecoveryInfo $recovery -IsolatedNetwork $isolatedNet
+          $null = Invoke-VMVerificationTests -RecoveryInfo $recovery -IsolatedNetwork $isolatedNet
         }
 
         # Cleanup this batch before moving to next

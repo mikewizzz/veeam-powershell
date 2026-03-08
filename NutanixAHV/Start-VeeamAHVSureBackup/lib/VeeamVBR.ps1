@@ -161,6 +161,7 @@ function Invoke-VBAHVPluginAPI {
 
   $url = "$($script:VBAHVBaseUrl)/$Endpoint"
   $attempt = 0
+  $refreshedFor401 = $false
 
   while ($attempt -le $RetryCount) {
     try {
@@ -195,8 +196,9 @@ function Invoke-VBAHVPluginAPI {
         throw
       }
 
-      # 401 Unauthorized — token likely expired, refresh and retry once
-      if ($statusCode -eq 401) {
+      # 401 Unauthorized — token likely expired, refresh and retry once only
+      if ($statusCode -eq 401 -and -not $refreshedFor401) {
+        $refreshedFor401 = $true
         Write-Log "VBAHV Plugin API returned 401 — refreshing OAuth2 token" -Level "WARNING"
         Refresh-VBAHVToken
         $attempt++
@@ -304,7 +306,7 @@ function Get-VBAHVPrismCentralVMs {
       }
     }
 
-    return $filtered
+    return ,$filtered
   }
 
   return ,$allVMs.ToArray()
@@ -654,6 +656,7 @@ function Start-AHVFullRestore {
         }
         catch {
           if ($_.Exception.Message -imatch "Full restore session failed") { throw }
+          Write-Log "  Session poll error (attempt will retry): $($_.Exception.Message)" -Level "WARNING"
         }
       }
 
@@ -683,7 +686,7 @@ function Start-AHVFullRestore {
       throw "Restored VM '$recoveryName' not found in Prism Central after ${discoveryTimeout}s"
     }
 
-    $vmUUID = if ($PrismApiVersion -eq "v4") { $recoveredVM[0].extId } else { $recoveredVM[0].metadata.uuid }
+    $vmUUID = if ($PrismApiVersion -eq "v4") { @($recoveredVM)[0].extId } else { @($recoveredVM)[0].metadata.uuid }
     Write-Log "  Restored VM found: $vmUUID" -Level "SUCCESS"
 
     # Step 7: Power on — VM is already on isolated network (no NIC swap needed)
@@ -697,7 +700,7 @@ function Start-AHVFullRestore {
   catch {
     Write-Log "Full restore failed for '$vmName': $($_.Exception.Message)" -Level "ERROR"
 
-    $recoveryInfo = _NewRecoveryInfo -OriginalVMName $vmName -RecoveryVMName $recoveryName -Status "Failed" -Error $_.Exception.Message -RestoreMethod "FullRestore"
+    $recoveryInfo = _NewRecoveryInfo -OriginalVMName $vmName -RecoveryVMName $recoveryName -Status "Failed" -ErrorMessage $_.Exception.Message -RestoreMethod "FullRestore"
     $script:RecoverySessions.Add($recoveryInfo)
     return $recoveryInfo
   }

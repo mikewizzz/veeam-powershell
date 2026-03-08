@@ -28,7 +28,10 @@ public class TrustAllCertsPolicy : ICertificatePolicy {
       }
       [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
     }
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    # PS 5.1 only: force TLS 1.2 via ServicePointManager (not used in PS 7+)
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+      [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    }
     Write-Log "TLS certificate validation disabled (lab mode)" -Level "WARNING"
   }
 
@@ -93,6 +96,7 @@ function Invoke-PrismAPI {
   $captureHeaders = ($PrismApiVersion -eq "v4")
 
   while ($attempt -le $RetryCount) {
+    $respHeaders = $null
     try {
       $requestHeaders = $script:PrismHeaders.Clone()
       $requestHeaders["X-Request-Id"] = $correlationId
@@ -187,7 +191,9 @@ function Invoke-PrismAPI {
       $waitSec = $null
       if ($statusCode -eq 429 -and $_.Exception.Response.Headers) {
         try {
-          $retryAfter = $_.Exception.Response.Headers | Where-Object { $_.Key -eq "Retry-After" } | Select-Object -ExpandProperty Value -First 1
+          $retryAfterRaw = $_.Exception.Response.Headers | Where-Object { $_.Key -eq "Retry-After" } | Select-Object -ExpandProperty Value -First 1
+          # PS 7 returns IEnumerable<string> — extract scalar
+          $retryAfter = if ($retryAfterRaw -is [System.Collections.IEnumerable] -and $retryAfterRaw -isnot [string]) { $retryAfterRaw[0] } else { $retryAfterRaw }
           if ($retryAfter) { $waitSec = [int]$retryAfter }
         }
         catch { }
@@ -605,7 +611,7 @@ function Resolve-IsolatedNetwork {
       UUID       = $target.metadata.uuid
       VlanId     = $target.spec.resources.vlan_id
       SubnetType = $target.spec.resources.subnet_type
-      ClusterRef = $target.spec.cluster_reference.uuid
+      ClusterRef = if ($target.spec.cluster_reference) { $target.spec.cluster_reference.uuid } else { $null }
     }
   }
 
@@ -837,14 +843,25 @@ function Set-PrismVMNIC {
       $nicData = if ($raw.data) { $raw.data } else { $raw }
       $nicEtag = if ($nicResult.ETag) { $nicResult.ETag } else { $null }
 
+      # Convert PSCustomObject to hashtable for -Body parameter
+      $nicBody = @{}
+      foreach ($prop in $nicData.PSObject.Properties) {
+        $nicBody[$prop.Name] = $prop.Value
+      }
+
       # Update subnet reference on existing NIC
-      if ($nicData.networkInfo) {
-        $nicData.networkInfo.subnet = @{ extId = $SubnetUUID }
+      if ($nicBody.ContainsKey("networkInfo") -and $nicBody["networkInfo"]) {
+        $netInfo = @{}
+        foreach ($prop in ([PSCustomObject]$nicBody["networkInfo"]).PSObject.Properties) {
+          $netInfo[$prop.Name] = $prop.Value
+        }
+        $netInfo["subnet"] = @{ extId = $SubnetUUID }
+        $nicBody["networkInfo"] = $netInfo
       }
       else {
-        $nicData.networkInfo = @{ subnet = @{ extId = $SubnetUUID } }
+        $nicBody["networkInfo"] = @{ subnet = @{ extId = $SubnetUUID } }
       }
-      $putResult = Invoke-PrismAPI -Method "PUT" -Endpoint "$nicsEndpoint/$nicId" -Body $nicData -IfMatch $nicEtag
+      $putResult = Invoke-PrismAPI -Method "PUT" -Endpoint "$nicsEndpoint/$nicId" -Body $nicBody -IfMatch $nicEtag
       $taskId = _ExtractTaskId $putResult
       if ($taskId) { Wait-PrismTask -TaskUUID $taskId -TimeoutSec 120 }
     }

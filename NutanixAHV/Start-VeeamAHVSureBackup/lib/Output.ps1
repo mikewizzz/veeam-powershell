@@ -52,10 +52,10 @@ function Export-Results {
     PrismCentral     = $PrismCentral
     IsolatedNetwork  = $IsolatedNetwork.Name
     DryRun           = [bool]$DryRun
-    TotalVMs         = ($TestResults | Select-Object -ExpandProperty VMName -Unique).Count
-    TotalTests       = $TestResults.Count
-    PassedTests      = ($TestResults | Where-Object { $_.Passed }).Count
-    FailedTests      = ($TestResults | Where-Object { -not $_.Passed }).Count
+    TotalVMs         = @($TestResults | Select-Object -ExpandProperty VMName -Unique).Count
+    TotalTests       = @($TestResults).Count
+    PassedTests      = @($TestResults | Where-Object { $_.Passed }).Count
+    FailedTests      = @($TestResults | Where-Object { -not $_.Passed }).Count
     Duration         = ((Get-Date) - $script:StartTime).ToString()
     Results          = $TestResults
   }
