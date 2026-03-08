@@ -70,8 +70,8 @@ BeforeAll {
   # Helper to create mock HTTP exceptions with proper Response.StatusCode
   function script:New-MockHttpException {
     param([int]$StatusCode, [string]$Message = "Mock HTTP error $StatusCode")
-    $response = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]$StatusCode)
-    return [Microsoft.PowerShell.Commands.HttpResponseException]::new($Message, $response)
+    $response = New-Object System.Net.Http.HttpResponseMessage([System.Net.HttpStatusCode]$StatusCode)
+    return New-Object Microsoft.PowerShell.Commands.HttpResponseException($Message, $response)
   }
 }
 
