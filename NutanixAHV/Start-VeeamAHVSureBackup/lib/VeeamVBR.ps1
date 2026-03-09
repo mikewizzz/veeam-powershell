@@ -651,7 +651,7 @@ function Get-VBAHVNetworks {
   )
 
   $response = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "clusters/$ClusterId/networks"
-  $networks = @($response.results)
+  $networks = @($response)
   return $networks
 }
 

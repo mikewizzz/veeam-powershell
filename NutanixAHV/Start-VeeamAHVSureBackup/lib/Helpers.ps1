@@ -46,8 +46,9 @@ function _GetTestSummary {
     Calculate test pass/fail/rate summary from results collection (DRY helper)
   #>
   param($TestResults)
-  $total = @($TestResults).Count
-  $passed = @($TestResults | Where-Object { $_.Passed }).Count
+  $items = @($TestResults | Where-Object { $null -ne $_ })
+  $total = @($items).Count
+  $passed = @($items | Where-Object { $_.Passed -eq $true }).Count
   $failed = $total - $passed
   [PSCustomObject]@{
     TotalTests  = $total
