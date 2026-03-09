@@ -1302,7 +1302,7 @@ Describe "Smoke test - script integrity" {
     foreach ($fn in @("Initialize-VBAHVPluginConnection", "Invoke-VBAHVPluginAPI",
         "Get-VBAHVPrismCentrals", "Get-VBAHVPrismCentralVMs", "Get-VBAHVProtectedVMs",
         "Get-VBAHVRestorePointMetadata",
-        "Get-VBAHVJobs", "Get-VBAHVClusters", "Get-VBAHVStorageContainers",
+        "Get-VBAHVJobs", "Get-VBAHVClusters", "Get-VBAHVStorageContainers", "Get-VBAHVNetworks",
         "Start-AHVFullRestore", "Stop-AHVFullRestore")) {
       Get-Command $fn -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty -Because "function $fn should be defined"
     }
@@ -1893,6 +1893,24 @@ Describe "VBAHV Plugin REST API" {
     }
   }
 
+  Context "Get-VBAHVNetworks" {
+    It "calls correct cluster-scoped endpoint" {
+      $script:capturedEndpoint = $null
+      Mock Invoke-VBAHVPluginAPI {
+        $script:capturedEndpoint = $Endpoint
+        return @{
+          results = @(
+            @{ id = "net1"; name = "isolated-lab"; networkAddress = "10.0.99.0" }
+          )
+        }
+      }
+
+      $result = Get-VBAHVNetworks -ClusterId "c1"
+      $script:capturedEndpoint | Should -Be "clusters/c1/networks"
+      @($result).Count | Should -Be 1
+    }
+  }
+
   Context "Start-AHVFullRestore NIC remap" {
     It "uses originalMacAddress (not macAddress) in network adapter remap" {
       $script:capturedBody = $null
@@ -1920,6 +1938,7 @@ Describe "VBAHV Plugin REST API" {
 
       Mock Get-VBAHVClusters { return @(@{ id = "c1"; name = "NX-Cluster-01" }) }
       Mock Get-VBAHVStorageContainers { return @(@{ id = "sc1"; name = "default-container" }) }
+      Mock Get-VBAHVNetworks { return @(@{ id = "plugin-net-1"; name = "isolated-lab" }) }
       Mock Get-PrismVMByName { return @(@{ extId = "vm-uuid-1"; name = "SureBackup_test-vm_123456_abc" }) }
       Mock Set-PrismVMPowerState {}
       Mock Start-Sleep {}
@@ -1934,6 +1953,8 @@ Describe "VBAHV Plugin REST API" {
       $script:capturedBody.networkAdapters[0].originalMacAddress | Should -Be "aa:bb:cc:dd:ee:ff"
       # Should NOT have 'macAddress' key at the top level of the remap
       $script:capturedBody.networkAdapters[0].Keys | Should -Not -Contain "macAddress"
+      # networkId should be from plugin, not Prism UUID
+      $script:capturedBody.networkAdapters[0].value.networkId | Should -Be "plugin-net-1"
     }
 
     It "always sends required fields in restore body" {
@@ -1957,6 +1978,7 @@ Describe "VBAHV Plugin REST API" {
 
       Mock Get-VBAHVClusters { return @(@{ id = "c1"; name = "NX-Cluster-01" }) }
       Mock Get-VBAHVStorageContainers { return @(@{ id = "sc1"; name = "default-container" }) }
+      Mock Get-VBAHVNetworks { return @(@{ id = "plugin-net-1"; name = "isolated-lab" }) }
       Mock Get-PrismVMByName { return @(@{ extId = "vm-uuid-1" }) }
       Mock Set-PrismVMPowerState {}
       Mock Start-Sleep {}
@@ -1991,6 +2013,7 @@ Describe "VBAHV Plugin REST API" {
 
       Mock Get-VBAHVClusters { return @(@{ id = "c1"; name = "NX-Cluster-01" }) }
       Mock Get-VBAHVStorageContainers { return @(@{ id = "sc1"; name = "default-container" }) }
+      Mock Get-VBAHVNetworks { return @(@{ id = "plugin-net-1"; name = "isolated-lab" }) }
       Mock Start-Sleep {}
 
       $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
