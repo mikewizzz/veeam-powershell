@@ -1898,11 +1898,9 @@ Describe "VBAHV Plugin REST API" {
       $script:capturedEndpoint = $null
       Mock Invoke-VBAHVPluginAPI {
         $script:capturedEndpoint = $Endpoint
-        return @{
-          results = @(
-            @{ id = "net1"; name = "isolated-lab"; networkAddress = "10.0.99.0" }
-          )
-        }
+        return @(
+          @{ id = "net1"; name = "isolated-lab"; networkAddress = "10.0.99.0" }
+        )
       }
 
       $result = Get-VBAHVNetworks -ClusterId "c1"
@@ -2063,6 +2061,50 @@ Describe "VBAHV Plugin REST API" {
     It "does not have VBRSession property" {
       $info = _NewRecoveryInfo -OriginalVMName "vm1" -RecoveryVMName "rec1" -Status "Running"
       $info.PSObject.Properties.Name | Should -Not -Contain "VBRSession"
+    }
+  }
+
+  Context "_GetTestSummary" {
+    It "handles single failed result without crash" {
+      $results = @([PSCustomObject]@{ VMName = "vm1"; TestName = "Ping"; Passed = $false; Details = "timeout" })
+      $summary = _GetTestSummary -TestResults $results
+      $summary.TotalTests | Should -Be 1
+      $summary.PassedTests | Should -Be 0
+      $summary.FailedTests | Should -Be 1
+      $summary.PassRate | Should -Be 0
+    }
+
+    It "handles empty list without crash" {
+      $summary = _GetTestSummary -TestResults @()
+      $summary.TotalTests | Should -Be 0
+      $summary.PassedTests | Should -Be 0
+      $summary.FailedTests | Should -Be 0
+      $summary.PassRate | Should -Be 0
+    }
+
+    It "calculates mixed pass/fail correctly" {
+      $results = @(
+        [PSCustomObject]@{ VMName = "vm1"; TestName = "Ping"; Passed = $true; Details = "ok" }
+        [PSCustomObject]@{ VMName = "vm1"; TestName = "Port"; Passed = $false; Details = "refused" }
+        [PSCustomObject]@{ VMName = "vm1"; TestName = "DNS"; Passed = $true; Details = "ok" }
+      )
+      $summary = _GetTestSummary -TestResults $results
+      $summary.TotalTests | Should -Be 3
+      $summary.PassedTests | Should -Be 2
+      $summary.FailedTests | Should -Be 1
+      $summary.PassRate | Should -Be 66.7
+    }
+
+    It "filters null entries from results" {
+      $results = @(
+        [PSCustomObject]@{ VMName = "vm1"; TestName = "Ping"; Passed = $true; Details = "ok" }
+        $null
+        [PSCustomObject]@{ VMName = "vm1"; TestName = "Port"; Passed = $false; Details = "refused" }
+      )
+      $summary = _GetTestSummary -TestResults $results
+      $summary.TotalTests | Should -Be 2
+      $summary.PassedTests | Should -Be 1
+      $summary.FailedTests | Should -Be 1
     }
   }
 }
