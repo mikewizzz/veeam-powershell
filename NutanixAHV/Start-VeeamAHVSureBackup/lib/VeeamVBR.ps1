@@ -636,6 +636,25 @@ function Get-VBAHVStorageContainers {
   return $containers
 }
 
+function Get-VBAHVNetworks {
+  <#
+  .SYNOPSIS
+    List networks for a cluster via VBAHV Plugin API
+  .DESCRIPTION
+    GET /clusters/{id}/networks — retrieves networks available on the
+    specified cluster. Used for resolving networkId in restore operations.
+  .PARAMETER ClusterId
+    The cluster ID from the plugin
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$ClusterId
+  )
+
+  $response = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "clusters/$ClusterId/networks"
+  $networks = @($response.results)
+  return $networks
+}
+
 # ============================================================================
 # Full VM Restore via VBAHV Plugin REST API v9
 # ============================================================================
@@ -778,7 +797,30 @@ function Start-AHVFullRestore {
       }
     }
 
-    # Step 3: Build networkAdapters array using metadata
+    # Step 3a: Resolve isolated network ID from VBAHV Plugin
+    $pluginNetworkId = $null
+    if ($targetClusterId -and $IsolatedNetwork) {
+      $pluginNetworks = Get-VBAHVNetworks -ClusterId $targetClusterId
+      $matchedNetwork = $pluginNetworks | Where-Object { $_.name -eq $IsolatedNetwork.Name } | Select-Object -First 1
+      if ($matchedNetwork) {
+        $pluginNetworkId = $matchedNetwork.id
+        Write-Log "  Isolated network resolved via plugin: $($matchedNetwork.name) (ID: $pluginNetworkId)" -Level "INFO"
+      }
+      else {
+        # Fallback: try matching by Prism UUID in case plugin uses same IDs
+        $matchedNetwork = $pluginNetworks | Where-Object { $_.id -eq $IsolatedNetwork.UUID } | Select-Object -First 1
+        if ($matchedNetwork) {
+          $pluginNetworkId = $matchedNetwork.id
+          Write-Log "  Isolated network resolved via plugin (UUID match): $($matchedNetwork.name)" -Level "INFO"
+        }
+        else {
+          $availableNames = ($pluginNetworks | ForEach-Object { $_.name }) -join ', '
+          throw "Isolated network '$($IsolatedNetwork.Name)' not found in VBAHV plugin for cluster '$targetClusterId'. Available: $availableNames"
+        }
+      }
+    }
+
+    # Step 3b: Build networkAdapters array using metadata
     # v9 schema: originalMacAddress + value { networkId, ipAddresses, macAddress }
     $sourceNICs = $metadata.networkAdapters
     $networkAdapterRemaps = @()
@@ -787,7 +829,7 @@ function Start-AHVFullRestore {
         $remap = @{
           originalMacAddress = if ($nic.macAddress) { $nic.macAddress } else { "" }
           value              = @{
-            networkId   = $IsolatedNetwork.UUID
+            networkId   = $pluginNetworkId
             ipAddresses = @()
           }
         }
