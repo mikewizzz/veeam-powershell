@@ -739,10 +739,42 @@ function Start-AHVFullRestore {
     # Resolve storage container ID
     $storageContainerId = $null
     if ($TargetContainerName -and $targetClusterId) {
+      # User-specified container override
       $containers = Get-VBAHVStorageContainers -ClusterId $targetClusterId
       $targetContainer = $containers | Where-Object { $_.name -imatch [regex]::Escape($TargetContainerName) } | Select-Object -First 1
       if ($targetContainer) {
         $storageContainerId = $targetContainer.id
+        Write-Log "  Storage container (user-specified): $($targetContainer.name)" -Level "INFO"
+      }
+      else {
+        Write-Log "  Storage container '$TargetContainerName' not found on cluster — falling back to auto-detect" -Level "WARNING"
+      }
+    }
+
+    if (-not $storageContainerId -and -not $RestoreToOriginal -and $targetClusterId) {
+      # Auto-detect: try metadata disk container first, then query cluster
+      $metadataContainerId = $null
+      if ($metadata.disks) {
+        $diskWithContainer = @($metadata.disks | Where-Object { $_.storageContainerId }) | Select-Object -First 1
+        if ($diskWithContainer) {
+          $metadataContainerId = $diskWithContainer.storageContainerId
+          Write-Log "  Storage container (from backup metadata): $($diskWithContainer.storageContainerName)" -Level "INFO"
+        }
+      }
+
+      if ($metadataContainerId) {
+        $storageContainerId = $metadataContainerId
+      }
+      else {
+        # Fallback: first container on the target cluster
+        $containers = Get-VBAHVStorageContainers -ClusterId $targetClusterId
+        if (@($containers).Count -gt 0) {
+          $storageContainerId = $containers[0].id
+          Write-Log "  Storage container (cluster default): $($containers[0].name)" -Level "INFO"
+        }
+        else {
+          throw "No storage containers found on cluster '$targetClusterId'. Cannot restore VM disks."
+        }
       }
     }
 

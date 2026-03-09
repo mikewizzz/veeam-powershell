@@ -1918,6 +1918,8 @@ Describe "VBAHV Plugin REST API" {
         return @()
       }
 
+      Mock Get-VBAHVClusters { return @(@{ id = "c1"; name = "NX-Cluster-01" }) }
+      Mock Get-VBAHVStorageContainers { return @(@{ id = "sc1"; name = "default-container" }) }
       Mock Get-PrismVMByName { return @(@{ extId = "vm-uuid-1"; name = "SureBackup_test-vm_123456_abc" }) }
       Mock Set-PrismVMPowerState {}
       Mock Start-Sleep {}
@@ -1953,6 +1955,8 @@ Describe "VBAHV Plugin REST API" {
         return @()
       }
 
+      Mock Get-VBAHVClusters { return @(@{ id = "c1"; name = "NX-Cluster-01" }) }
+      Mock Get-VBAHVStorageContainers { return @(@{ id = "sc1"; name = "default-container" }) }
       Mock Get-PrismVMByName { return @(@{ extId = "vm-uuid-1" }) }
       Mock Set-PrismVMPowerState {}
       Mock Start-Sleep {}
@@ -1985,6 +1989,8 @@ Describe "VBAHV Plugin REST API" {
         return @()
       }
 
+      Mock Get-VBAHVClusters { return @(@{ id = "c1"; name = "NX-Cluster-01" }) }
+      Mock Get-VBAHVStorageContainers { return @(@{ id = "sc1"; name = "default-container" }) }
       Mock Start-Sleep {}
 
       $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
