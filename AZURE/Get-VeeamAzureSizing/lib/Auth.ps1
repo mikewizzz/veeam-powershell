@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # =========================================================================
 # Auth.ps1 - Module checks, Azure authentication, subscription resolution
 # =========================================================================
@@ -139,4 +140,47 @@ function Resolve-Subscriptions {
 
   Write-Log "Using all accessible subscriptions ($($all.Count) found)" -Level "INFO"
   return @($all)
+}
+
+<#
+.SYNOPSIS
+  Validates that the current identity has at least Reader role on target subscriptions.
+.PARAMETER Subs
+  Array of subscription objects to check.
+.NOTES
+  Non-blocking: logs warnings for inaccessible subscriptions but does not terminate.
+  Returns the filtered list of accessible subscriptions.
+#>
+function Test-SubscriptionAccess {
+  param([Parameter(Mandatory=$true)][array]$Subs)
+
+  Write-Log "Pre-flight: validating access to $($Subs.Count) subscription(s)..." -Level "INFO"
+  $accessible = New-Object System.Collections.Generic.List[object]
+
+  foreach ($sub in $Subs) {
+    try {
+      Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
+      # Quick smoke test — list a single resource to confirm read access
+      $null = Get-AzResource -Top 1 -ErrorAction Stop
+      $accessible.Add($sub)
+    } catch {
+      $msg = "$($_.Exception.Message)"
+      if ($msg -like "*AuthorizationFailed*" -or $msg -like "*does not have authorization*") {
+        Write-Log "No read access to subscription '$($sub.Name)' ($($sub.Id)) — skipping" -Level "WARNING"
+      } else {
+        Write-Log "Access check failed for '$($sub.Name)': $msg — skipping" -Level "WARNING"
+      }
+    }
+  }
+
+  if ($accessible.Count -eq 0) {
+    throw "No accessible subscriptions found. Ensure the identity has at least Reader role on target subscriptions."
+  }
+
+  if ($accessible.Count -lt $Subs.Count) {
+    $skipped = $Subs.Count - $accessible.Count
+    Write-Log "$skipped subscription(s) skipped due to insufficient permissions" -Level "WARNING"
+  }
+
+  return @($accessible)
 }

@@ -1,25 +1,31 @@
+# SPDX-License-Identifier: MIT
 # =========================================================================
-# Sizing.ps1 - Veeam Backup for Azure capacity calculations
+# Sizing.ps1 - Veeam Backup for Azure source data aggregation
 # =========================================================================
 
 <#
 .SYNOPSIS
-  Calculates aggregate Veeam sizing recommendations from VM and SQL inventory data.
+  Aggregates source infrastructure totals from VM, SQL, storage, and VMSS inventory data.
 .PARAMETER VmInventory
   Collection of VM inventory objects from Get-VMInventory.
 .PARAMETER SqlInventory
   Hashtable with Databases and ManagedInstances lists from Get-SqlInventory.
+.PARAMETER StorageInventory
+  Hashtable with Files and Blobs lists from Get-StorageInventory.
+.PARAMETER VMSSInventory
+  Collection of VMSS inventory objects from Get-VMSSInventory.
 .OUTPUTS
-  PSCustomObject with totals and recommendations.
+  PSCustomObject with source totals for external sizing calculators.
 #>
 function Get-VeeamSizing {
   param(
     [Parameter(Mandatory=$true)]$VmInventory,
     [Parameter(Mandatory=$true)]$SqlInventory,
-    $StorageInventory = $null
+    $StorageInventory = $null,
+    $VMSSInventory = $null
   )
 
-  Write-ProgressStep -Activity "Calculating Veeam Sizing" -Status "Analyzing capacity requirements..."
+  Write-ProgressStep -Activity "Aggregating Source Totals" -Status "Summarizing discovered infrastructure..."
 
   # Unwrap Generic.List to plain array to avoid Measure-Object type mismatch
   if ($null -eq $VmInventory) {
@@ -31,8 +37,23 @@ function Get-VeeamSizing {
   # VM totals
   $totalVMs = @($VmInventory).Count
   $totalVMStorage = _SafeSum $VmInventory 'TotalProvisionedGB'
-  $totalSnapshotStorage = _SafeSum $VmInventory 'VeeamSnapshotStorageGB'
-  $totalVMRepoStorage = _SafeSum $VmInventory 'VeeamRepositoryGB'
+
+  # VMSS totals
+  $vmssArr = @()
+  if ($null -ne $VMSSInventory) {
+    if ($VMSSInventory -is [System.Collections.IList]) {
+      $vmssArr = @($VMSSInventory.GetEnumerator())
+    } else {
+      $vmssArr = @($VMSSInventory)
+    }
+  }
+  $totalVMSS = $vmssArr.Count
+  $totalVMSSInstances = 0
+  $totalVMSSStorageGB = [double]0
+  foreach ($ss in $vmssArr) {
+    if ($null -ne $ss.Capacity) { $totalVMSSInstances += $ss.Capacity }
+    if ($null -ne $ss.TotalDiskAllInstances) { $totalVMSSStorageGB += $ss.TotalDiskAllInstances }
+  }
 
   # Unwrap SQL collections
   $sqlDbs = if ($null -eq $SqlInventory.Databases) { @() }
@@ -43,13 +64,19 @@ function Get-VeeamSizing {
             elseif ($SqlInventory.ManagedInstances -is [System.Collections.IList]) { @($SqlInventory.ManagedInstances.GetEnumerator()) }
             else { @($SqlInventory.ManagedInstances) }
 
-  # SQL totals
+  # SQL totals — prefer CurrentSizeGB when available, fall back to MaxSizeGB
   $totalSQLDatabases = $sqlDbs.Count
   $totalSQLMIs = $sqlMIs.Count
-  $totalSQLStorage = (_SafeSum $sqlDbs 'MaxSizeGB') +
-                     (_SafeSum $sqlMIs 'StorageSizeGB')
-  $totalSQLRepoStorage = (_SafeSum $sqlDbs 'VeeamRepositoryGB') +
-                         (_SafeSum $sqlMIs 'VeeamRepositoryGB')
+
+  $sqlDbStorage = [double]0
+  foreach ($db in $sqlDbs) {
+    if ($null -ne $db.CurrentSizeGB -and $db.CurrentSizeGB -gt 0) {
+      $sqlDbStorage += $db.CurrentSizeGB
+    } elseif ($null -ne $db.MaxSizeGB) {
+      $sqlDbStorage += $db.MaxSizeGB
+    }
+  }
+  $totalSQLStorage = $sqlDbStorage + (_SafeSum $sqlMIs 'StorageSizeGB')
 
   # Azure Files totals
   $fileShares = @()
@@ -63,36 +90,20 @@ function Get-VeeamSizing {
   $totalFileSharesCount = $fileShares.Count
   $totalFileShareStorageGB = _SafeSum $fileShares 'QuotaGiB'
 
-  # Combined totals (include file shares in source storage)
-  $totalSourceStorage = $totalVMStorage + $totalSQLStorage + $totalFileShareStorageGB
-  $totalRepoStorage = $totalVMRepoStorage + $totalSQLRepoStorage
-
-  # Recommendations
-  $recommendations = @()
-
-  if ($totalVMs -gt 0) {
-    $recommendations += "Deploy Veeam Backup for Azure to protect $totalVMs Azure VMs"
-    $recommendations += "Estimated snapshot storage required: $([math]::Ceiling($totalSnapshotStorage)) GB"
-    $recommendations += "Estimated repository capacity required: $([math]::Ceiling($totalRepoStorage)) GB"
-  }
-
-  if ($totalSQLDatabases -gt 0 -or $totalSQLMIs -gt 0) {
-    $recommendations += "Enable Azure SQL protection in Veeam Backup for Azure for $totalSQLDatabases databases and $totalSQLMIs managed instances"
-  }
+  # Combined source totals (includes VMSS)
+  $totalSourceStorage = $totalVMStorage + $totalVMSSStorageGB + $totalSQLStorage + $totalFileShareStorageGB
 
   return [PSCustomObject]@{
     TotalVMs = $totalVMs
     TotalVMStorageGB = [math]::Round($totalVMStorage, 2)
-    TotalSnapshotStorageGB = [math]::Ceiling($totalSnapshotStorage)
-    TotalVMRepositoryGB = [math]::Ceiling($totalVMRepoStorage)
+    TotalVMSS = $totalVMSS
+    TotalVMSSInstances = $totalVMSSInstances
+    TotalVMSSStorageGB = [math]::Round($totalVMSSStorageGB, 2)
     TotalSQLDatabases = $totalSQLDatabases
     TotalSQLManagedInstances = $totalSQLMIs
     TotalSQLStorageGB = [math]::Round($totalSQLStorage, 2)
-    TotalSQLRepositoryGB = [math]::Ceiling($totalSQLRepoStorage)
     TotalFileShares = $totalFileSharesCount
     TotalFileShareStorageGB = [math]::Round($totalFileShareStorageGB, 2)
     TotalSourceStorageGB = [math]::Round($totalSourceStorage, 2)
-    TotalRepositoryGB = [math]::Ceiling($totalRepoStorage)
-    Recommendations = $recommendations
   }
 }

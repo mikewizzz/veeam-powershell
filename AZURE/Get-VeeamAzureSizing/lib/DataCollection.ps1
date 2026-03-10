@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # =========================================================================
 # DataCollection.ps1 - Azure resource inventory (VMs, SQL, Storage, Backup)
 # =========================================================================
@@ -76,7 +77,24 @@ function Invoke-AzWithRetry {
         throw
       }
       if ($attempt -gt $MaxRetries) { throw }
+      # Parse Retry-After header from 429/503 responses; fall back to exponential backoff
       $sleep = [Math]::Min([int]([Math]::Pow(2, $attempt)), 30)
+      if ($_.Exception.Response -and $_.Exception.Response.Headers) {
+        try {
+          $retryAfter = $_.Exception.Response.Headers | Where-Object { $_.Key -eq 'Retry-After' } | Select-Object -First 1
+          if ($retryAfter -and $retryAfter.Value) {
+            $retryVal = "$($retryAfter.Value)" -replace '[^\d]', ''
+            if ($retryVal -match '^\d+$') {
+              $parsedSleep = [int]$retryVal
+              if ($parsedSleep -gt 0 -and $parsedSleep -le 120) {
+                $sleep = $parsedSleep
+              }
+            }
+          }
+        } catch [System.Exception] {
+          Write-Log "Retry-After header parse failed, using exponential backoff" -Level "INFO"
+        }
+      }
       Write-Log "Retry $attempt/$MaxRetries after ${sleep}s: $($_.Exception.Message)" -Level "WARNING"
       Start-Sleep -Seconds $sleep
     }
@@ -108,9 +126,10 @@ function Get-VMInventory {
       continue
     }
 
-    # Batch-fetch all NICs and PIPs for this subscription to avoid N+1 API calls
+    # Batch-fetch all NICs, PIPs, and NSGs for this subscription to avoid N+1 API calls
     $nicsCache = @{}
     $pipsCache = @{}
+    $nsgsCache = @{}
     try {
       $allNics = @(Get-AzNetworkInterface -ErrorAction Stop)
       foreach ($nic in $allNics) {
@@ -119,6 +138,17 @@ function Get-VMInventory {
       Write-Log "Cached $($allNics.Count) NICs for subscription $($sub.Name)" -Level "INFO"
     } catch {
       Write-Log "Failed to batch-fetch NICs for $($sub.Name), falling back to per-VM: $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Batch-fetch NSGs for exposure analysis
+    try {
+      $allNsgs = @(Get-AzNetworkSecurityGroup -ErrorAction Stop)
+      foreach ($nsg in $allNsgs) {
+        $nsgsCache[$nsg.Id] = $nsg
+      }
+      Write-Log "Cached $($allNsgs.Count) NSGs for subscription $($sub.Name)" -Level "INFO"
+    } catch {
+      Write-Log "Failed to batch-fetch NSGs for $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
     }
 
     # Server-side region filter when specified
@@ -173,15 +203,80 @@ function Get-VMInventory {
         }
       }
 
-      # Disk analysis
+      # NSG exposure analysis — check for dangerous inbound rules
+      $nsgNames = New-Object System.Collections.Generic.List[string]
+      $exposedPorts = New-Object System.Collections.Generic.List[string]
+      $dangerousPorts = @(22, 3389, 1433, 3306, 5432, 445)
+      foreach ($nicRef in $vm.NetworkProfile.NetworkInterfaces) {
+        $nicId = $nicRef.Id
+        if ($nicsCache.ContainsKey($nicId)) {
+          $nic = $nicsCache[$nicId]
+          if ($null -ne $nic.NetworkSecurityGroup -and $null -ne $nic.NetworkSecurityGroup.Id) {
+            $nsgId = $nic.NetworkSecurityGroup.Id
+            if ($nsgsCache.ContainsKey($nsgId)) {
+              $nsg = $nsgsCache[$nsgId]
+              if (-not $nsgNames.Contains($nsg.Name)) { $nsgNames.Add($nsg.Name) }
+              foreach ($rule in $nsg.SecurityRules) {
+                if ($rule.Direction -eq 'Inbound' -and $rule.Access -eq 'Allow') {
+                  $srcAny = ($rule.SourceAddressPrefix -eq '*' -or $rule.SourceAddressPrefix -eq '0.0.0.0/0' -or $rule.SourceAddressPrefix -eq 'Internet')
+                  if ($srcAny) {
+                    $portRange = "$($rule.DestinationPortRange)"
+                    if ($portRange -eq '*') {
+                      if (-not $exposedPorts.Contains('*')) { $exposedPorts.Add('*') }
+                    } else {
+                      foreach ($dp in $dangerousPorts) {
+                        if ($portRange -match "(^|,)$dp($|,|-)" -or $portRange -eq "$dp") {
+                          $portStr = "$dp"
+                          if (-not $exposedPorts.Contains($portStr)) { $exposedPorts.Add($portStr) }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      $nsgDisplay = if ($nsgNames.Count -gt 0) { $nsgNames -join ', ' } else { "None" }
+      $exposureLevel = "Low"
+      if ($exposedPorts.Count -gt 0) {
+        if ($exposedPorts.Contains('*')) { $exposureLevel = "Critical" }
+        else { $exposureLevel = "High" }
+      } elseif ($publicIps.Count -gt 0) {
+        $exposureLevel = "Medium"
+      }
+      $exposedPortsDisplay = if ($exposedPorts.Count -gt 0) { $exposedPorts -join ', ' } else { "None" }
+
+      # Disk analysis — null means size unknown (do NOT fabricate a default)
       $osDiskGB = $vm.StorageProfile.OsDisk.DiskSizeGB
+      $osDiskUnknown = $false
       if ($null -eq $osDiskGB) {
-        Write-Log "VM $($vm.Name) has no reported OS disk size - defaulting to 30 GB" -Level "WARNING"
-        $osDiskGB = 30
+        Write-Log "VM $($vm.Name) has no reported OS disk size — marked as unknown" -Level "WARNING"
+        $osDiskUnknown = $true
+        $osDiskGB = 0
       } else {
         $osDiskGB = [int]$osDiskGB
       }
       $osDiskType = $vm.StorageProfile.OsDisk.ManagedDisk.StorageAccountType
+
+      # Disk encryption status
+      $encryptionType = "None"
+      $diskEncryptionSetId = $vm.StorageProfile.OsDisk.ManagedDisk.DiskEncryptionSetId
+      if ($null -ne $vm.StorageProfile.OsDisk.EncryptionSettings -and $vm.StorageProfile.OsDisk.EncryptionSettings.Enabled -eq $true) {
+        $encryptionType = "ADE"
+      } elseif (-not [string]::IsNullOrWhiteSpace($diskEncryptionSetId)) {
+        $encryptionType = "SSE-CMK"
+      } else {
+        # Platform-managed (SSE-PMK) is always on for managed disks — flag it
+        $encryptionType = "SSE-PMK"
+      }
+
+      # Managed identity
+      $identityType = "None"
+      if ($null -ne $vm.Identity -and $null -ne $vm.Identity.Type) {
+        $identityType = "$($vm.Identity.Type)"
+      }
 
       $dataDisks = @()
       $dataSizeGB = 0
@@ -199,15 +294,7 @@ function Get-VMInventory {
 
       $totalProvGB = $osDiskGB + $dataSizeGB
 
-      # Snapshot sizing: provisioned capacity x (retention / 30) x daily change rate
-      # Deallocated VMs have zero I/O, so change rate = 0
       $powerState = ($vm.PowerState -replace 'PowerState/', '')
-      $effectiveChangeRate = $DailyChangeRate
-      if ($powerState -like "*deallocated*" -or $powerState -like "*stopped*") {
-        $effectiveChangeRate = 0
-      }
-      $snapshotStorageGB = [math]::Ceiling($totalProvGB * ($SnapshotRetentionDays / 30) * $effectiveChangeRate)
-      $repositoryGB = [math]::Ceiling($totalProvGB * $RepositoryOverhead)
 
       # Default zone to N/A for non-zonal VMs
       $zoneValue = if ($vm.Zones -and $vm.Zones.Count -gt 0) { ($vm.Zones -join ',') } else { "N/A" }
@@ -228,12 +315,16 @@ function Get-VMInventory {
         Tags = (ConvertTo-FlatTags $vm.Tags)
         OsDiskType = $osDiskType
         OsDiskSizeGB = $osDiskGB
+        OsDiskUnknownSize = $osDiskUnknown
         DataDiskCount = $vm.StorageProfile.DataDisks.Count
         DataDiskSummary = ($dataDisks -join '; ')
         DataDiskTotalGB = $dataSizeGB
         TotalProvisionedGB = $totalProvGB
-        VeeamSnapshotStorageGB = $snapshotStorageGB
-        VeeamRepositoryGB = $repositoryGB
+        EncryptionType = $encryptionType
+        ManagedIdentity = $identityType
+        NSGs = $nsgDisplay
+        ExposureLevel = $exposureLevel
+        ExposedPorts = $exposedPortsDisplay
       })
     }
   }
@@ -299,8 +390,6 @@ function Get-SqlInventory {
           Write-Log "SQL DB $($db.DatabaseName) on $($srv.ServerName) is Hyperscale with unknown size — requires manual sizing" -Level "WARNING"
         }
 
-        $veeamRepoGB = [math]::Ceiling($sizingGB * $RepositoryOverhead)
-
         $dbs.Add([PSCustomObject]@{
           SubscriptionName = $sub.Name
           SubscriptionId = $sub.Id
@@ -315,7 +404,6 @@ function Get-SqlInventory {
           SizingNote = $hyperscaleNote
           ZoneRedundant = $db.ZoneRedundant
           BackupStorageRedundancy = $db.BackupStorageRedundancy
-          VeeamRepositoryGB = $veeamRepoGB
         })
       }
     }
@@ -326,7 +414,6 @@ function Get-SqlInventory {
       if (-not (Test-RegionMatch $mi.Location)) { continue }
 
       $storageGB = $mi.StorageSizeInGB
-      $veeamRepoGB = [math]::Ceiling($storageGB * $RepositoryOverhead)
 
       $mis.Add([PSCustomObject]@{
         SubscriptionName = $sub.Name
@@ -337,7 +424,6 @@ function Get-SqlInventory {
         VCores = $mi.VCores
         StorageSizeGB = $storageGB
         LicenseType = $mi.LicenseType
-        VeeamRepositoryGB = $veeamRepoGB
       })
     }
   }
@@ -348,6 +434,93 @@ function Get-SqlInventory {
     Databases = $dbs
     ManagedInstances = $mis
   }
+}
+
+#endregion
+
+#region VMSS Inventory
+
+<#
+.SYNOPSIS
+  Discovers Azure Virtual Machine Scale Sets across subscriptions.
+.OUTPUTS
+  Generic List of PSCustomObject with VMSS inventory.
+#>
+function Get-VMSSInventory {
+  Write-ProgressStep -Activity "Discovering VMSS" -Status "Scanning scale sets..."
+
+  $results = New-Object System.Collections.Generic.List[object]
+
+  foreach ($sub in $script:Subs) {
+    Write-Log "Scanning VMSS in subscription: $($sub.Name)" -Level "INFO"
+    try {
+      Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    } catch {
+      Write-Log "Failed to set context for subscription $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+      continue
+    }
+
+    $scaleSets = @(Invoke-AzWithRetry { Get-AzVmss -ErrorAction Stop })
+
+    foreach ($vmss in $scaleSets) {
+      if (-not (Test-RegionMatch $vmss.Location)) { continue }
+
+      $capacity = 0
+      if ($null -ne $vmss.Sku -and $null -ne $vmss.Sku.Capacity) {
+        $capacity = [int]$vmss.Sku.Capacity
+      }
+      $skuName = if ($null -ne $vmss.Sku) { $vmss.Sku.Name } else { "Unknown" }
+
+      # OS disk size per instance
+      $osDiskGB = 0
+      if ($null -ne $vmss.VirtualMachineProfile -and $null -ne $vmss.VirtualMachineProfile.StorageProfile) {
+        $osDiskSize = $vmss.VirtualMachineProfile.StorageProfile.OsDisk.DiskSizeGB
+        if ($null -ne $osDiskSize) { $osDiskGB = [int]$osDiskSize }
+      }
+
+      # Data disks per instance
+      $dataDiskCount = 0
+      $dataDiskGB = 0
+      if ($null -ne $vmss.VirtualMachineProfile -and $null -ne $vmss.VirtualMachineProfile.StorageProfile -and $null -ne $vmss.VirtualMachineProfile.StorageProfile.DataDisks) {
+        $dataDiskCount = $vmss.VirtualMachineProfile.StorageProfile.DataDisks.Count
+        foreach ($d in $vmss.VirtualMachineProfile.StorageProfile.DataDisks) {
+          if ($null -ne $d.DiskSizeGB) { $dataDiskGB += [int]$d.DiskSizeGB }
+        }
+      }
+
+      $totalDiskPerInstance = $osDiskGB + $dataDiskGB
+      $totalDiskAllInstances = $totalDiskPerInstance * $capacity
+
+      # Identity
+      $identityType = "None"
+      if ($null -ne $vmss.Identity -and $null -ne $vmss.Identity.Type) {
+        $identityType = "$($vmss.Identity.Type)"
+      }
+
+      $zoneValue = if ($vmss.Zones -and $vmss.Zones.Count -gt 0) { ($vmss.Zones -join ',') } else { "N/A" }
+
+      $results.Add([PSCustomObject]@{
+        SubscriptionName = $sub.Name
+        SubscriptionId = $sub.Id
+        ResourceGroup = $vmss.ResourceGroupName
+        Name = $vmss.Name
+        Location = $vmss.Location
+        Zone = $zoneValue
+        SkuName = $skuName
+        Capacity = $capacity
+        OsDiskGB = $osDiskGB
+        DataDiskCount = $dataDiskCount
+        DataDiskGB = $dataDiskGB
+        TotalDiskPerInstance = $totalDiskPerInstance
+        TotalDiskAllInstances = $totalDiskAllInstances
+        ManagedIdentity = $identityType
+        Tags = (ConvertTo-FlatTags $vmss.Tags)
+      })
+    }
+  }
+
+  Write-Log "Discovered $($results.Count) Virtual Machine Scale Sets" -Level "SUCCESS"
+  return ,$results
 }
 
 #endregion
@@ -365,6 +538,8 @@ function Get-StorageInventory {
 
   $files = New-Object System.Collections.Generic.List[object]
   $blobs = New-Object System.Collections.Generic.List[object]
+  $storageAccounts = New-Object System.Collections.Generic.List[object]
+  $skippedAccounts = 0
 
   foreach ($sub in $script:Subs) {
     Write-Log "Scanning Storage in subscription: $($sub.Name)" -Level "INFO"
@@ -380,6 +555,31 @@ function Get-StorageInventory {
     foreach ($acct in $accts) {
       if (-not (Test-RegionMatch $acct.Location)) { continue }
 
+      # Storage account security posture
+      $httpsOnly = $acct.EnableHttpsTrafficOnly
+      $minTls = if ($null -ne $acct.MinimumTlsVersion) { "$($acct.MinimumTlsVersion)" } else { "Unknown" }
+      $publicAccess = if ($null -ne $acct.AllowBlobPublicAccess) { $acct.AllowBlobPublicAccess } else { $true }
+      $networkDefault = "Allow"
+      if ($null -ne $acct.NetworkRuleSet -and $null -ne $acct.NetworkRuleSet.DefaultAction) {
+        $networkDefault = "$($acct.NetworkRuleSet.DefaultAction)"
+      }
+      $keyAccess = if ($null -ne $acct.AllowSharedKeyAccess) { $acct.AllowSharedKeyAccess } else { $true }
+
+      $storageAccounts.Add([PSCustomObject]@{
+        SubscriptionName = $sub.Name
+        SubscriptionId = $sub.Id
+        ResourceGroup = $acct.ResourceGroupName
+        StorageAccount = $acct.StorageAccountName
+        Location = $acct.Location
+        Kind = $acct.Kind
+        SkuName = $acct.Sku.Name
+        HttpsOnly = $httpsOnly
+        MinTlsVersion = $minTls
+        AllowBlobPublicAccess = $publicAccess
+        NetworkDefaultAction = $networkDefault
+        AllowSharedKeyAccess = $keyAccess
+      })
+
       # Storage context requires listkeys (Storage Account Contributor or higher)
       # RBAC-only accounts (no key access) produce null context
       $ctx = $null
@@ -389,7 +589,8 @@ function Get-StorageInventory {
         Write-Log "Cannot access storage account key for $($acct.StorageAccountName) — requires Storage Account Key Operator or Contributor role" -Level "WARNING"
       }
       if ($null -eq $ctx) {
-        Write-Log "Skipping $($acct.StorageAccountName) — null context (likely RBAC-only or insufficient permissions)" -Level "WARNING"
+        Write-Log "Skipping $($acct.StorageAccountName) data enumeration — null context (likely RBAC-only or insufficient permissions)" -Level "WARNING"
+        $skippedAccounts++
         continue
       }
 
@@ -471,11 +672,16 @@ function Get-StorageInventory {
     }
   }
 
-  Write-Log "Discovered $($files.Count) Azure File Shares and $($blobs.Count) Blob containers" -Level "SUCCESS"
+  if ($skippedAccounts -gt 0) {
+    Write-Log "$skippedAccounts storage account(s) skipped due to RBAC-only or insufficient permissions" -Level "WARNING"
+  }
+  Write-Log "Discovered $($storageAccounts.Count) storage accounts, $($files.Count) Azure File Shares, and $($blobs.Count) Blob containers" -Level "SUCCESS"
 
   return @{
     Files = $files
     Blobs = $blobs
+    StorageAccounts = $storageAccounts
+    SkippedAccounts = $skippedAccounts
   }
 }
 
@@ -575,6 +781,115 @@ function Get-AzureBackupInventory {
   return @{
     Vaults = $vaultsOut
     Policies = $policiesOut
+  }
+}
+
+#endregion
+
+#region Additional Resource Discovery
+
+<#
+.SYNOPSIS
+  Discovers Key Vaults, AKS clusters, and App Services across subscriptions.
+.OUTPUTS
+  Hashtable with KeyVaults, AKSClusters, and AppServices lists.
+#>
+function Get-AdditionalResources {
+  Write-ProgressStep -Activity "Discovering Additional Resources" -Status "Scanning Key Vaults, AKS, App Services..."
+
+  $keyVaults = New-Object System.Collections.Generic.List[object]
+  $aksClusters = New-Object System.Collections.Generic.List[object]
+  $appServices = New-Object System.Collections.Generic.List[object]
+
+  foreach ($sub in $script:Subs) {
+    Write-Log "Scanning additional resources in subscription: $($sub.Name)" -Level "INFO"
+    try {
+      Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    } catch {
+      Write-Log "Failed to set context for subscription $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+      continue
+    }
+
+    # Key Vaults — use Az.Resources generic query (no extra module dependency)
+    try {
+      $vaults = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.KeyVault/vaults' -ExpandProperties -ErrorAction Stop })
+      foreach ($kv in $vaults) {
+        if (-not (Test-RegionMatch $kv.Location)) { continue }
+        $props = $kv.Properties
+        $softDelete = if ($null -ne $props -and $null -ne $props.enableSoftDelete) { $props.enableSoftDelete } else { $false }
+        $purgeProtection = if ($null -ne $props -and $null -ne $props.enablePurgeProtection) { $props.enablePurgeProtection } else { $false }
+        $keyVaults.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $kv.ResourceGroupName
+          Name = $kv.Name
+          Location = $kv.Location
+          SoftDeleteEnabled = $softDelete
+          PurgeProtection = $purgeProtection
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate Key Vaults in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # AKS Clusters
+    try {
+      $clusters = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.ContainerService/managedClusters' -ExpandProperties -ErrorAction Stop })
+      foreach ($aks in $clusters) {
+        if (-not (Test-RegionMatch $aks.Location)) { continue }
+        $props = $aks.Properties
+        $nodeCount = 0
+        if ($null -ne $props -and $null -ne $props.agentPoolProfiles) {
+          foreach ($pool in $props.agentPoolProfiles) {
+            if ($null -ne $pool.count) { $nodeCount += $pool.count }
+          }
+        }
+        $k8sVersion = if ($null -ne $props -and $null -ne $props.kubernetesVersion) { $props.kubernetesVersion } else { "Unknown" }
+        $aksClusters.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $aks.ResourceGroupName
+          Name = $aks.Name
+          Location = $aks.Location
+          KubernetesVersion = $k8sVersion
+          TotalNodeCount = $nodeCount
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate AKS clusters in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # App Services (Web Apps + Function Apps)
+    try {
+      $webApps = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.Web/sites' -ExpandProperties -ErrorAction Stop })
+      foreach ($app in $webApps) {
+        if (-not (Test-RegionMatch $app.Location)) { continue }
+        $props = $app.Properties
+        $kind = if ($null -ne $app.Kind) { "$($app.Kind)" } else { "app" }
+        $state = if ($null -ne $props -and $null -ne $props.state) { "$($props.state)" } else { "Unknown" }
+        $httpsOnly = if ($null -ne $props -and $null -ne $props.httpsOnly) { $props.httpsOnly } else { $false }
+        $appServices.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $app.ResourceGroupName
+          Name = $app.Name
+          Location = $app.Location
+          Kind = $kind
+          State = $state
+          HttpsOnly = $httpsOnly
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate App Services in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+  }
+
+  Write-Log "Discovered $($keyVaults.Count) Key Vaults, $($aksClusters.Count) AKS clusters, $($appServices.Count) App Services" -Level "SUCCESS"
+
+  return @{
+    KeyVaults = $keyVaults
+    AKSClusters = $aksClusters
+    AppServices = $appServices
   }
 }
 

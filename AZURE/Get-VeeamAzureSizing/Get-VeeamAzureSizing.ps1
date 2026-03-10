@@ -1,16 +1,20 @@
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
-  Veeam Backup for Azure - Discovery & Sizing Tool
+  Veeam Backup for Azure - Discovery & Inventory Tool
 
 .DESCRIPTION
-  Professional assessment tool for Veeam Backup for Azure deployments.
+  Professional discovery tool for Veeam Backup for Azure deployments.
 
   WHAT THIS SCRIPT DOES:
-  1. Inventories Azure VMs, SQL Databases, Managed Instances, Storage Accounts
-  2. Analyzes current Azure Backup configuration (vaults, policies, protected items)
-  3. Calculates Veeam sizing recommendations (snapshot storage, repository capacity)
-  4. Generates professional HTML report with Microsoft Fluent Design System
-  5. Provides executive summary with actionable recommendations
+  1. Inventories Azure VMs, VMSS, SQL Databases, Managed Instances, Storage Accounts
+  2. Discovers Key Vaults, AKS clusters, and App Services
+  3. Analyzes disk encryption, managed identities, and NSG exposure
+  4. Evaluates storage account security posture
+  5. Analyzes current Azure Backup configuration (vaults, policies, protected items)
+  6. Aggregates source infrastructure totals for external sizing calculators
+  7. Generates professional HTML report with Microsoft Fluent Design System
+  8. Provides executive summary with actionable recommendations
 
   QUICK START:
   .\Get-VeeamAzureSizing.ps1
@@ -25,7 +29,7 @@
   One or more subscription IDs or names. Default = all accessible subscriptions.
 
 .PARAMETER TenantId
-  Azure AD tenant ID (optional). If omitted, uses current/default tenant.
+  Entra ID tenant ID (optional). If omitted, uses current/default tenant.
 
 .PARAMETER Region
   Filter resources by Azure region (e.g., "eastus", "westeurope"). Case-insensitive.
@@ -52,15 +56,6 @@
 .PARAMETER CalculateBlobSizes
   Enumerate all blobs to calculate container sizes. Warning: Can be slow on large storage accounts.
 
-.PARAMETER SnapshotRetentionDays
-  Snapshot retention for Veeam sizing (default: 14 days).
-
-.PARAMETER DailyChangeRate
-  Daily change rate for snapshot sizing (default: 0.05 = 5%). Range: 0.01-1.0.
-
-.PARAMETER RepositoryOverhead
-  Repository overhead multiplier for Veeam sizing (default: 1.2 = 20% overhead).
-
 .PARAMETER OutputPath
   Output folder for reports and CSVs (default: ./VeeamAzureSizing_[timestamp]).
 
@@ -83,14 +78,17 @@
   # Use managed identity (Azure VM/container)
 
 .EXAMPLE
-  .\Get-VeeamAzureSizing.ps1 -TagFilter @{"Environment"="Prod"} -SnapshotRetentionDays 30
-  # Filter by tags and customize Veeam sizing parameters
+  .\Get-VeeamAzureSizing.ps1 -TagFilter @{"Environment"="Prod"}
+  # Filter by tags
 
 .NOTES
-  Version: 3.0.0
+  Version: 5.0.0
   Author: Community Contributors
   Requires: PowerShell 7.x (recommended) or 5.1
   Modules: Az.Accounts, Az.Resources, Az.Compute, Az.Network, Az.Sql, Az.Storage, Az.RecoveryServices
+
+  DISCLAIMER: This is a community-maintained tool, not an official Veeam product.
+  Source data collected here is intended for use with external Veeam sizing calculators.
 #>
 
 [CmdletBinding()]
@@ -110,14 +108,6 @@ param(
 
   # Discovery options
   [switch]$CalculateBlobSizes,
-
-  # Veeam sizing parameters
-  [ValidateRange(1,365)]
-  [int]$SnapshotRetentionDays = 14,
-  [ValidateRange(0.01,1.0)]
-  [double]$DailyChangeRate = 0.05,
-  [ValidateRange(1.0,3.0)]
-  [double]$RepositoryOverhead = 1.2,
 
   # Output
   [string]$OutputPath,
@@ -152,15 +142,19 @@ if (-not (Test-Path $OutputPath)) {
 }
 
 # Output file paths
-$script:vmCsv     = Join-Path $OutputPath "azure_vms.csv"
-$script:sqlDbCsv  = Join-Path $OutputPath "azure_sql_databases.csv"
-$script:sqlMiCsv  = Join-Path $OutputPath "azure_sql_managed_instances.csv"
-$script:filesCsv  = Join-Path $OutputPath "azure_files.csv"
-$script:blobCsv   = Join-Path $OutputPath "azure_blob.csv"
-$script:vaultsCsv = Join-Path $OutputPath "azure_backup_vaults.csv"
-$script:polCsv    = Join-Path $OutputPath "azure_backup_policies.csv"
-$script:sizingCsv = Join-Path $OutputPath "veeam_sizing_summary.csv"
-$script:logCsv    = Join-Path $OutputPath "execution_log.csv"
+$script:vmCsv          = Join-Path $OutputPath "azure_vms.csv"
+$script:vmssCsv        = Join-Path $OutputPath "azure_vmss.csv"
+$script:sqlDbCsv       = Join-Path $OutputPath "azure_sql_databases.csv"
+$script:sqlMiCsv       = Join-Path $OutputPath "azure_sql_managed_instances.csv"
+$script:filesCsv       = Join-Path $OutputPath "azure_files.csv"
+$script:blobCsv        = Join-Path $OutputPath "azure_blob.csv"
+$script:storageAcctsCsv = Join-Path $OutputPath "azure_storage_accounts.csv"
+$script:vaultsCsv      = Join-Path $OutputPath "azure_backup_vaults.csv"
+$script:polCsv         = Join-Path $OutputPath "azure_backup_policies.csv"
+$script:kvCsv          = Join-Path $OutputPath "azure_key_vaults.csv"
+$script:aksCsv         = Join-Path $OutputPath "azure_aks_clusters.csv"
+$script:appSvcCsv      = Join-Path $OutputPath "azure_app_services.csv"
+$script:logCsv         = Join-Path $OutputPath "execution_log.csv"
 
 # =============================
 # Load Function Libraries
@@ -184,44 +178,66 @@ foreach ($lib in $requiredLibs) {
   . $libFile
 }
 
-# Set total progress steps dynamically (auth + resolve + 4 inventory + sizing + export + optional html + optional zip)
-$script:TotalSteps = 8
+# Set total progress steps dynamically
+# auth + resolve + access-check + 6 inventory + sizing + export + optional html + optional zip
+$script:TotalSteps = 12
 if (-not $SkipHTML) { $script:TotalSteps++ }
 if (-not $SkipZip)  { $script:TotalSteps++ }
+
+# =============================
+# Filter metadata for audit trail
+# =============================
+$filterMetadata = @{
+  RunTimestamp     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+  Region          = if ($Region) { $Region } else { "All" }
+  TagFilter       = if ($TagFilter) { ($TagFilter.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ' } else { "None" }
+  Subscriptions   = if ($Subscriptions) { $Subscriptions -join ', ' } else { "All accessible" }
+  CalculateBlobSizes = [bool]$CalculateBlobSizes
+  PowerShellVersion = "$($PSVersionTable.PSVersion)"
+}
 
 # =============================
 # Main Execution
 # =============================
 try {
-  Write-Log "========== Veeam Backup for Azure - Sizing Assessment ==========" -Level "SUCCESS"
+  Write-Log "========== Veeam Backup for Azure - Discovery Assessment ==========" -Level "SUCCESS"
   Write-Log "Output folder: $OutputPath" -Level "INFO"
+  if ($Region) { Write-Log "Region filter: $Region" -Level "INFO" }
+  if ($TagFilter) { Write-Log "Tag filter: $($filterMetadata.TagFilter)" -Level "INFO" }
 
   # Authenticate and resolve scope
   Initialize-RequiredModules
   Connect-AzureModern
   $script:Subs = Resolve-Subscriptions
 
+  # Pre-flight permission check
+  $script:Subs = Test-SubscriptionAccess -Subs $script:Subs
+
   # Discovery
-  $vmInv  = Get-VMInventory
-  $sqlInv = Get-SqlInventory
-  $stInv  = Get-StorageInventory
-  $abInv  = Get-AzureBackupInventory
+  $vmInv    = Get-VMInventory
+  $vmssInv  = Get-VMSSInventory
+  $sqlInv   = Get-SqlInventory
+  $stInv    = Get-StorageInventory
+  $abInv    = Get-AzureBackupInventory
+  $addlInv  = Get-AdditionalResources
 
   # Sizing
-  $veeamSizing = Get-VeeamSizing -VmInventory $vmInv -SqlInventory $sqlInv -StorageInventory $stInv
+  $veeamSizing = Get-VeeamSizing -VmInventory $vmInv -SqlInventory $sqlInv `
+    -StorageInventory $stInv -VMSSInventory $vmssInv
 
   # Exports
   Export-InventoryData -VmInventory $vmInv -SqlInventory $sqlInv `
-    -StorageInventory $stInv -AzureBackupInventory $abInv -VeeamSizing $veeamSizing
+    -StorageInventory $stInv -AzureBackupInventory $abInv -VeeamSizing $veeamSizing `
+    -VMSSInventory $vmssInv -AdditionalResources $addlInv -FilterMetadata $filterMetadata
 
   $htmlPath = $null
   if (-not $SkipHTML) {
     $htmlPath = New-HtmlReport -VmInventory $vmInv -SqlInventory $sqlInv `
       -StorageInventory $stInv -AzureBackupInventory $abInv `
       -VeeamSizing $veeamSizing -OutputPath $OutputPath `
-      -SnapshotRetentionDays $SnapshotRetentionDays `
-      -RepositoryOverhead $RepositoryOverhead `
-      -Subscriptions $script:Subs -StartTime $script:StartTime
+      -Subscriptions $script:Subs -StartTime $script:StartTime `
+      -VMSSInventory $vmssInv -AdditionalResources $addlInv `
+      -FilterMetadata $filterMetadata
   }
 
   $zipPath = $null
@@ -232,18 +248,31 @@ try {
   # Console summary
   Write-Progress -Activity "Veeam Azure Sizing" -Completed
 
+  # Counts for additional resources
+  $kvCount = if ($null -ne $addlInv.KeyVaults) { @($addlInv.KeyVaults).Count } else { 0 }
+  $aksCount = if ($null -ne $addlInv.AKSClusters) { @($addlInv.AKSClusters).Count } else { 0 }
+  $appSvcCount = if ($null -ne $addlInv.AppServices) { @($addlInv.AppServices).Count } else { 0 }
+
   Write-Host "`n========== Assessment Complete ==========" -ForegroundColor Green
   Write-Host "`nDiscovered Resources:" -ForegroundColor Cyan
   Write-Host "  - Azure VMs: $($veeamSizing.TotalVMs)" -ForegroundColor White
+  Write-Host "  - VM Storage: $([math]::Round($veeamSizing.TotalVMStorageGB, 0)) GB" -ForegroundColor White
+  Write-Host "  - VMSS Scale Sets: $($veeamSizing.TotalVMSS) ($($veeamSizing.TotalVMSSInstances) instances)" -ForegroundColor White
   Write-Host "  - SQL Databases: $($veeamSizing.TotalSQLDatabases)" -ForegroundColor White
   Write-Host "  - SQL Managed Instances: $($veeamSizing.TotalSQLManagedInstances)" -ForegroundColor White
-  Write-Host "  - Azure File Shares: $(if ($stInv.Files -is [System.Collections.IList]) { $stInv.Files.Count } else { @($stInv.Files).Count })" -ForegroundColor White
+  Write-Host "  - SQL Storage: $([math]::Round($veeamSizing.TotalSQLStorageGB, 0)) GB" -ForegroundColor White
+  Write-Host "  - Azure File Shares: $($veeamSizing.TotalFileShares)" -ForegroundColor White
   Write-Host "  - Blob Containers: $(if ($stInv.Blobs -is [System.Collections.IList]) { $stInv.Blobs.Count } else { @($stInv.Blobs).Count })" -ForegroundColor White
+  Write-Host "  - Storage Accounts: $(if ($stInv.StorageAccounts -is [System.Collections.IList]) { $stInv.StorageAccounts.Count } else { @($stInv.StorageAccounts).Count })" -ForegroundColor White
   Write-Host "  - Recovery Services Vaults: $(if ($abInv.Vaults -is [System.Collections.IList]) { $abInv.Vaults.Count } else { @($abInv.Vaults).Count })" -ForegroundColor White
+  Write-Host "  - Key Vaults: $kvCount" -ForegroundColor White
+  Write-Host "  - AKS Clusters: $aksCount" -ForegroundColor White
+  Write-Host "  - App Services: $appSvcCount" -ForegroundColor White
+  Write-Host "  - Total Source Storage: $([math]::Round($veeamSizing.TotalSourceStorageGB, 0)) GB" -ForegroundColor Green
 
-  Write-Host "`nVeeam Sizing Recommendations:" -ForegroundColor Cyan
-  Write-Host "  - Snapshot Storage: $([math]::Ceiling($veeamSizing.TotalSnapshotStorageGB)) GB ($([math]::Round($veeamSizing.TotalSnapshotStorageGB / 1024, 2)) TB)" -ForegroundColor Green
-  Write-Host "  - Repository Capacity: $([math]::Ceiling($veeamSizing.TotalRepositoryGB)) GB ($([math]::Round($veeamSizing.TotalRepositoryGB / 1024, 2)) TB)" -ForegroundColor Green
+  if ($stInv.SkippedAccounts -gt 0) {
+    Write-Host "`n  Note: $($stInv.SkippedAccounts) storage account(s) skipped (RBAC-only/insufficient access)" -ForegroundColor Yellow
+  }
 
   Write-Host "`nOutput Files:" -ForegroundColor Cyan
   if ($htmlPath)  { Write-Host "  - HTML Report: $htmlPath" -ForegroundColor White }
