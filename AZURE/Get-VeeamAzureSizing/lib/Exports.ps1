@@ -38,31 +38,33 @@ function Export-InventoryData {
   Write-ProgressStep -Activity "Exporting Data" -Status "Writing CSV files..."
 
   # Helper: export collection to CSV, skip if empty to avoid header-less files
-  $csvExports = @(
-    @{ Data = $VmInventory;                       Path = $script:vmCsv }
-    @{ Data = $SqlInventory.Databases;            Path = $script:sqlDbCsv }
-    @{ Data = $SqlInventory.ManagedInstances;     Path = $script:sqlMiCsv }
-    @{ Data = $StorageInventory.Files;            Path = $script:filesCsv }
-    @{ Data = $StorageInventory.Blobs;            Path = $script:blobCsv }
-    @{ Data = $StorageInventory.StorageAccounts;  Path = $script:storageAcctsCsv }
-    @{ Data = $AzureBackupInventory.Vaults;       Path = $script:vaultsCsv }
-    @{ Data = $AzureBackupInventory.Policies;     Path = $script:polCsv }
-    @{ Data = $VMSSInventory;                     Path = $script:vmssCsv }
-  )
+  $csvExports = New-Object System.Collections.Generic.List[object]
+  $csvExports.Add(@{ Data = $VmInventory;                       Path = $script:vmCsv })
+  $csvExports.Add(@{ Data = $SqlInventory.Databases;            Path = $script:sqlDbCsv })
+  $csvExports.Add(@{ Data = $SqlInventory.ManagedInstances;     Path = $script:sqlMiCsv })
+  $csvExports.Add(@{ Data = $StorageInventory.Files;            Path = $script:filesCsv })
+  $csvExports.Add(@{ Data = $StorageInventory.Blobs;            Path = $script:blobCsv })
+  $csvExports.Add(@{ Data = $StorageInventory.StorageAccounts;  Path = $script:storageAcctsCsv })
+  $csvExports.Add(@{ Data = $AzureBackupInventory.Vaults;       Path = $script:vaultsCsv })
+  $csvExports.Add(@{ Data = $AzureBackupInventory.Policies;     Path = $script:polCsv })
+  $csvExports.Add(@{ Data = $VMSSInventory;                     Path = $script:vmssCsv })
 
   # Additional resource exports
   if ($null -ne $AdditionalResources) {
-    $csvExports += @(
-      @{ Data = $AdditionalResources.KeyVaults;   Path = $script:kvCsv }
-      @{ Data = $AdditionalResources.AKSClusters; Path = $script:aksCsv }
-      @{ Data = $AdditionalResources.AppServices;  Path = $script:appSvcCsv }
-    )
+    $csvExports.Add(@{ Data = $AdditionalResources.KeyVaults;   Path = $script:kvCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.AKSClusters; Path = $script:aksCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.AppServices; Path = $script:appSvcCsv })
   }
 
   foreach ($export in $csvExports) {
     $collection = $export.Data
     if ($null -eq $collection) { continue }
-    $items = @($collection)
+    # Unwrap Generic.List to plain array
+    if ($collection -is [System.Collections.IList]) {
+      $items = @($collection.GetEnumerator())
+    } else {
+      $items = @($collection)
+    }
     if ($items.Count -eq 0) { continue }
     $items | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $export.Path
   }
