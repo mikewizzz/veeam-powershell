@@ -44,20 +44,21 @@ function Export-Results {
   $logPath = Join-Path $OutputPath "SureBackup_ExecutionLog.csv"
   $script:LogEntries | Export-Csv -Path $logPath -NoTypeInformation -Encoding UTF8
 
-  # Summary JSON
+  # Summary JSON — convert Generic.List to plain array for PS 5.1 ConvertTo-Json compatibility
   $summaryPath = Join-Path $OutputPath "SureBackup_Summary.json"
+  $safeResults = @($TestResults | Where-Object { $null -ne $_ })
   $summary = [PSCustomObject]@{
     Timestamp        = Get-Date -Format "o"
     VBRServer        = $VBRServer
     PrismCentral     = $PrismCentral
     IsolatedNetwork  = $IsolatedNetwork.Name
     DryRun           = [bool]$DryRun
-    TotalVMs         = @($TestResults | Select-Object -ExpandProperty VMName -Unique).Count
-    TotalTests       = @($TestResults).Count
-    PassedTests      = @($TestResults | Where-Object { $_.Passed }).Count
-    FailedTests      = @($TestResults | Where-Object { -not $_.Passed }).Count
+    TotalVMs         = @($safeResults | Select-Object -ExpandProperty VMName -Unique).Count
+    TotalTests       = $safeResults.Count
+    PassedTests      = @($safeResults | Where-Object { $_.Passed }).Count
+    FailedTests      = @($safeResults | Where-Object { -not $_.Passed }).Count
     Duration         = ((Get-Date) - $script:StartTime).ToString()
-    Results          = $TestResults
+    Results          = $safeResults
   }
   $summary | ConvertTo-Json -Depth 10 | Out-File -FilePath $summaryPath -Encoding UTF8
 

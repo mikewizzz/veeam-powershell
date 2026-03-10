@@ -991,8 +991,13 @@ function Start-AHVFullRestore {
     while ($elapsed -lt $discoveryTimeout) {
       Start-Sleep -Seconds $discoveryInterval
       $elapsed += $discoveryInterval
-      $recoveredVM = Get-PrismVMByName -Name $recoveryName
-      if ($recoveredVM) { break }
+      try {
+        $recoveredVM = Get-PrismVMByName -Name $recoveryName
+        if ($recoveredVM) { break }
+      }
+      catch {
+        Write-Log "  VM discovery API error (${elapsed}s/${discoveryTimeout}s): $($_.Exception.Message)" -Level "WARNING"
+      }
     }
 
     if (-not $recoveredVM) {

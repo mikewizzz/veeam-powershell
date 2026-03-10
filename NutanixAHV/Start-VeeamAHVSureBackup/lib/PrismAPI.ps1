@@ -226,6 +226,23 @@ function Test-PrismConnection {
       $result = Invoke-PrismAPI -Method "GET" -Endpoint "$($script:PrismEndpoints.Clusters)?`$limit=1"
       $raw = if ($result.Body) { $result.Body } else { $result }
       $clusterCount = if ($raw.metadata.totalAvailableResults) { $raw.metadata.totalAvailableResults } else { ($raw.data | Measure-Object).Count }
+
+      # Probe vmm namespace — auto-downgrade to v3 if unavailable
+      try {
+        Invoke-PrismAPI -Method "GET" -Endpoint "vmm/v4.0/ahv/config/vms?`$limit=1" -RetryCount 1
+        Write-Log "Prism v4 vmm namespace available" -Level "INFO"
+      }
+      catch {
+        Write-Log "Prism v4 vmm namespace unavailable — auto-downgrading to v3 API" -Level "WARNING"
+        Set-Variable -Name PrismApiVersion -Value "v3" -Scope Script
+        $script:PrismBaseUrl = "$($script:PrismOrigin)/api/nutanix/v3"
+        $script:PrismEndpoints = @{
+          VMs      = "vms"
+          Subnets  = "subnets"
+          Clusters = "clusters"
+          Tasks    = "tasks"
+        }
+      }
     }
     else {
       $result = Invoke-PrismAPI -Method "POST" -Endpoint "clusters/list" -Body @{ kind = "cluster"; length = 1 }
