@@ -154,15 +154,16 @@ function Resolve-Subscriptions {
 function Test-SubscriptionAccess {
   param([Parameter(Mandatory=$true)][array]$Subs)
 
-  Write-Log "Pre-flight: validating access to $($Subs.Count) subscription(s)..." -Level "INFO"
-  $accessible = New-Object System.Collections.Generic.List[object]
+  Write-ProgressStep -Activity "Validating Access" -Status "Checking subscription permissions..."
+
+  $accessible = @()
 
   foreach ($sub in $Subs) {
     try {
       Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
-      # Quick smoke test — list a single resource to confirm read access
-      $null = Get-AzResource -Top 1 -ErrorAction Stop
-      $accessible.Add($sub)
+      # Quick smoke test — list resource groups (lightweight, requires Reader)
+      $null = @(Get-AzResourceGroup -ErrorAction Stop)
+      $accessible += $sub
     } catch {
       $msg = "$($_.Exception.Message)"
       if ($msg -like "*AuthorizationFailed*" -or $msg -like "*does not have authorization*") {
@@ -182,5 +183,5 @@ function Test-SubscriptionAccess {
     Write-Log "$skipped subscription(s) skipped due to insufficient permissions" -Level "WARNING"
   }
 
-  return @($accessible)
+  return $accessible
 }

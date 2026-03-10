@@ -240,6 +240,9 @@ try {
       -FilterMetadata $filterMetadata
   }
 
+  # Write log before ZIP (ZIP deletes output folder)
+  Export-LogData
+
   $zipPath = $null
   if (-not $SkipZip) {
     $zipPath = New-OutputArchive
@@ -248,10 +251,14 @@ try {
   # Console summary
   Write-Progress -Activity "Veeam Azure Sizing" -Completed
 
-  # Counts for additional resources
-  $kvCount = if ($null -ne $addlInv.KeyVaults) { @($addlInv.KeyVaults).Count } else { 0 }
-  $aksCount = if ($null -ne $addlInv.AKSClusters) { @($addlInv.AKSClusters).Count } else { 0 }
-  $appSvcCount = if ($null -ne $addlInv.AppServices) { @($addlInv.AppServices).Count } else { 0 }
+  # Safe count helper for Generic.List or array
+  $blobCount = if ($null -ne $stInv.Blobs -and $stInv.Blobs -is [System.Collections.IList]) { $stInv.Blobs.Count } else { 0 }
+  $saCount = if ($null -ne $stInv.StorageAccounts -and $stInv.StorageAccounts -is [System.Collections.IList]) { $stInv.StorageAccounts.Count } else { 0 }
+  $rvCount = if ($null -ne $abInv.Vaults -and $abInv.Vaults -is [System.Collections.IList]) { $abInv.Vaults.Count } else { 0 }
+  $kvCount = if ($null -ne $addlInv.KeyVaults -and $addlInv.KeyVaults -is [System.Collections.IList]) { $addlInv.KeyVaults.Count } else { 0 }
+  $aksCount = if ($null -ne $addlInv.AKSClusters -and $addlInv.AKSClusters -is [System.Collections.IList]) { $addlInv.AKSClusters.Count } else { 0 }
+  $appSvcCount = if ($null -ne $addlInv.AppServices -and $addlInv.AppServices -is [System.Collections.IList]) { $addlInv.AppServices.Count } else { 0 }
+  $skippedSA = if ($null -ne $stInv.SkippedAccounts) { $stInv.SkippedAccounts } else { 0 }
 
   Write-Host "`n========== Assessment Complete ==========" -ForegroundColor Green
   Write-Host "`nDiscovered Resources:" -ForegroundColor Cyan
@@ -262,16 +269,16 @@ try {
   Write-Host "  - SQL Managed Instances: $($veeamSizing.TotalSQLManagedInstances)" -ForegroundColor White
   Write-Host "  - SQL Storage: $([math]::Round($veeamSizing.TotalSQLStorageGB, 0)) GB" -ForegroundColor White
   Write-Host "  - Azure File Shares: $($veeamSizing.TotalFileShares)" -ForegroundColor White
-  Write-Host "  - Blob Containers: $(if ($stInv.Blobs -is [System.Collections.IList]) { $stInv.Blobs.Count } else { @($stInv.Blobs).Count })" -ForegroundColor White
-  Write-Host "  - Storage Accounts: $(if ($stInv.StorageAccounts -is [System.Collections.IList]) { $stInv.StorageAccounts.Count } else { @($stInv.StorageAccounts).Count })" -ForegroundColor White
-  Write-Host "  - Recovery Services Vaults: $(if ($abInv.Vaults -is [System.Collections.IList]) { $abInv.Vaults.Count } else { @($abInv.Vaults).Count })" -ForegroundColor White
+  Write-Host "  - Blob Containers: $blobCount" -ForegroundColor White
+  Write-Host "  - Storage Accounts: $saCount" -ForegroundColor White
+  Write-Host "  - Recovery Services Vaults: $rvCount" -ForegroundColor White
   Write-Host "  - Key Vaults: $kvCount" -ForegroundColor White
   Write-Host "  - AKS Clusters: $aksCount" -ForegroundColor White
   Write-Host "  - App Services: $appSvcCount" -ForegroundColor White
   Write-Host "  - Total Source Storage: $([math]::Round($veeamSizing.TotalSourceStorageGB, 0)) GB" -ForegroundColor Green
 
-  if ($stInv.SkippedAccounts -gt 0) {
-    Write-Host "`n  Note: $($stInv.SkippedAccounts) storage account(s) skipped (RBAC-only/insufficient access)" -ForegroundColor Yellow
+  if ($skippedSA -gt 0) {
+    Write-Host "`n  Note: $skippedSA storage account(s) skipped (RBAC-only/insufficient access)" -ForegroundColor Yellow
   }
 
   Write-Host "`nOutput Files:" -ForegroundColor Cyan
@@ -294,6 +301,7 @@ try {
   Write-Host "`nAssessment failed. Check execution_log.csv for details." -ForegroundColor Red
   exit 1
 } finally {
-  Export-LogData
+  # Log is already exported before ZIP in the try block; only export here on error path
+  if (Test-Path $OutputPath) { Export-LogData }
   Write-Progress -Activity "Veeam Azure Sizing" -Completed
 }
