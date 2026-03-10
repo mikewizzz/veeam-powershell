@@ -106,12 +106,30 @@ $groups = @{ 1 = @("dc01","dns01"); 2 = @("sql01"); 3 = @("app01","web01") }
 | `SureBackup_Summary.json` | Machine-readable summary |
 | `VeeamAHVSureBackup_*.zip` | ZIP archive of all outputs |
 
+## Isolated Network Requirements
+
+The isolated network **must be a VLAN (basic) subnet created on the Prism Element cluster**, not a VPC overlay subnet managed only in Prism Central.
+
+The Veeam AHV Plugin performs VM restores through the Prism Element v2 API at the cluster level. PE v2 only has visibility into VLAN-based subnets that are directly attached to the cluster — it does not have access to VPC overlay subnets, which are managed at the Prism Central layer. If the isolated network is an overlay subnet, the restore will fail because PE cannot resolve the network UUID during VM creation.
+
+**Correct setup:**
+- Type: **VLAN** (basic)
+- Cluster: assigned to the target PE cluster (e.g., `nutanixce-01`)
+- External connectivity: **None** (keeps it isolated from production)
+- DHCP: optional but recommended for automated boot testing
+
+**Will not work:**
+- Overlay subnets inside a VPC (visible in Prism Central but not on Prism Element)
+
+The script automatically cross-validates the isolated network against PE v2 before submitting the restore and will surface a clear error if the network is not visible at the cluster level.
+
 ## Troubleshooting
 
 | Error | Fix |
 |---|---|
 | "No AHV backup jobs found" | Verify jobs exist in VBR and credentials have API access |
 | "Isolated network not found" | Create a subnet with `isolated`/`surebackup`/`lab` in the name, or use `-IsolatedNetworkName` |
+| "CRITICAL: Isolated network not found on Prism Element v2 API" | The subnet is likely a VPC overlay — recreate it as a VLAN subnet on the PE cluster (see [Isolated Network Requirements](#isolated-network-requirements)) |
 | "VM did not obtain IP" | Increase `-TestBootTimeoutSec`, ensure DHCP on isolated VLAN, verify NGT installed |
 | Network tests fail on static IP VMs | Automatic — VMs with IPs outside the isolated subnet CIDR are detected and network tests (ping/port/DNS/HTTP) are skipped. Backup integrity is verified via heartbeat/NGT. For full testing, configure DHCP or use `-TestCustomScript` |
 | "Prism Central connection failed" | Check hostname/port, try `-SkipCertificateCheck`, verify admin role |

@@ -718,6 +718,15 @@ function Start-AHVFullRestore {
     Write-Log "  Retrieving restore point metadata..." -Level "INFO"
     $metadata = Get-VBAHVRestorePointMetadata -RestorePointId $pluginRPId
 
+    # Dump raw metadata network adapters for field name verification
+    if ($metadata.networkAdapters) {
+      Write-Log "  Metadata networkAdapters (raw):" -Level "INFO"
+      foreach ($nic in @($metadata.networkAdapters)) {
+        $nicJson = $nic | ConvertTo-Json -Depth 5 -Compress
+        Write-Log "    $nicJson" -Level "INFO"
+      }
+    }
+
     # Always resolve cluster through plugin's current cluster list
     $targetClusterId = $null
     $clusters = Get-VBAHVClusters
@@ -838,6 +847,24 @@ function Start-AHVFullRestore {
       }
     }
 
+    # Cross-validate: does this network exist on Prism Element (PE v2)?
+    # Veeam internally uses NutanixV2Client.CreateVmAsync which calls PE, not PC
+    if ($IsolatedNetwork) {
+      $peNetwork = Resolve-PENetworkUUID -NetworkName $IsolatedNetwork.Name -PrismCentralUUID $IsolatedNetwork.UUID
+      if ($peNetwork) {
+        Write-Log "  PE v2 network validated: $($peNetwork.Name) (UUID: $($peNetwork.UUID), matched by: $($peNetwork.MatchBy))" -Level "INFO"
+        if ($peNetwork.UUID -ne $pluginNetworkId) {
+          Write-Log "  WARNING: Plugin network ID '$pluginNetworkId' differs from PE UUID '$($peNetwork.UUID)'" -Level "WARNING"
+          Write-Log "  Veeam uses PE v2 API internally — this UUID mismatch may cause restore failure" -Level "WARNING"
+        }
+      }
+      else {
+        Write-Log "  CRITICAL: Isolated network '$($IsolatedNetwork.Name)' not found on Prism Element v2 API" -Level "ERROR"
+        Write-Log "  Veeam uses NutanixV2Client.CreateVmAsync internally — network must exist at PE level" -Level "ERROR"
+        Write-Log "  Create the isolated network directly on Prism Element, not just Prism Central" -Level "ERROR"
+      }
+    }
+
     # Step 3b: Build networkAdapters array using metadata
     # v9 schema: originalMacAddress + value { networkId, ipAddresses, macAddress }
     $networkAdapterRemaps = @()
@@ -850,6 +877,7 @@ function Start-AHVFullRestore {
             value              = @{
               networkId   = $pluginNetworkId
               ipAddresses = @()
+              macAddress  = $null
             }
           }
           $networkAdapterRemaps += $remap
@@ -885,6 +913,13 @@ function Start-AHVFullRestore {
 
     if ($networkAdapterRemaps.Count -gt 0) {
       $restoreBody.networkAdapters = $networkAdapterRemaps
+    }
+
+    # Log serialized request body for spec compliance verification
+    $bodyJson = $restoreBody | ConvertTo-Json -Depth 20
+    Write-Log "  Restore request body:" -Level "INFO"
+    foreach ($line in ($bodyJson -split "`n")) {
+      Write-Log "    $line" -Level "INFO"
     }
 
     Write-Log "  Submitting full restore to VBAHV Plugin API..." -Level "INFO"
