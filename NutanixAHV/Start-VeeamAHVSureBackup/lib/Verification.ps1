@@ -23,7 +23,7 @@ function Test-VMHeartbeat {
     $passed = ($powerState -eq "ON")
     $details = "Power: $powerState"
 
-    $vm = if ($PrismApiVersion -eq "v4") { $vmResult.VM } else { $vmResult }
+    $vm = if ($script:PrismApiVersion -eq "v4") { $vmResult.VM } else { $vmResult }
     $ngtStatus = _GetNGTStatus -VMData $vm
     if ($ngtStatus.Installed) {
       $details += ", NGT: $($ngtStatus.Enabled)"

@@ -1004,7 +1004,7 @@ function Start-AHVFullRestore {
       throw "Restored VM '$recoveryName' not found in Prism Central after ${discoveryTimeout}s"
     }
 
-    $vmUUID = if ($PrismApiVersion -eq "v4") { @($recoveredVM)[0].extId } else { @($recoveredVM)[0].metadata.uuid }
+    $vmUUID = if ($script:PrismApiVersion -eq "v4") { @($recoveredVM)[0].extId } else { @($recoveredVM)[0].metadata.uuid }
     Write-Log "  Restored VM found: $vmUUID" -Level "SUCCESS"
 
     # Step 7: Verify network isolation before power-on
@@ -1055,7 +1055,7 @@ function Stop-AHVFullRestore {
       try {
         $found = Get-PrismVMByName -Name $RecoveryInfo.RecoveryVMName
         if ($found) {
-          $vmUUID = if ($PrismApiVersion -eq "v4") { @($found)[0].extId } else { @($found)[0].metadata.uuid }
+          $vmUUID = if ($script:PrismApiVersion -eq "v4") { @($found)[0].extId } else { @($found)[0].metadata.uuid }
           Write-Log "  Found orphan VM by name: $($RecoveryInfo.RecoveryVMName) -> $vmUUID" -Level "WARNING"
         }
       }

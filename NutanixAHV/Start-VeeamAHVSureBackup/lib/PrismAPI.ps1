@@ -91,9 +91,9 @@ function Invoke-PrismAPI {
   $correlationId = [guid]::NewGuid().ToString("N").Substring(0, 12)
 
   # v4 mutations require NTNX-Request-Id for idempotency
-  $needsRequestId = ($PrismApiVersion -eq "v4" -and $Method -in @("POST", "PUT", "DELETE"))
+  $needsRequestId = ($script:PrismApiVersion -eq "v4" -and $Method -in @("POST", "PUT", "DELETE"))
   # Capture response headers when we may need ETags (v4 GET)
-  $captureHeaders = ($PrismApiVersion -eq "v4")
+  $captureHeaders = ($script:PrismApiVersion -eq "v4")
 
   while ($attempt -le $RetryCount) {
     $respHeaders = $null
@@ -219,22 +219,22 @@ function Test-PrismConnection {
   .SYNOPSIS
     Validate Prism Central connectivity and credentials (v3 and v4)
   #>
-  Write-Log "Testing Prism Central connectivity ($PrismApiVersion): $PrismCentral`:$PrismPort" -Level "INFO"
+  Write-Log "Testing Prism Central connectivity ($script:PrismApiVersion): $PrismCentral`:$PrismPort" -Level "INFO"
 
   try {
-    if ($PrismApiVersion -eq "v4") {
+    if ($script:PrismApiVersion -eq "v4") {
       $result = Invoke-PrismAPI -Method "GET" -Endpoint "$($script:PrismEndpoints.Clusters)?`$limit=1"
       $raw = if ($result.Body) { $result.Body } else { $result }
       $clusterCount = if ($raw.metadata.totalAvailableResults) { $raw.metadata.totalAvailableResults } else { ($raw.data | Measure-Object).Count }
 
       # Probe vmm namespace — auto-downgrade to v3 if unavailable
       try {
-        Invoke-PrismAPI -Method "GET" -Endpoint "vmm/v4.0/ahv/config/vms?`$limit=1" -RetryCount 1
+        Invoke-PrismAPI -Method "GET" -Endpoint "vmm/v4.0/ahv/config/vms?`$filter=name eq '__probe__'&`$limit=1" -RetryCount 1
         Write-Log "Prism v4 vmm namespace available" -Level "INFO"
       }
       catch {
         Write-Log "Prism v4 vmm namespace unavailable — auto-downgrading to v3 API" -Level "WARNING"
-        Set-Variable -Name PrismApiVersion -Value "v3" -Scope Script
+        $script:PrismApiVersion = "v3"
         $script:PrismBaseUrl = "$($script:PrismOrigin)/api/nutanix/v3"
         $script:PrismEndpoints = @{
           VMs      = "vms"
@@ -248,7 +248,7 @@ function Test-PrismConnection {
       $result = Invoke-PrismAPI -Method "POST" -Endpoint "clusters/list" -Body @{ kind = "cluster"; length = 1 }
       $clusterCount = $result.metadata.total_matches
     }
-    Write-Log "Prism Central connected ($PrismApiVersion) - $clusterCount cluster(s) visible" -Level "SUCCESS"
+    Write-Log "Prism Central connected ($script:PrismApiVersion) - $clusterCount cluster(s) visible" -Level "SUCCESS"
     return $true
   }
   catch {
@@ -292,7 +292,7 @@ function Get-PrismEntities {
 
   $allEntities = New-Object System.Collections.Generic.List[object]
 
-  if ($PrismApiVersion -eq "v4") {
+  if ($script:PrismApiVersion -eq "v4") {
     if (-not $PageSize) { $PageSize = 100 }
     $page = 0
 
@@ -360,7 +360,7 @@ function _GetPrismElementIPs {
     $clusters = Get-PrismClusters
     foreach ($cluster in $clusters) {
       $ip = $null
-      if ($PrismApiVersion -eq "v4") {
+      if ($script:PrismApiVersion -eq "v4") {
         # v4 clustermgmt: cluster.network.externalAddress — may be string or object with ipv4.value
         if ($cluster.network -and $cluster.network.externalAddress) {
           $addr = $cluster.network.externalAddress
@@ -508,7 +508,7 @@ function Get-PrismSubnets {
     Retrieve all subnets from Prism Central (paginated, v3/v4).
     Falls back to v3 subnets/list if v4 networking namespace returns 500.
   #>
-  if ($PrismApiVersion -eq "v4") {
+  if ($script:PrismApiVersion -eq "v4") {
     try {
       return Get-PrismEntities -EndpointKey "Subnets"
     }
@@ -628,7 +628,7 @@ function Get-SubnetName {
     Extract subnet name from a v3 or v4 entity object
   #>
   param([Parameter(Mandatory = $true)]$Subnet)
-  if ($PrismApiVersion -eq "v4") { return $Subnet.name }
+  if ($script:PrismApiVersion -eq "v4") { return $Subnet.name }
   return $Subnet.spec.name
 }
 
@@ -638,7 +638,7 @@ function Get-SubnetUUID {
     Extract subnet UUID/extId from a v3 or v4 entity object
   #>
   param([Parameter(Mandatory = $true)]$Subnet)
-  if ($PrismApiVersion -eq "v4") { return $Subnet.extId }
+  if ($script:PrismApiVersion -eq "v4") { return $Subnet.extId }
   return $Subnet.metadata.uuid
 }
 
@@ -680,7 +680,7 @@ function Resolve-IsolatedNetwork {
   }
 
   # Normalize to a common structure regardless of API version
-  if ($PrismApiVersion -eq "v4") {
+  if ($script:PrismApiVersion -eq "v4") {
     # Extract IPAM subnet config for static IP detection (may be $null if no IPAM)
     $v4IpConfig = $target.ipConfig
     $netAddr = if ($v4IpConfig -and $v4IpConfig.ipv4Config) { $v4IpConfig.ipv4Config.networkAddress } else { $null }
@@ -732,7 +732,7 @@ function Test-NetworkIsolation {
   )
 
   try {
-    if ($PrismApiVersion -eq "v4") {
+    if ($script:PrismApiVersion -eq "v4") {
       $nicsEndpoint = "$($script:PrismEndpoints.VMs)/$VMUUID/nics"
       $nicsRaw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $nicsEndpoint)
       $nics = if ($nicsRaw.data) { $nicsRaw.data } else { @() }
@@ -787,7 +787,7 @@ function Assert-VMNetworkIsolation {
   )
 
   try {
-    if ($PrismApiVersion -eq "v4") {
+    if ($script:PrismApiVersion -eq "v4") {
       $nicsEndpoint = "$($script:PrismEndpoints.VMs)/$VMUUID/nics"
       $nicsRaw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $nicsEndpoint)
       $nics = if ($nicsRaw.data) { @($nicsRaw.data) } else { @() }
@@ -846,7 +846,7 @@ function Get-PrismVMByName {
   #>
   param([Parameter(Mandatory = $true)][string]$Name)
 
-  if ($PrismApiVersion -eq "v4") {
+  if ($script:PrismApiVersion -eq "v4") {
     $escapedName = $Name -replace "'", "''"
     $endpoint = "$($script:PrismEndpoints.VMs)?`$filter=name eq '$escapedName'"
     $raw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $endpoint)
@@ -870,7 +870,7 @@ function Get-PrismVMByUUID {
   #>
   param([Parameter(Mandatory = $true)][string]$UUID)
 
-  if ($PrismApiVersion -eq "v4") {
+  if ($script:PrismApiVersion -eq "v4") {
     $result = Invoke-PrismAPI -Method "GET" -Endpoint "$($script:PrismEndpoints.VMs)/$UUID"
     # Unwrap to get the vm data from .data if present
     $raw = if ($result.Body) { $result.Body } else { $result }
@@ -893,7 +893,7 @@ function Get-PrismVMIPAddress {
   try {
     $vmResult = Get-PrismVMByUUID -UUID $UUID
 
-    if ($PrismApiVersion -eq "v4") {
+    if ($script:PrismApiVersion -eq "v4") {
       # v4: NICs are a sub-resource, not inline on the VM object
       $nicsEndpoint = "$($script:PrismEndpoints.VMs)/$UUID/nics"
       $nicsRaw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $nicsEndpoint)
@@ -933,7 +933,7 @@ function Get-PrismVMPowerState {
   #>
   param([Parameter(Mandatory = $true)]$VMResult)
 
-  if ($PrismApiVersion -eq "v4") {
+  if ($script:PrismApiVersion -eq "v4") {
     $vm = if ($VMResult.VM) { $VMResult.VM } else { $VMResult }
     return $vm.powerState
   }
@@ -1004,7 +1004,7 @@ function Set-PrismVMNIC {
     [Parameter(Mandatory = $true)][string]$SubnetUUID
   )
 
-  if ($PrismApiVersion -eq "v4") {
+  if ($script:PrismApiVersion -eq "v4") {
     # v4: list NICs, then update each NIC's subnet via dedicated endpoint
     $nicsEndpoint = "$($script:PrismEndpoints.VMs)/$VMUUID/nics"
     $nicsRaw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $nicsEndpoint)
@@ -1079,7 +1079,7 @@ function Set-PrismVMPowerState {
     [Parameter(Mandatory = $true)][ValidateSet("ON", "OFF")][string]$State
   )
 
-  if ($PrismApiVersion -eq "v4") {
+  if ($script:PrismApiVersion -eq "v4") {
     # v4: dedicated action endpoint per Nutanix VMM v4 SDK
     $action = if ($State -eq "OFF") { "power-off" } else { "power-on" }
     $result = Invoke-PrismAPI -Method "POST" -Endpoint "$($script:PrismEndpoints.VMs)/$UUID/`$actions/$action" -Body @{}
@@ -1108,7 +1108,7 @@ function Remove-PrismVM {
   param([Parameter(Mandatory = $true)][string]$UUID)
 
   try {
-    if ($PrismApiVersion -eq "v4") {
+    if ($script:PrismApiVersion -eq "v4") {
       # v4 DELETE requires ETag via If-Match
       $vmResult = Get-PrismVMByUUID -UUID $UUID
       $etag = if ($vmResult.ETag) { $vmResult.ETag } else { $null }
@@ -1144,7 +1144,7 @@ function Get-PrismTaskStatus {
   #>
   param([Parameter(Mandatory = $true)][string]$TaskUUID)
 
-  if ($PrismApiVersion -eq "v4") {
+  if ($script:PrismApiVersion -eq "v4") {
     $raw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint "$($script:PrismEndpoints.Tasks)/$TaskUUID")
     return $(if ($raw.data) { $raw.data } else { $raw })
   }
@@ -1171,7 +1171,7 @@ function Wait-PrismTask {
       return $task
     }
     elseif ($status -eq "FAILED") {
-      $errorMsg = if ($PrismApiVersion -eq "v4") {
+      $errorMsg = if ($script:PrismApiVersion -eq "v4") {
         if ($task.errorMessages -and $task.errorMessages.Count -gt 0) { ($task.errorMessages | ForEach-Object { if ($_.message) { $_.message } else { "$_" } }) -join "; " } else { "unknown" }
       } else {
         if ($task.error_detail) { $task.error_detail } else { "unknown" }

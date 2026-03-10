@@ -303,6 +303,7 @@ else {
     Tasks    = "tasks"
   }
 }
+$script:PrismApiVersion = $PrismApiVersion
 
 # Output folder
 if (-not $OutputPath) {
