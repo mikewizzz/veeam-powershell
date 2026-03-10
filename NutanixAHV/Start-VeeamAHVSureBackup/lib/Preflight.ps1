@@ -23,8 +23,8 @@ function Test-ClusterHealth {
   $warnings = @()
 
   foreach ($cluster in $Clusters) {
-    $clusterName = if ($PrismApiVersion -eq "v4") { $cluster.name } else { $cluster.spec.name }
-    $clusterStatus = if ($PrismApiVersion -eq "v4") {
+    $clusterName = if ($script:PrismApiVersion -eq "v4") { $cluster.name } else { $cluster.spec.name }
+    $clusterStatus = if ($script:PrismApiVersion -eq "v4") {
       $cluster.status
     }
     else {
@@ -60,10 +60,10 @@ function Test-ClusterCapacity {
   $warnings = @()
 
   foreach ($cluster in $Clusters) {
-    $clusterName = if ($PrismApiVersion -eq "v4") { $cluster.name } else { $cluster.spec.name }
+    $clusterName = if ($script:PrismApiVersion -eq "v4") { $cluster.name } else { $cluster.spec.name }
     $nodeCount = 0
 
-    if ($PrismApiVersion -eq "v4") {
+    if ($script:PrismApiVersion -eq "v4") {
       $nodeCount = if ($cluster.nodes -and $cluster.nodes.nodeList) { $cluster.nodes.nodeList.Count } else { 0 }
     }
     else {
@@ -261,7 +261,7 @@ function Test-OrphanVMs {
 
   try {
     $orphans = @()
-    if ($PrismApiVersion -eq "v4") {
+    if ($script:PrismApiVersion -eq "v4") {
       $endpoint = "$($script:PrismEndpoints.VMs)?`$filter=startswith(name, 'SureBackup_')&`$limit=50"
       $raw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $endpoint)
       if ($raw.data) { $orphans = @($raw.data) }
@@ -279,7 +279,7 @@ function Test-OrphanVMs {
 
     if ($orphans.Count -gt 0) {
       $orphanNames = @($orphans | ForEach-Object {
-        if ($PrismApiVersion -eq "v4") { $_.name } else { $_.spec.name }
+        if ($script:PrismApiVersion -eq "v4") { $_.name } else { $_.spec.name }
       }) -join ", "
       $warnings += "Found $($orphans.Count) orphaned SureBackup VM(s) from previous run(s): $orphanNames. Clean up before proceeding to free resources."
     }

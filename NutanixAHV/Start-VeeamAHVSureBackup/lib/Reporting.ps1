@@ -502,7 +502,7 @@ $logRows
 
   <div class="footer">
     <p>Backup Verification for Nutanix AHV v1.2.0 (Community Tool) | Report generated on $reportDate</p>
-    <p>Uses Veeam Backup &amp; Replication + Nutanix Prism Central REST API $(_EscapeHTML $PrismApiVersion) | Not an official Veeam product</p>
+    <p>Uses Veeam Backup &amp; Replication + Nutanix Prism Central REST API $(_EscapeHTML $script:PrismApiVersion) | Not an official Veeam product</p>
   </div>
 </div>
 </body>

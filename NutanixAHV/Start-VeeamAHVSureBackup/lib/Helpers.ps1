@@ -88,7 +88,7 @@ function _GetNGTStatus {
     Extract Nutanix Guest Tools status from a VM object (v3/v4 abstraction)
   #>
   param($VMData)
-  if ($PrismApiVersion -eq "v4") {
+  if ($script:PrismApiVersion -eq "v4") {
     $ngt = $VMData.guestTools
     if ($ngt) { return [PSCustomObject]@{ Installed = $true; Enabled = [bool]$ngt.isEnabled } }
   }
