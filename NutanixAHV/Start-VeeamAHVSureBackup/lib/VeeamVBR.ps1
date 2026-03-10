@@ -801,44 +801,67 @@ function Start-AHVFullRestore {
     $pluginNetworkId = $null
     if ($targetClusterId -and $IsolatedNetwork) {
       $pluginNetworks = Get-VBAHVNetworks -ClusterId $targetClusterId
+      Write-Log "  Plugin networks for cluster '$targetClusterId':" -Level "INFO"
+      foreach ($pn in $pluginNetworks) {
+        Write-Log "    - $($pn.name) (ID: $($pn.id))" -Level "INFO"
+      }
+
       $matchedNetwork = $pluginNetworks | Where-Object { $_.name -eq $IsolatedNetwork.Name } | Select-Object -First 1
       if ($matchedNetwork) {
         $pluginNetworkId = $matchedNetwork.id
-        Write-Log "  Isolated network resolved via plugin: $($matchedNetwork.name) (ID: $pluginNetworkId)" -Level "INFO"
+        Write-Log "  --- Network Resolution Diagnostics ---" -Level "INFO"
+        Write-Log "  Prism network name   : $($IsolatedNetwork.Name)" -Level "INFO"
+        Write-Log "  Prism network UUID   : $($IsolatedNetwork.UUID)" -Level "INFO"
+        Write-Log "  Plugin network name  : $($matchedNetwork.name)" -Level "INFO"
+        Write-Log "  Plugin network ID    : $pluginNetworkId" -Level "INFO"
+        Write-Log "  IDs match            : $($pluginNetworkId -eq $IsolatedNetwork.UUID)" -Level "INFO"
+        Write-Log "  --- End Diagnostics ---" -Level "INFO"
       }
       else {
         # Fallback: try matching by Prism UUID in case plugin uses same IDs
         $matchedNetwork = $pluginNetworks | Where-Object { $_.id -eq $IsolatedNetwork.UUID } | Select-Object -First 1
         if ($matchedNetwork) {
           $pluginNetworkId = $matchedNetwork.id
-          Write-Log "  Isolated network resolved via plugin (UUID match): $($matchedNetwork.name)" -Level "INFO"
+          Write-Log "  --- Network Resolution Diagnostics (UUID fallback) ---" -Level "INFO"
+          Write-Log "  Prism network name   : $($IsolatedNetwork.Name)" -Level "INFO"
+          Write-Log "  Prism network UUID   : $($IsolatedNetwork.UUID)" -Level "INFO"
+          Write-Log "  Plugin network name  : $($matchedNetwork.name)" -Level "INFO"
+          Write-Log "  Plugin network ID    : $pluginNetworkId" -Level "INFO"
+          Write-Log "  IDs match            : $($pluginNetworkId -eq $IsolatedNetwork.UUID)" -Level "INFO"
+          Write-Log "  --- End Diagnostics ---" -Level "INFO"
         }
         else {
-          $availableNames = ($pluginNetworks | ForEach-Object { $_.name }) -join ', '
-          throw "Isolated network '$($IsolatedNetwork.Name)' not found in VBAHV plugin for cluster '$targetClusterId'. Available: $availableNames"
+          $availableNames = ($pluginNetworks | ForEach-Object { "$($_.name) (ID: $($_.id))" }) -join ', '
+          Write-Log "  WARNING: Isolated network '$($IsolatedNetwork.Name)' not found in VBAHV plugin for cluster '$targetClusterId'. Available: $availableNames" -Level "WARNING"
+          Write-Log "  VM will be restored WITHOUT network adapters to avoid finalization failure" -Level "WARNING"
         }
       }
     }
 
     # Step 3b: Build networkAdapters array using metadata
     # v9 schema: originalMacAddress + value { networkId, ipAddresses, macAddress }
-    $sourceNICs = $metadata.networkAdapters
     $networkAdapterRemaps = @()
-    if ($sourceNICs -and @($sourceNICs).Count -gt 0) {
-      foreach ($nic in $sourceNICs) {
-        $remap = @{
-          originalMacAddress = if ($nic.macAddress) { $nic.macAddress } else { "" }
-          value              = @{
-            networkId   = $pluginNetworkId
-            ipAddresses = @()
+    if ($pluginNetworkId) {
+      $sourceNICs = $metadata.networkAdapters
+      if ($sourceNICs -and @($sourceNICs).Count -gt 0) {
+        foreach ($nic in $sourceNICs) {
+          $remap = @{
+            originalMacAddress = if ($nic.macAddress) { $nic.macAddress } else { "" }
+            value              = @{
+              networkId   = $pluginNetworkId
+              ipAddresses = @()
+            }
           }
+          $networkAdapterRemaps += $remap
+          Write-Log "  NIC $($nic.macAddress): $($nic.networkName) -> $($IsolatedNetwork.Name)" -Level "INFO"
         }
-        $networkAdapterRemaps += $remap
-        Write-Log "  NIC $($nic.macAddress): $($nic.networkName) -> $($IsolatedNetwork.Name)" -Level "INFO"
+      }
+      else {
+        Write-Log "  No source NICs in backup metadata — VM will be restored without network" -Level "WARNING"
       }
     }
     else {
-      Write-Log "  No source NICs in backup metadata — VM will be restored without network" -Level "WARNING"
+      Write-Log "  Skipping NIC remap — no valid plugin network ID resolved" -Level "WARNING"
     }
 
     # Step 4: Build RestoreSettings body and POST /restorePoints/restore
