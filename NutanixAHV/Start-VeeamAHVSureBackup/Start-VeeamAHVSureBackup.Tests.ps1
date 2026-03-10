@@ -1910,6 +1910,10 @@ Describe "VBAHV Plugin REST API" {
   }
 
   Context "Start-AHVFullRestore NIC remap" {
+    BeforeEach {
+      Mock Resolve-PENetworkUUID { return $null }
+    }
+
     It "uses originalMacAddress (not macAddress) in network adapter remap" {
       $script:capturedBody = $null
 
@@ -1953,6 +1957,9 @@ Describe "VBAHV Plugin REST API" {
       $script:capturedBody.networkAdapters[0].Keys | Should -Not -Contain "macAddress"
       # networkId should be from plugin, not Prism UUID
       $script:capturedBody.networkAdapters[0].value.networkId | Should -Be "plugin-net-1"
+      # v9 spec requires macAddress field in value (string or null)
+      $script:capturedBody.networkAdapters[0].value.Keys | Should -Contain "macAddress"
+      $script:capturedBody.networkAdapters[0].value.macAddress | Should -BeNullOrEmpty
     }
 
     It "always sends required fields in restore body" {
@@ -1996,6 +2003,47 @@ Describe "VBAHV Plugin REST API" {
       $script:capturedBody.restoreVmCategories | Should -Be $false
     }
 
+    It "logs serialized restore body before POST" {
+      Mock Get-VBAHVRestorePointMetadata {
+        return @{
+          clusterId = "c1"
+          networkAdapters = @(
+            @{ macAddress = "aa:bb:cc:dd:ee:ff"; networkId = "net-prod"; networkName = "production" }
+          )
+        }
+      }
+
+      Mock Invoke-VBAHVPluginAPI {
+        param($Method, $Endpoint, $Body)
+        if ($Method -eq "POST" -and $Endpoint -eq "restorePoints/restore") {
+          return @{ sessionId = "session-1" }
+        }
+        if ($Endpoint -match "sessions/") {
+          return @{ state = "Finished"; result = "Success" }
+        }
+        return @()
+      }
+
+      Mock Get-VBAHVClusters { return @(@{ id = "c1"; name = "NX-Cluster-01" }) }
+      Mock Get-VBAHVStorageContainers { return @(@{ id = "sc1"; name = "default-container" }) }
+      Mock Get-VBAHVNetworks { return @(@{ id = "plugin-net-1"; name = "isolated-lab" }) }
+      Mock Get-PrismVMByName { return @(@{ extId = "vm-uuid-1"; name = "SureBackup_test-vm_123456_abc" }) }
+      Mock Set-PrismVMPowerState {}
+      Mock Start-Sleep {}
+      Mock Write-Log {}
+
+      $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
+      $rpInfo = [PSCustomObject]@{ VMName = "test-vm"; RestorePointId = "rp1"; CreationTime = Get-Date; JobName = "Job1" }
+      $isolatedNet = [PSCustomObject]@{ UUID = "net-iso-1"; Name = "isolated-lab" }
+
+      Start-AHVFullRestore -RestorePointInfo $rpInfo -IsolatedNetwork $isolatedNet
+
+      # Verify "Restore request body:" log line appears before the POST
+      Should -Invoke Write-Log -ParameterFilter { $Message -like "*Restore request body*" } -Times 1
+      # Verify at least one line of JSON body was logged (contains restorePointId)
+      Should -Invoke Write-Log -ParameterFilter { $Message -like "*restorePointId*" } -Times 1
+    }
+
     It "returns Failed status when restore API returns no sessionId" {
       Mock Get-VBAHVRestorePointMetadata {
         return @{ clusterId = "c1"; networkAdapters = @() }
@@ -2025,6 +2073,10 @@ Describe "VBAHV Plugin REST API" {
   }
 
   Context "Start-AHVFullRestore network fallback" {
+    BeforeEach {
+      Mock Resolve-PENetworkUUID { return $null }
+    }
+
     It "restores without NICs when network name not found in plugin" {
       $script:capturedBody = $null
 
@@ -2153,6 +2205,149 @@ Describe "VBAHV Plugin REST API" {
       Should -Invoke Write-Log -ParameterFilter { $Message -like "*Prism network UUID*net-iso-1*" } -Times 1
       Should -Invoke Write-Log -ParameterFilter { $Message -like "*Plugin network ID*plugin-net-1*" } -Times 1
       Should -Invoke Write-Log -ParameterFilter { $Message -like "*IDs match*" } -Times 1
+    }
+  }
+
+  Context "Start-AHVFullRestore PE v2 cross-validation" {
+    It "logs success when PE v2 network is found" {
+      Mock Get-VBAHVRestorePointMetadata {
+        return @{
+          clusterId = "c1"
+          networkAdapters = @(
+            @{ macAddress = "aa:bb:cc:dd:ee:ff"; networkId = "net-prod"; networkName = "production" }
+          )
+        }
+      }
+
+      Mock Invoke-VBAHVPluginAPI {
+        param($Method, $Endpoint, $Body)
+        if ($Method -eq "POST" -and $Endpoint -eq "restorePoints/restore") {
+          return @{ sessionId = "session-1" }
+        }
+        if ($Endpoint -match "sessions/") {
+          return @{ state = "Finished"; result = "Success" }
+        }
+        return @()
+      }
+
+      Mock Get-VBAHVClusters { return @(@{ id = "c1"; name = "NX-Cluster-01" }) }
+      Mock Get-VBAHVStorageContainers { return @(@{ id = "sc1"; name = "default-container" }) }
+      Mock Get-VBAHVNetworks { return @(@{ id = "plugin-net-1"; name = "isolated-lab" }) }
+      Mock Get-PrismVMByName { return @(@{ extId = "vm-uuid-1"; name = "SureBackup_test-vm_123456_abc" }) }
+      Mock Set-PrismVMPowerState {}
+      Mock Start-Sleep {}
+      Mock Write-Log {}
+
+      Mock Resolve-PENetworkUUID {
+        return [PSCustomObject]@{
+          UUID    = "pe-net-uuid-1"
+          Name    = "isolated-lab"
+          VlanId  = 100
+          PeIP    = "10.0.0.1"
+          MatchBy = "name"
+        }
+      }
+
+      $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
+      $rpInfo = [PSCustomObject]@{ VMName = "test-vm"; RestorePointId = "rp1"; CreationTime = Get-Date; JobName = "Job1" }
+      $isolatedNet = [PSCustomObject]@{ UUID = "net-iso-1"; Name = "isolated-lab" }
+
+      Start-AHVFullRestore -RestorePointInfo $rpInfo -IsolatedNetwork $isolatedNet
+
+      Should -Invoke Write-Log -ParameterFilter { $Message -like "*PE v2 network validated*" } -Times 1
+    }
+
+    It "logs CRITICAL error when PE v2 network not found" {
+      Mock Get-VBAHVRestorePointMetadata {
+        return @{
+          clusterId = "c1"
+          networkAdapters = @(
+            @{ macAddress = "aa:bb:cc:dd:ee:ff"; networkId = "net-prod"; networkName = "production" }
+          )
+        }
+      }
+
+      Mock Invoke-VBAHVPluginAPI {
+        param($Method, $Endpoint, $Body)
+        if ($Method -eq "POST" -and $Endpoint -eq "restorePoints/restore") {
+          return @{ sessionId = "session-1" }
+        }
+        if ($Endpoint -match "sessions/") {
+          return @{ state = "Finished"; result = "Success" }
+        }
+        return @()
+      }
+
+      Mock Get-VBAHVClusters { return @(@{ id = "c1"; name = "NX-Cluster-01" }) }
+      Mock Get-VBAHVStorageContainers { return @(@{ id = "sc1"; name = "default-container" }) }
+      Mock Get-VBAHVNetworks { return @(@{ id = "plugin-net-1"; name = "isolated-lab" }) }
+      Mock Get-PrismVMByName { return @(@{ extId = "vm-uuid-1"; name = "SureBackup_test-vm_123456_abc" }) }
+      Mock Set-PrismVMPowerState {}
+      Mock Start-Sleep {}
+      Mock Write-Log {}
+
+      # PE v2 returns null — network not found on Prism Element
+      Mock Resolve-PENetworkUUID { return $null }
+
+      $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
+      $rpInfo = [PSCustomObject]@{ VMName = "test-vm"; RestorePointId = "rp1"; CreationTime = Get-Date; JobName = "Job1" }
+      $isolatedNet = [PSCustomObject]@{ UUID = "net-iso-1"; Name = "isolated-lab" }
+
+      Start-AHVFullRestore -RestorePointInfo $rpInfo -IsolatedNetwork $isolatedNet
+
+      Should -Invoke Write-Log -ParameterFilter { $Message -like "*CRITICAL*not found on Prism Element*" } -Times 1
+      Should -Invoke Write-Log -ParameterFilter { $Message -like "*NutanixV2Client.CreateVmAsync*" } -Times 1
+      Should -Invoke Write-Log -ParameterFilter { $Message -like "*Create the isolated network directly on Prism Element*" } -Times 1
+    }
+
+    It "warns when PE UUID differs from plugin network ID" {
+      Mock Get-VBAHVRestorePointMetadata {
+        return @{
+          clusterId = "c1"
+          networkAdapters = @(
+            @{ macAddress = "aa:bb:cc:dd:ee:ff"; networkId = "net-prod"; networkName = "production" }
+          )
+        }
+      }
+
+      Mock Invoke-VBAHVPluginAPI {
+        param($Method, $Endpoint, $Body)
+        if ($Method -eq "POST" -and $Endpoint -eq "restorePoints/restore") {
+          return @{ sessionId = "session-1" }
+        }
+        if ($Endpoint -match "sessions/") {
+          return @{ state = "Finished"; result = "Success" }
+        }
+        return @()
+      }
+
+      Mock Get-VBAHVClusters { return @(@{ id = "c1"; name = "NX-Cluster-01" }) }
+      Mock Get-VBAHVStorageContainers { return @(@{ id = "sc1"; name = "default-container" }) }
+      Mock Get-VBAHVNetworks { return @(@{ id = "plugin-net-1"; name = "isolated-lab" }) }
+      Mock Get-PrismVMByName { return @(@{ extId = "vm-uuid-1"; name = "SureBackup_test-vm_123456_abc" }) }
+      Mock Set-PrismVMPowerState {}
+      Mock Start-Sleep {}
+      Mock Write-Log {}
+
+      # PE v2 returns a different UUID than the plugin network ID
+      Mock Resolve-PENetworkUUID {
+        return [PSCustomObject]@{
+          UUID    = "pe-different-uuid"
+          Name    = "isolated-lab"
+          VlanId  = 100
+          PeIP    = "10.0.0.1"
+          MatchBy = "name"
+        }
+      }
+
+      $script:RecoverySessions = New-Object System.Collections.Generic.List[object]
+      $rpInfo = [PSCustomObject]@{ VMName = "test-vm"; RestorePointId = "rp1"; CreationTime = Get-Date; JobName = "Job1" }
+      $isolatedNet = [PSCustomObject]@{ UUID = "net-iso-1"; Name = "isolated-lab" }
+
+      Start-AHVFullRestore -RestorePointInfo $rpInfo -IsolatedNetwork $isolatedNet
+
+      Should -Invoke Write-Log -ParameterFilter { $Message -like "*PE v2 network validated*" } -Times 1
+      Should -Invoke Write-Log -ParameterFilter { $Message -like "*UUID mismatch may cause restore failure*" } -Times 1
     }
   }
 

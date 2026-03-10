@@ -419,6 +419,72 @@ function _InvokePrismElementV2 {
   }
 }
 
+function Resolve-PENetworkUUID {
+  <#
+  .SYNOPSIS
+    Cross-validate an isolated network against Prism Element v2 API.
+    Veeam's restore engine uses NutanixV2Client.CreateVmAsync (PE v2),
+    so the network must exist at PE level — not just in Prism Central.
+  .PARAMETER NetworkName
+    Name of the network to look up on PE
+  .PARAMETER PrismCentralUUID
+    PC-level UUID to try as fallback match
+  .OUTPUTS
+    PSCustomObject with UUID, Name, VlanId, PeIP, MatchBy — or $null if not found
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$NetworkName,
+    [string]$PrismCentralUUID
+  )
+
+  $peIPs = _GetPrismElementIPs
+  if ($peIPs.Count -eq 0) {
+    Write-Log "  Cannot cross-validate network against PE — no PE IPs discovered" -Level "WARNING"
+    return $null
+  }
+
+  foreach ($peIP in $peIPs) {
+    try {
+      $v2Response = _InvokePrismElementV2 -PrismElementIP $peIP -Endpoint "networks/?count=500"
+      if ($v2Response.entities) {
+        # Try exact name match first
+        $peNet = $v2Response.entities | Where-Object { $_.name -eq $NetworkName } | Select-Object -First 1
+        if ($peNet) {
+          return [PSCustomObject]@{
+            UUID    = $peNet.uuid
+            Name    = $peNet.name
+            VlanId  = $peNet.vlan_id
+            PeIP    = $peIP
+            MatchBy = "name"
+          }
+        }
+        # Try PC UUID match (in case PE uses same UUID)
+        if ($PrismCentralUUID) {
+          $peNet = $v2Response.entities | Where-Object { $_.uuid -eq $PrismCentralUUID } | Select-Object -First 1
+          if ($peNet) {
+            return [PSCustomObject]@{
+              UUID    = $peNet.uuid
+              Name    = $peNet.name
+              VlanId  = $peNet.vlan_id
+              PeIP    = $peIP
+              MatchBy = "uuid"
+            }
+          }
+        }
+        # Not found — log what PE does have
+        $peNames = ($v2Response.entities | ForEach-Object { "$($_.name) ($($_.uuid))" }) -join ', '
+        Write-Log "  PE v2 networks at ${peIP}: $peNames" -Level "WARNING"
+        Write-Log "  Isolated network '$NetworkName' NOT FOUND on Prism Element" -Level "ERROR"
+        return $null
+      }
+    }
+    catch {
+      Write-Log "  PE v2 network query failed at ${peIP}: $($_.Exception.Message)" -Level "WARNING"
+    }
+  }
+  return $null
+}
+
 function Get-PrismSubnets {
   <#
   .SYNOPSIS
