@@ -1,20 +1,27 @@
+# SPDX-License-Identifier: MIT
 # =========================================================================
 # Exports.ps1 - CSV exports, log export, and ZIP archive creation
 # =========================================================================
 
 <#
 .SYNOPSIS
-  Exports all inventory and sizing data to CSV files.
+  Exports all inventory data to CSV files, source totals to JSON, and filter metadata.
 .PARAMETER VmInventory
   VM inventory collection.
 .PARAMETER SqlInventory
   SQL inventory hashtable (Databases, ManagedInstances).
 .PARAMETER StorageInventory
-  Storage inventory hashtable (Files, Blobs).
+  Storage inventory hashtable (Files, Blobs, StorageAccounts, SkippedAccounts).
 .PARAMETER AzureBackupInventory
   Backup inventory hashtable (Vaults, Policies).
 .PARAMETER VeeamSizing
-  Veeam sizing summary object.
+  Source totals summary object.
+.PARAMETER VMSSInventory
+  VMSS inventory collection.
+.PARAMETER AdditionalResources
+  Hashtable with KeyVaults, AKSClusters, AppServices.
+.PARAMETER FilterMetadata
+  Hashtable with runtime parameters for audit trail.
 #>
 function Export-InventoryData {
   param(
@@ -22,7 +29,10 @@ function Export-InventoryData {
     [Parameter(Mandatory=$true)]$SqlInventory,
     [Parameter(Mandatory=$true)]$StorageInventory,
     [Parameter(Mandatory=$true)]$AzureBackupInventory,
-    [Parameter(Mandatory=$true)]$VeeamSizing
+    [Parameter(Mandatory=$true)]$VeeamSizing,
+    $VMSSInventory = $null,
+    $AdditionalResources = $null,
+    $FilterMetadata = $null
   )
 
   Write-ProgressStep -Activity "Exporting Data" -Status "Writing CSV files..."
@@ -34,10 +44,21 @@ function Export-InventoryData {
     @{ Data = $SqlInventory.ManagedInstances;     Path = $script:sqlMiCsv }
     @{ Data = $StorageInventory.Files;            Path = $script:filesCsv }
     @{ Data = $StorageInventory.Blobs;            Path = $script:blobCsv }
+    @{ Data = $StorageInventory.StorageAccounts;  Path = $script:storageAcctsCsv }
     @{ Data = $AzureBackupInventory.Vaults;       Path = $script:vaultsCsv }
     @{ Data = $AzureBackupInventory.Policies;     Path = $script:polCsv }
-    @{ Data = $VeeamSizing;                       Path = $script:sizingCsv }
+    @{ Data = $VMSSInventory;                     Path = $script:vmssCsv }
   )
+
+  # Additional resource exports
+  if ($null -ne $AdditionalResources) {
+    $csvExports += @(
+      @{ Data = $AdditionalResources.KeyVaults;   Path = $script:kvCsv }
+      @{ Data = $AdditionalResources.AKSClusters; Path = $script:aksCsv }
+      @{ Data = $AdditionalResources.AppServices;  Path = $script:appSvcCsv }
+    )
+  }
+
   foreach ($export in $csvExports) {
     $collection = $export.Data
     if ($null -eq $collection) { continue }
@@ -46,9 +67,18 @@ function Export-InventoryData {
     $items | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $export.Path
   }
 
-  # JSON sizing bundle (machine-readable)
-  $jsonPath = Join-Path $OutputPath "veeam_sizing_summary.json"
-  $VeeamSizing | ConvertTo-Json -Depth 5 | Out-File -FilePath $jsonPath -Encoding UTF8
+  # JSON source totals bundle with filter metadata for audit trail
+  $jsonPath = Join-Path $OutputPath "source_totals.json"
+  $jsonBundle = @{
+    SizingTotals = $VeeamSizing
+    SkippedResources = @{
+      StorageAccountsSkipped = if ($null -ne $StorageInventory.SkippedAccounts) { $StorageInventory.SkippedAccounts } else { 0 }
+    }
+  }
+  if ($null -ne $FilterMetadata) {
+    $jsonBundle.FilterMetadata = $FilterMetadata
+  }
+  $jsonBundle | ConvertTo-Json -Depth 5 | Out-File -FilePath $jsonPath -Encoding UTF8
 
   Write-Log "Exported CSV files to: $OutputPath" -Level "SUCCESS"
 }

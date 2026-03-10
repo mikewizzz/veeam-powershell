@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # =========================================================================
 # Helpers.ps1 - String helpers, tag utilities, and shared math functions
 # =========================================================================
@@ -30,7 +31,12 @@ function _EscapeHtml([string]$s) {
 #>
 function ConvertTo-FlatTags($tags) {
   if (-not $tags) { return "" }
-  ($tags.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ';'
+  # Escape semicolons in keys/values to prevent downstream CSV/parsing corruption
+  ($tags.GetEnumerator() | Sort-Object Name | ForEach-Object {
+    $k = "$($_.Name)" -replace ';', '\;'
+    $v = "$($_.Value)" -replace ';', '\;'
+    "$k=$v"
+  }) -join ';'
 }
 
 # =============================

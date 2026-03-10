@@ -1,17 +1,19 @@
+# SPDX-License-Identifier: MIT
 # =========================================================================
 # HtmlReport.ps1 - Executive-grade HTML report generation (Fluent Design)
 # =========================================================================
 
 <#
 .SYNOPSIS
-  Generates an executive-grade HTML sizing report with inline SVG charts,
+  Generates an executive-grade HTML discovery report with inline SVG charts,
   dark gradient header, numbered collapsible sections, and glassmorphism KPI cards.
 .DESCRIPTION
   Builds a professional multi-section HTML report covering VM inventory,
-  SQL databases, storage discovery, Azure Backup coverage analysis, and
-  Veeam Backup for Azure sizing recommendations. CSS-only visuals, no
-  JavaScript, no external dependencies. Works as a static file, prints
-  correctly to PDF, responsive on mobile.
+  VMSS, SQL databases, storage discovery, security posture (encryption,
+  NSG exposure, managed identities), additional resources (Key Vault, AKS,
+  App Services), and Azure Backup coverage analysis.
+  CSS-only visuals, no JavaScript, no external dependencies. Works as a
+  static file, prints correctly to PDF, responsive on mobile.
 .PARAMETER VmInventory
   VM inventory collection.
 .PARAMETER SqlInventory
@@ -21,13 +23,9 @@
 .PARAMETER AzureBackupInventory
   Backup inventory hashtable (Vaults, Policies).
 .PARAMETER VeeamSizing
-  Veeam sizing summary object.
+  Source totals summary object.
 .PARAMETER OutputPath
   Directory to write the HTML file.
-.PARAMETER SnapshotRetentionDays
-  Snapshot retention days used in sizing calculations.
-.PARAMETER RepositoryOverhead
-  Repository overhead multiplier used in sizing calculations.
 .PARAMETER Subscriptions
   Array of subscription objects that were analyzed.
 .PARAMETER StartTime
@@ -43,10 +41,11 @@ function New-HtmlReport {
     [Parameter(Mandatory=$true)]$AzureBackupInventory,
     [Parameter(Mandatory=$true)]$VeeamSizing,
     [Parameter(Mandatory=$true)][string]$OutputPath,
-    [Parameter(Mandatory=$true)][int]$SnapshotRetentionDays,
-    [Parameter(Mandatory=$true)][double]$RepositoryOverhead,
     [Parameter(Mandatory=$true)][array]$Subscriptions,
-    [Parameter(Mandatory=$true)][datetime]$StartTime
+    [Parameter(Mandatory=$true)][datetime]$StartTime,
+    $VMSSInventory = $null,
+    $AdditionalResources = $null,
+    $FilterMetadata = $null
   )
 
   Write-ProgressStep -Activity "Generating HTML Report" -Status "Building executive-grade report..."
@@ -81,6 +80,40 @@ function New-HtmlReport {
               elseif ($AzureBackupInventory.Policies -is [System.Collections.IList]) { @($AzureBackupInventory.Policies.GetEnumerator()) }
               else { @($AzureBackupInventory.Policies) }
 
+  # VMSS
+  $vmssItems = @()
+  if ($null -ne $VMSSInventory) {
+    if ($VMSSInventory -is [System.Collections.IList]) { $vmssItems = @($VMSSInventory.GetEnumerator()) }
+    else { $vmssItems = @($VMSSInventory) }
+  }
+
+  # Storage accounts
+  $storageAccts = @()
+  if ($null -ne $StorageInventory.StorageAccounts) {
+    if ($StorageInventory.StorageAccounts -is [System.Collections.IList]) { $storageAccts = @($StorageInventory.StorageAccounts.GetEnumerator()) }
+    else { $storageAccts = @($StorageInventory.StorageAccounts) }
+  }
+  $skippedAccounts = if ($null -ne $StorageInventory.SkippedAccounts) { $StorageInventory.SkippedAccounts } else { 0 }
+
+  # Additional resources
+  $keyVaults = @()
+  $aksClusters = @()
+  $appServices = @()
+  if ($null -ne $AdditionalResources) {
+    if ($null -ne $AdditionalResources.KeyVaults) {
+      if ($AdditionalResources.KeyVaults -is [System.Collections.IList]) { $keyVaults = @($AdditionalResources.KeyVaults.GetEnumerator()) }
+      else { $keyVaults = @($AdditionalResources.KeyVaults) }
+    }
+    if ($null -ne $AdditionalResources.AKSClusters) {
+      if ($AdditionalResources.AKSClusters -is [System.Collections.IList]) { $aksClusters = @($AdditionalResources.AKSClusters.GetEnumerator()) }
+      else { $aksClusters = @($AdditionalResources.AKSClusters) }
+    }
+    if ($null -ne $AdditionalResources.AppServices) {
+      if ($AdditionalResources.AppServices -is [System.Collections.IList]) { $appServices = @($AdditionalResources.AppServices.GetEnumerator()) }
+      else { $appServices = @($AdditionalResources.AppServices) }
+    }
+  }
+
   # =========================================================================
   # 2. Compute derived metrics
   # =========================================================================
@@ -90,6 +123,8 @@ function New-HtmlReport {
 
   # Core counts
   $totalVMs = $VeeamSizing.TotalVMs
+  $totalVMSS = $VeeamSizing.TotalVMSS
+  $totalVMSSInstances = $VeeamSizing.TotalVMSSInstances
   $totalSQLDbs = $VeeamSizing.TotalSQLDatabases
   $totalSQLMIs = $VeeamSizing.TotalSQLManagedInstances
   $subCount = $Subscriptions.Count
@@ -97,17 +132,19 @@ function New-HtmlReport {
   $blobsCount = $blobContainers.Count
   $vaultsCount = $vaults.Count
   $policiesCount = $policies.Count
+  $kvCount = $keyVaults.Count
+  $aksCount = $aksClusters.Count
+  $appSvcCount = $appServices.Count
+  $storageAcctCount = $storageAccts.Count
 
   # Storage metrics
   $vmStorageGB = [math]::Round($VeeamSizing.TotalVMStorageGB, 0)
+  $vmssStorageGB = [math]::Round($VeeamSizing.TotalVMSSStorageGB, 0)
   $sqlStorageGB = [math]::Round($VeeamSizing.TotalSQLStorageGB, 0)
-  $snapshotGB = [math]::Ceiling($VeeamSizing.TotalSnapshotStorageGB)
-  $repoGB = [math]::Ceiling($VeeamSizing.TotalRepositoryGB)
-  $overheadPct = [math]::Round(($RepositoryOverhead - 1) * 100, 0)
+  $fileStorageGB = [math]::Round($VeeamSizing.TotalFileShareStorageGB, 0)
 
   # Formatted storage strings
   $sourceFormatted = _FormatStorageGB $VeeamSizing.TotalSourceStorageGB
-  $repoFormatted = _FormatStorageGB $VeeamSizing.TotalRepositoryGB
 
   # =========================================================================
   # Backup coverage / protection gap analysis
@@ -154,14 +191,8 @@ function New-HtmlReport {
     $coverageScore = [math]::Round($weightedSum / $totalWeight, 0)
   }
 
-  # Source-to-repo ratio for KPI ring
-  $sourceRepoRatio = 0
-  if ($VeeamSizing.TotalSourceStorageGB -gt 0) {
-    $sourceRepoRatio = [math]::Min([math]::Round(($VeeamSizing.TotalRepositoryGB / $VeeamSizing.TotalSourceStorageGB) * 100, 0), 100)
-  }
-
   # SQL percentage of total workloads
-  $totalWorkloads = $totalVMs + $totalSQLDbs + $totalSQLMIs
+  $totalWorkloads = $totalVMs + $totalVMSSInstances + $totalSQLDbs + $totalSQLMIs + $kvCount + $aksCount + $appSvcCount
   $sqlPct = 0
   if ($totalWorkloads -gt 0) {
     $sqlPct = [math]::Round(($totalSQLDbs + $totalSQLMIs) / $totalWorkloads * 100, 0)
@@ -207,6 +238,81 @@ function New-HtmlReport {
       Severity    = "Info"
       Title       = "Full VM Protection"
       Description = "All $totalVMs Azure VMs have backup protection"
+      Section     = "Coverage"
+    })
+  }
+
+  # Encryption gap check
+  $noEncryptionVMs = @($VmInventory | Where-Object { $_.EncryptionType -eq 'SSE-PMK' }).Count
+  $adeVMs = @($VmInventory | Where-Object { $_.EncryptionType -eq 'ADE' }).Count
+  $cmkVMs = @($VmInventory | Where-Object { $_.EncryptionType -eq 'SSE-CMK' }).Count
+  if ($noEncryptionVMs -gt 0 -and $totalVMs -gt 0) {
+    $findings.Add([PSCustomObject]@{
+      Severity    = "Medium"
+      Title       = "VMs Using Platform-Managed Encryption Only"
+      Description = "$noEncryptionVMs of $totalVMs VMs use only platform-managed keys (SSE-PMK). Consider ADE or customer-managed keys for sensitive workloads."
+      Section     = "Security"
+    })
+  }
+
+  # NSG exposure check
+  $criticalExposure = @($VmInventory | Where-Object { $_.ExposureLevel -eq 'Critical' }).Count
+  $highExposure = @($VmInventory | Where-Object { $_.ExposureLevel -eq 'High' }).Count
+  if ($criticalExposure -gt 0) {
+    $findings.Add([PSCustomObject]@{
+      Severity    = "High"
+      Title       = "Internet-Exposed VMs (All Ports)"
+      Description = "$criticalExposure VM(s) have NSG rules allowing all inbound traffic from the internet"
+      Section     = "Security"
+    })
+  }
+  if ($highExposure -gt 0) {
+    $findings.Add([PSCustomObject]@{
+      Severity    = "High"
+      Title       = "Internet-Exposed Sensitive Ports"
+      Description = "$highExposure VM(s) have NSG rules allowing inbound access to sensitive ports (SSH/RDP/SQL) from the internet"
+      Section     = "Security"
+    })
+  }
+
+  # Managed identity check
+  $noIdentityVMs = @($VmInventory | Where-Object { $_.ManagedIdentity -eq 'None' }).Count
+  if ($noIdentityVMs -gt 0 -and $totalVMs -gt 5) {
+    $findings.Add([PSCustomObject]@{
+      Severity    = "Info"
+      Title       = "VMs Without Managed Identity"
+      Description = "$noIdentityVMs of $totalVMs VMs have no managed identity assigned"
+      Section     = "Security"
+    })
+  }
+
+  # Storage account security
+  $publicStorageAccounts = @($storageAccts | Where-Object { $_.AllowBlobPublicAccess -eq $true }).Count
+  if ($publicStorageAccounts -gt 0) {
+    $findings.Add([PSCustomObject]@{
+      Severity    = "Medium"
+      Title       = "Storage Accounts Allow Public Blob Access"
+      Description = "$publicStorageAccounts storage account(s) allow public blob access"
+      Section     = "Security"
+    })
+  }
+
+  $openNetworkAccounts = @($storageAccts | Where-Object { $_.NetworkDefaultAction -eq 'Allow' }).Count
+  if ($openNetworkAccounts -gt 0 -and $storageAcctCount -gt 0) {
+    $findings.Add([PSCustomObject]@{
+      Severity    = "Medium"
+      Title       = "Storage Accounts Open to All Networks"
+      Description = "$openNetworkAccounts of $storageAcctCount storage account(s) allow access from all networks"
+      Section     = "Security"
+    })
+  }
+
+  # Skipped storage accounts
+  if ($skippedAccounts -gt 0) {
+    $findings.Add([PSCustomObject]@{
+      Severity    = "Info"
+      Title       = "Storage Accounts Inaccessible"
+      Description = "$skippedAccounts storage account(s) were skipped due to RBAC-only access or insufficient permissions — data may be incomplete"
       Section     = "Coverage"
     })
   }
@@ -851,7 +957,7 @@ td.mono {
     <div class="header-content">
       <div class="header-badge">Azure Infrastructure Assessment</div>
       <h1 class="header-title">Veeam Backup for Azure</h1>
-      <p class="header-subtitle">Discovery &amp; Sizing Report</p>
+      <p class="header-subtitle">Discovery &amp; Inventory Report</p>
       <div class="header-meta">
         <span><strong>Generated:</strong> $safeReportDate</span>
         <span><strong>Duration:</strong> $safeDurationStr</span>
@@ -862,19 +968,8 @@ td.mono {
 "@
 
   # ---- Assessment Details Bar ----
-  $safeRetentionDays = _EscapeHtml "$SnapshotRetentionDays"
-  $safeOverhead = _EscapeHtml "$overheadPct"
-
   $detailsBarHtml = @"
   <div class="details-bar">
-    <div class="details-bar-item">
-      <span class="details-bar-label">Snapshot Retention:</span>
-      <span class="details-bar-value">$safeRetentionDays days</span>
-    </div>
-    <div class="details-bar-item">
-      <span class="details-bar-label">Repository Overhead:</span>
-      <span class="details-bar-value">${safeOverhead}%</span>
-    </div>
     <div class="details-bar-item">
       <span class="details-bar-label">Subscriptions Scanned:</span>
       <span class="details-bar-value">$subCount</span>
@@ -882,6 +977,10 @@ td.mono {
     <div class="details-bar-item">
       <span class="details-bar-label">Workloads Discovered:</span>
       <span class="details-bar-value">$totalWorkloads</span>
+    </div>
+    <div class="details-bar-item">
+      <span class="details-bar-label">Total Source Data:</span>
+      <span class="details-bar-value">$(_EscapeHtml $sourceFormatted)</span>
     </div>
   </div>
 "@
@@ -898,15 +997,14 @@ td.mono {
   }
   $storageRing = New-SvgMiniRing -Percent $storageDiscoveryPct -Color "#F7630C"
   $vaultRing = New-SvgMiniRing -Percent $coveragePct -Color "#107C10"
-  $sourceRing = New-SvgMiniRing -Percent $sourceRepoRatio -Color "#0078D4"
-  $repoRing = New-SvgMiniRing -Percent 100 -Color "#00B336"
+  $sourceRing = New-SvgMiniRing -Percent 100 -Color "#00B336"
 
   $safeVmStorage = _EscapeHtml "$vmStorageGB GB provisioned"
+  $safeVmssSub = _EscapeHtml "$totalVMSSInstances instances, $vmssStorageGB GB"
   $safeSqlSub = _EscapeHtml "$totalSQLDbs databases + $totalSQLMIs managed instances"
-  $safeStorageSub = _EscapeHtml "$filesCount file shares + $blobsCount blob containers"
+  $safeStorageSub = _EscapeHtml "$storageAcctCount accounts, $filesCount shares, $blobsCount containers"
   $safeVaultSub = _EscapeHtml "$policiesCount backup policies"
   $safeSourceLabel = _EscapeHtml $sourceFormatted
-  $safeRepoLabel = _EscapeHtml $repoFormatted
 
   $kpiHtml = @"
   <div class="kpi-grid">
@@ -916,6 +1014,14 @@ td.mono {
         <div class="kpi-label">Azure VMs</div>
         <div class="kpi-value">$totalVMs</div>
         <div class="kpi-subtext">$safeVmStorage</div>
+      </div>
+    </div>
+    <div class="kpi-card">
+      $(New-SvgMiniRing -Percent 100 -Color "#D83B01")
+      <div class="kpi-card-content">
+        <div class="kpi-label">VM Scale Sets</div>
+        <div class="kpi-value">$totalVMSS</div>
+        <div class="kpi-subtext">$safeVmssSub</div>
       </div>
     </div>
     <div class="kpi-card">
@@ -930,7 +1036,7 @@ td.mono {
       $storageRing
       <div class="kpi-card-content">
         <div class="kpi-label">Storage Discovery</div>
-        <div class="kpi-value">$($filesCount + $blobsCount)</div>
+        <div class="kpi-value">$storageAcctCount</div>
         <div class="kpi-subtext">$safeStorageSub</div>
       </div>
     </div>
@@ -945,17 +1051,9 @@ td.mono {
     <div class="kpi-card">
       $sourceRing
       <div class="kpi-card-content">
-        <div class="kpi-label">Source Data</div>
+        <div class="kpi-label">Total Source Data</div>
         <div class="kpi-value">$safeSourceLabel</div>
         <div class="kpi-subtext">across all workloads</div>
-      </div>
-    </div>
-    <div class="kpi-card">
-      $repoRing
-      <div class="kpi-card-content">
-        <div class="kpi-label">Veeam Repository</div>
-        <div class="kpi-value">$safeRepoLabel</div>
-        <div class="kpi-subtext">recommended capacity</div>
       </div>
     </div>
   </div>
@@ -1043,6 +1141,9 @@ $actionsHtml
   if ($vmStorageGB -gt 0) {
     $donutSegments.Add(@{ Label = "VM Storage"; Value = $vmStorageGB; Color = "#0078D4" })
   }
+  if ($vmssStorageGB -gt 0) {
+    $donutSegments.Add(@{ Label = "VMSS Storage"; Value = $vmssStorageGB; Color = "#D83B01" })
+  }
   if ($sqlStorageGB -gt 0) {
     $donutSegments.Add(@{ Label = "SQL Storage"; Value = $sqlStorageGB; Color = "#8661C5" })
   }
@@ -1050,12 +1151,31 @@ $actionsHtml
   $donutChart = New-SvgDonutChart -Segments $donutSegments -CenterLabel $sourceFormatted -CenterSubLabel "Source Data"
 
   $workloadRows = ""
-  $workloadRows += "              <tr><td><strong>Virtual Machines</strong></td><td>$totalVMs</td><td>$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalVMStorageGB))</td><td>$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalSnapshotStorageGB))</td><td>$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalVMRepositoryGB))</td></tr>`n"
-  $workloadRows += "              <tr><td><strong>SQL Databases</strong></td><td>$totalSQLDbs</td><td>$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalSQLStorageGB))</td><td>&mdash;</td><td>$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalSQLRepositoryGB))</td></tr>`n"
+  $workloadRows += "              <tr><td><strong>Virtual Machines</strong></td><td>$totalVMs</td><td>$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalVMStorageGB))</td></tr>`n"
+  if ($totalVMSS -gt 0) {
+    $workloadRows += "              <tr><td><strong>VM Scale Sets</strong></td><td>$totalVMSS ($totalVMSSInstances instances)</td><td>$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalVMSSStorageGB))</td></tr>`n"
+  }
+  $workloadRows += "              <tr><td><strong>SQL Databases</strong></td><td>$totalSQLDbs</td><td>$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalSQLStorageGB))</td></tr>`n"
   if ($totalSQLMIs -gt 0) {
     $miStorage = _SafeSum $sqlMIs 'StorageSizeGB'
-    $miRepo = _SafeSum $sqlMIs 'VeeamRepositoryGB'
-    $workloadRows += "              <tr><td><strong>Managed Instances</strong></td><td>$totalSQLMIs</td><td>$(_EscapeHtml (_FormatStorageGB $miStorage))</td><td>&mdash;</td><td>$(_EscapeHtml (_FormatStorageGB $miRepo))</td></tr>`n"
+    $workloadRows += "              <tr><td><strong>Managed Instances</strong></td><td>$totalSQLMIs</td><td>$(_EscapeHtml (_FormatStorageGB $miStorage))</td></tr>`n"
+  }
+  if ($filesCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>Azure File Shares</strong></td><td>$filesCount</td><td>$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalFileShareStorageGB))</td></tr>`n"
+  }
+  if ($kvCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>Key Vaults</strong></td><td>$kvCount</td><td>&mdash;</td></tr>`n"
+  }
+  if ($aksCount -gt 0) {
+    $totalNodes = 0
+    foreach ($c in $aksClusters) { if ($null -ne $c.TotalNodeCount) { $totalNodes += $c.TotalNodeCount } }
+    $workloadRows += "              <tr><td><strong>AKS Clusters</strong></td><td>$aksCount ($totalNodes nodes)</td><td>&mdash;</td></tr>`n"
+  }
+  if ($appSvcCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>App Services</strong></td><td>$appSvcCount</td><td>&mdash;</td></tr>`n"
+  }
+  if ($storageAcctCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>Storage Accounts</strong></td><td>$storageAcctCount</td><td>&mdash;</td></tr>`n"
   }
 
   $workloadDistHtml = @"
@@ -1074,8 +1194,6 @@ $donutChart
                 <th>Workload</th>
                 <th>Count</th>
                 <th>Source Data</th>
-                <th>Snapshot</th>
-                <th>Repository</th>
               </tr>
             </thead>
             <tbody>
@@ -1131,9 +1249,6 @@ $workloadRows
     $osDiskGB = $vm.OsDiskSizeGB
     $dataDiskCount = $vm.DataDiskCount
     $totalGB = $vm.TotalProvisionedGB
-    $snapGB = if ($null -ne $vm.VeeamSnapshotStorageGB) { [math]::Round($vm.VeeamSnapshotStorageGB, 0) } else { 0 }
-    $vmRepoGB = if ($null -ne $vm.VeeamRepositoryGB) { [math]::Round($vm.VeeamRepositoryGB, 0) } else { 0 }
-
     # Disk type label (using hoisted $diskTypeMap)
     $rawOsType = "$($vm.OsDiskType)"
     $osTypeLabel = if ($diskTypeMap.ContainsKey($rawOsType)) { $diskTypeMap[$rawOsType] } else { $rawOsType }
@@ -1163,6 +1278,39 @@ $workloadRows
       "<td>$diskTypeDisplay</td>"
     }
 
+    # Encryption badge
+    $encType = "$($vm.EncryptionType)"
+    $encBadge = $encType
+    if ($encType -eq 'ADE') {
+      $encBadge = "<span style=`"background:#107C10;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85em;`">ADE</span>"
+    } elseif ($encType -eq 'SSE-CMK') {
+      $encBadge = "<span style=`"background:#0078D4;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85em;`">CMK</span>"
+    } elseif ($encType -eq 'SSE-PMK') {
+      $encBadge = "<span style=`"color:#605E5C;`">PMK</span>"
+    }
+
+    # Exposure badge
+    $expLevel = "$($vm.ExposureLevel)"
+    $expBadge = $expLevel
+    if ($expLevel -eq 'Critical') {
+      $expBadge = "<span style=`"background:#D13438;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85em;`">Critical</span>"
+    } elseif ($expLevel -eq 'High') {
+      $expBadge = "<span style=`"background:#F7630C;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85em;`">High</span>"
+    } elseif ($expLevel -eq 'Medium') {
+      $expBadge = "<span style=`"color:#F7630C;`">Medium</span>"
+    } else {
+      $expBadge = "<span style=`"color:#107C10;`">Low</span>"
+    }
+
+    # Identity
+    $safeIdentity = _EscapeHtml "$($vm.ManagedIdentity)"
+
+    # Disk display — flag unknown sizes
+    $diskDisplay = "${osDiskGB}+${dataDiskCount}d"
+    if ($vm.OsDiskUnknownSize -eq $true) {
+      $diskDisplay = "<span style=`"color:#D13438;`" title=`"OS disk size unknown`">?+${dataDiskCount}d</span>"
+    }
+
     $vmRowsList.Add(@"
               <tr>
                 <td><strong>$safeName</strong></td>
@@ -1171,11 +1319,12 @@ $workloadRows
                 <td>$osIcon $safeOs</td>
                 <td>$safeSize</td>
                 <td><span class="status-dot $dotClass"></span>$powerLabel</td>
-                <td class="mono">${osDiskGB}+${dataDiskCount}d</td>
+                <td class="mono">$diskDisplay</td>
                 $diskTypeTd
                 <td class="mono">$totalGB GB</td>
-                <td class="mono">$snapGB GB</td>
-                <td class="mono">$vmRepoGB GB</td>
+                <td>$encBadge</td>
+                <td>$expBadge</td>
+                <td>$safeIdentity</td>
               </tr>
 "@)
   }
@@ -1200,8 +1349,9 @@ $workloadRows
             <th>Disks (OS+Data)</th>
             <th>Disk Type</th>
             <th>Total Storage</th>
-            <th>Veeam Snapshot</th>
-            <th>Veeam Repository</th>
+            <th>Encryption</th>
+            <th>Exposure</th>
+            <th>Identity</th>
           </tr>
         </thead>
         <tbody>
@@ -1294,7 +1444,219 @@ $regionTableRows
 "@
   }
 
-  # ---- Section 05: SQL Databases ----
+  # ---- Section 05: VMSS Inventory ----
+  $vmssHtml = ""
+  if ($vmssItems.Count -gt 0) {
+    $vmssTableRows = ""
+    foreach ($ss in $vmssItems) {
+      $safeSsName = _EscapeHtml $ss.Name
+      $safeSsSub = _EscapeHtml $ss.SubscriptionName
+      $safeSsLoc = _EscapeHtml $ss.Location
+      $safeSsSku = _EscapeHtml $ss.SkuName
+      $safeSsIdentity = _EscapeHtml $ss.ManagedIdentity
+      $ssCapacity = if ($null -ne $ss.Capacity) { $ss.Capacity } else { 0 }
+      $ssTotalGB = if ($null -ne $ss.TotalDiskAllInstances) { $ss.TotalDiskAllInstances } else { 0 }
+      $vmssTableRows += "              <tr><td><strong>$safeSsName</strong></td><td>$safeSsSub</td><td>$safeSsLoc</td><td>$safeSsSku</td><td class=`"mono`">$ssCapacity</td><td class=`"mono`">$ssTotalGB GB</td><td>$safeSsIdentity</td></tr>`n"
+    }
+    $vmssHtml = @"
+  <details class="section">
+    <summary>VM Scale Sets</summary>
+    <div class="section-content">
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>Scale Set</th>
+            <th>Subscription</th>
+            <th>Region</th>
+            <th>VM Size</th>
+            <th>Instances</th>
+            <th>Total Storage</th>
+            <th>Identity</th>
+          </tr>
+        </thead>
+        <tbody>
+$vmssTableRows
+        </tbody>
+      </table>
+    </div>
+    </div>
+  </details>
+"@
+  }
+
+  # ---- Section 05b: Security Posture ----
+  $securityPostureHtml = ""
+  $hasSecurityData = ($VmInventory.Count -gt 0 -or $storageAccts.Count -gt 0)
+  if ($hasSecurityData) {
+    $secContent = ""
+
+    # Encryption summary
+    if ($VmInventory.Count -gt 0) {
+      $secContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">VM Disk Encryption</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Encryption Type</th><th>Count</th><th>Percentage</th></tr></thead>
+        <tbody>
+          <tr><td><span style="background:#107C10;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85em;">ADE</span> Azure Disk Encryption</td><td class="mono">$adeVMs</td><td class="mono">$(if ($totalVMs -gt 0) { [math]::Round($adeVMs / $totalVMs * 100, 0) } else { 0 })%</td></tr>
+          <tr><td><span style="background:#0078D4;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85em;">CMK</span> Customer-Managed Keys</td><td class="mono">$cmkVMs</td><td class="mono">$(if ($totalVMs -gt 0) { [math]::Round($cmkVMs / $totalVMs * 100, 0) } else { 0 })%</td></tr>
+          <tr><td><span style="color:#605E5C;">PMK</span> Platform-Managed Keys</td><td class="mono">$noEncryptionVMs</td><td class="mono">$(if ($totalVMs -gt 0) { [math]::Round($noEncryptionVMs / $totalVMs * 100, 0) } else { 0 })%</td></tr>
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    # Exposure summary
+    if ($VmInventory.Count -gt 0) {
+      $lowExposure = @($VmInventory | Where-Object { $_.ExposureLevel -eq 'Low' }).Count
+      $medExposure = @($VmInventory | Where-Object { $_.ExposureLevel -eq 'Medium' }).Count
+      $secContent += @"
+
+    <div style="margin-top: 24px; font-weight: 600; font-size: 14px; margin-bottom: 12px;">Network Exposure</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Exposure Level</th><th>Count</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><span style="background:#D13438;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85em;">Critical</span></td><td class="mono">$criticalExposure</td><td>All ports open to internet</td></tr>
+          <tr><td><span style="background:#F7630C;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.85em;">High</span></td><td class="mono">$highExposure</td><td>Sensitive ports (SSH/RDP/SQL) open to internet</td></tr>
+          <tr><td><span style="color:#F7630C;">Medium</span></td><td class="mono">$medExposure</td><td>Public IP assigned (no dangerous inbound rules detected)</td></tr>
+          <tr><td><span style="color:#107C10;">Low</span></td><td class="mono">$lowExposure</td><td>No public IP, no dangerous inbound rules</td></tr>
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    # Storage security summary
+    if ($storageAccts.Count -gt 0) {
+      $httpsOnlyCount = @($storageAccts | Where-Object { $_.HttpsOnly -eq $true }).Count
+      $firewallCount = @($storageAccts | Where-Object { $_.NetworkDefaultAction -eq 'Deny' }).Count
+      $noKeyAccessCount = @($storageAccts | Where-Object { $_.AllowSharedKeyAccess -eq $false }).Count
+      $secContent += @"
+
+    <div style="margin-top: 24px; font-weight: 600; font-size: 14px; margin-bottom: 12px;">Storage Account Security ($storageAcctCount accounts)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Security Control</th><th>Enabled</th><th>Coverage</th></tr></thead>
+        <tbody>
+          <tr><td>HTTPS Only</td><td class="mono">$httpsOnlyCount / $storageAcctCount</td><td class="mono">$(if ($storageAcctCount -gt 0) { [math]::Round($httpsOnlyCount / $storageAcctCount * 100, 0) } else { 0 })%</td></tr>
+          <tr><td>Firewall (Deny Default)</td><td class="mono">$firewallCount / $storageAcctCount</td><td class="mono">$(if ($storageAcctCount -gt 0) { [math]::Round($firewallCount / $storageAcctCount * 100, 0) } else { 0 })%</td></tr>
+          <tr><td>Blob Public Access Disabled</td><td class="mono">$($storageAcctCount - $publicStorageAccounts) / $storageAcctCount</td><td class="mono">$(if ($storageAcctCount -gt 0) { [math]::Round(($storageAcctCount - $publicStorageAccounts) / $storageAcctCount * 100, 0) } else { 0 })%</td></tr>
+          <tr><td>Shared Key Access Disabled (RBAC-only)</td><td class="mono">$noKeyAccessCount / $storageAcctCount</td><td class="mono">$(if ($storageAcctCount -gt 0) { [math]::Round($noKeyAccessCount / $storageAcctCount * 100, 0) } else { 0 })%</td></tr>
+        </tbody>
+      </table>
+    </div>
+"@
+      if ($skippedAccounts -gt 0) {
+        $secContent += @"
+    <div class="info-card" style="margin-top: 12px; border-left-color: var(--color-warning);">
+      <div class="info-card-text">$skippedAccounts storage account(s) were inaccessible (RBAC-only or insufficient permissions) and could not be enumerated for file shares and blob containers.</div>
+    </div>
+"@
+      }
+    }
+
+    $securityPostureHtml = @"
+  <details class="section" open>
+    <summary>Security Posture</summary>
+    <div class="section-content">
+$secContent
+    </div>
+  </details>
+"@
+  }
+
+  # ---- Section 05c: Additional Resources ----
+  $additionalResourcesHtml = ""
+  $hasAdditional = ($kvCount -gt 0 -or $aksCount -gt 0 -or $appSvcCount -gt 0)
+  if ($hasAdditional) {
+    $addlContent = ""
+
+    if ($kvCount -gt 0) {
+      $kvRows = ""
+      foreach ($kv in $keyVaults) {
+        $safeKvName = _EscapeHtml $kv.Name
+        $safeKvLoc = _EscapeHtml $kv.Location
+        $safeKvSub = _EscapeHtml $kv.SubscriptionName
+        $sdBadge = if ($kv.SoftDeleteEnabled) { "<span class=`"status-dot green`"></span>Enabled" } else { "<span class=`"status-dot orange`"></span>Disabled" }
+        $ppBadge = if ($kv.PurgeProtection) { "<span class=`"status-dot green`"></span>Enabled" } else { "<span class=`"status-dot orange`"></span>Disabled" }
+        $kvRows += "              <tr><td><strong>$safeKvName</strong></td><td>$safeKvSub</td><td>$safeKvLoc</td><td>$sdBadge</td><td>$ppBadge</td></tr>`n"
+      }
+      $addlContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">Key Vaults ($kvCount)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>Soft Delete</th><th>Purge Protection</th></tr></thead>
+        <tbody>
+$kvRows
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    if ($aksCount -gt 0) {
+      $aksRows = ""
+      foreach ($aks in $aksClusters) {
+        $safeAksName = _EscapeHtml $aks.Name
+        $safeAksLoc = _EscapeHtml $aks.Location
+        $safeAksSub = _EscapeHtml $aks.SubscriptionName
+        $safeAksVer = _EscapeHtml $aks.KubernetesVersion
+        $aksNodes = if ($null -ne $aks.TotalNodeCount) { $aks.TotalNodeCount } else { 0 }
+        $aksRows += "              <tr><td><strong>$safeAksName</strong></td><td>$safeAksSub</td><td>$safeAksLoc</td><td>$safeAksVer</td><td class=`"mono`">$aksNodes</td></tr>`n"
+      }
+      if ($kvCount -gt 0) { $addlContent += "`n    <div style=`"margin-top: 24px;`"></div>`n" }
+      $addlContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">AKS Clusters ($aksCount)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>K8s Version</th><th>Nodes</th></tr></thead>
+        <tbody>
+$aksRows
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    if ($appSvcCount -gt 0) {
+      $appRows = ""
+      foreach ($app in $appServices) {
+        $safeAppName = _EscapeHtml $app.Name
+        $safeAppLoc = _EscapeHtml $app.Location
+        $safeAppSub = _EscapeHtml $app.SubscriptionName
+        $safeAppKind = _EscapeHtml $app.Kind
+        $safeAppState = _EscapeHtml $app.State
+        $httpsBadge = if ($app.HttpsOnly) { "<span class=`"status-dot green`"></span>Yes" } else { "<span class=`"status-dot orange`"></span>No" }
+        $appRows += "              <tr><td><strong>$safeAppName</strong></td><td>$safeAppSub</td><td>$safeAppLoc</td><td>$safeAppKind</td><td>$safeAppState</td><td>$httpsBadge</td></tr>`n"
+      }
+      if ($kvCount -gt 0 -or $aksCount -gt 0) { $addlContent += "`n    <div style=`"margin-top: 24px;`"></div>`n" }
+      $addlContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">App Services ($appSvcCount)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>Kind</th><th>State</th><th>HTTPS Only</th></tr></thead>
+        <tbody>
+$appRows
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    $additionalResourcesHtml = @"
+  <details class="section">
+    <summary>Additional Resources</summary>
+    <div class="section-content">
+$addlContent
+    </div>
+  </details>
+"@
+  }
+
+  # ---- Section 06: SQL Databases ----
   $sqlHtml = ""
   $hasSqlData = ($sqlDbs.Count -gt 0 -or $sqlMIs.Count -gt 0)
 
@@ -1311,9 +1673,9 @@ $regionTableRows
         $safeLoc = _EscapeHtml $db.Location
         $safeRedundancy = _EscapeHtml $db.BackupStorageRedundancy
         $dbMaxSize = if ($null -ne $db.MaxSizeGB) { $db.MaxSizeGB } else { 0 }
-        $dbRepo = if ($null -ne $db.VeeamRepositoryGB) { $db.VeeamRepositoryGB } else { 0 }
+        $dbCurrentSize = if ($null -ne $db.CurrentSizeGB -and $db.CurrentSizeGB -gt 0) { "$($db.CurrentSizeGB) GB" } else { "&mdash;" }
 
-        $sqlDbRows += "              <tr><td>$safeServer</td><td><strong>$safeDbName</strong></td><td>$safeEdition</td><td>$safeLoc</td><td class=`"mono`">$dbMaxSize GB</td><td>$safeRedundancy</td><td class=`"mono`">$dbRepo GB</td></tr>`n"
+        $sqlDbRows += "              <tr><td>$safeServer</td><td><strong>$safeDbName</strong></td><td>$safeEdition</td><td>$safeLoc</td><td class=`"mono`">$dbMaxSize GB</td><td class=`"mono`">$dbCurrentSize</td><td>$safeRedundancy</td></tr>`n"
       }
 
       $sqlSectionContent += @"
@@ -1327,8 +1689,8 @@ $regionTableRows
             <th>Edition</th>
             <th>Region</th>
             <th>Max Size</th>
+            <th>Current Size</th>
             <th>Backup Redundancy</th>
-            <th>Veeam Repository</th>
           </tr>
         </thead>
         <tbody>
@@ -1348,9 +1710,8 @@ $sqlDbRows
         $safeLicense = _EscapeHtml $mi.LicenseType
         $miVCores = if ($null -ne $mi.VCores) { $mi.VCores } else { 0 }
         $miStorageGB = if ($null -ne $mi.StorageSizeGB) { $mi.StorageSizeGB } else { 0 }
-        $miRepoGB = if ($null -ne $mi.VeeamRepositoryGB) { $mi.VeeamRepositoryGB } else { 0 }
 
-        $miRows += "              <tr><td><strong>$safeMiName</strong></td><td>$safeMiLoc</td><td class=`"mono`">$miVCores</td><td class=`"mono`">$miStorageGB GB</td><td>$safeLicense</td><td class=`"mono`">$miRepoGB GB</td></tr>`n"
+        $miRows += "              <tr><td><strong>$safeMiName</strong></td><td>$safeMiLoc</td><td class=`"mono`">$miVCores</td><td class=`"mono`">$miStorageGB GB</td><td>$safeLicense</td></tr>`n"
       }
 
       if ($sqlDbs.Count -gt 0) {
@@ -1368,7 +1729,6 @@ $sqlDbRows
             <th>vCores</th>
             <th>Storage</th>
             <th>License</th>
-            <th>Veeam Repository</th>
           </tr>
         </thead>
         <tbody>
@@ -1522,12 +1882,8 @@ $backupCoverageContent
   </details>
 "@
 
-  # ---- Section 07: Veeam Sizing ----
-  $capacityChart = New-SvgCapacityForecast -CurrentGB $VeeamSizing.TotalSourceStorageGB -ProjectedGB $VeeamSizing.TotalSnapshotStorageGB -RecommendedGB $VeeamSizing.TotalRepositoryGB
-
-  # Sizing breakdown table
-  $sizingTableHtml = @"
-    <div style="margin-top: 24px; font-weight: 600; font-size: 14px; margin-bottom: 12px;">Sizing Breakdown</div>
+  # ---- Section 07: Source Data Summary ----
+  $sourceSummaryTableHtml = @"
     <div class="table-container">
       <table>
         <thead>
@@ -1544,9 +1900,9 @@ $backupCoverageContent
             <td>Total provisioned disk capacity across $totalVMs VMs</td>
           </tr>
           <tr>
-            <td><strong>Snapshot Storage</strong></td>
-            <td class="mono" style="color: var(--ms-blue); font-weight: 700;">$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalSnapshotStorageGB))</td>
-            <td>Based on $safeRetentionDays days retention with $([math]::Round($DailyChangeRate * 100, 0))% daily change rate</td>
+            <td><strong>VMSS Source Storage</strong></td>
+            <td class="mono">$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalVMSSStorageGB))</td>
+            <td>$totalVMSS scale sets ($totalVMSSInstances instances)</td>
           </tr>
           <tr>
             <td><strong>SQL Source Storage</strong></td>
@@ -1554,14 +1910,14 @@ $backupCoverageContent
             <td>$totalSQLDbs databases + $totalSQLMIs managed instances</td>
           </tr>
           <tr>
-            <td><strong>Total Source Data</strong></td>
-            <td class="mono">$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalSourceStorageGB))</td>
-            <td>Combined VM + SQL source data</td>
+            <td><strong>Azure Files Storage</strong></td>
+            <td class="mono">$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalFileShareStorageGB))</td>
+            <td>$filesCount file shares (quota-based)</td>
           </tr>
           <tr>
-            <td><strong>Repository Capacity</strong></td>
-            <td class="mono" style="color: var(--veeam-green); font-weight: 700;">$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalRepositoryGB))</td>
-            <td>Includes ${safeOverhead}% overhead for compression and retention</td>
+            <td><strong>Total Source Data</strong></td>
+            <td class="mono" style="color: var(--ms-blue); font-weight: 700;">$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalSourceStorageGB))</td>
+            <td>Combined VM + VMSS + SQL + Files source data</td>
           </tr>
         </tbody>
       </table>
@@ -1593,36 +1949,18 @@ $backupCoverageContent
     }
   }
 
-  # Also include original VeeamSizing recommendations if present
-  $originalRecs = ""
-  if ($null -ne $VeeamSizing.Recommendations -and $VeeamSizing.Recommendations.Count -gt 0) {
-    $originalRecs = @"
-    <div style="margin-top: 24px; font-weight: 600; font-size: 14px; margin-bottom: 12px;">Sizing Recommendations</div>
-    <div class="info-card">
+  $sourceSummaryHtml = @"
+  <details class="section" open>
+    <summary>Source Data Summary</summary>
+    <div class="section-content">
+$sourceSummaryTableHtml
+$recsHtml
+    <div class="info-card" style="margin-top: 16px; border-left-color: var(--color-info);">
+      <div class="info-card-title">Next Step</div>
       <div class="info-card-text">
-        <ul style="margin: 0 0 0 20px;">
-"@
-    foreach ($rec in $VeeamSizing.Recommendations) {
-      $safeRec = _EscapeHtml $rec
-      $originalRecs += "          <li style=`"padding: 4px 0;`">$safeRec</li>`n"
-    }
-    $originalRecs += @"
-        </ul>
+        Use these source totals with the Veeam Backup for Azure sizing calculator to determine snapshot storage and repository capacity requirements for your environment.
       </div>
     </div>
-"@
-  }
-
-  $veeamSizingHtml = @"
-  <details class="section" open>
-    <summary>Veeam Sizing</summary>
-    <div class="section-content">
-    <div class="svg-container">
-$capacityChart
-    </div>
-$sizingTableHtml
-$originalRecs
-$recsHtml
     </div>
   </details>
 "@
@@ -1657,6 +1995,32 @@ $subTableRows
 "@
 
   # ---- Section 09: Methodology ----
+  # Filter metadata audit trail
+  $filterAuditHtml = ""
+  if ($null -ne $FilterMetadata) {
+    $safeRegionFilter = _EscapeHtml "$($FilterMetadata.Region)"
+    $safeTagFilter = _EscapeHtml "$($FilterMetadata.TagFilter)"
+    $safeSubFilter = _EscapeHtml "$($FilterMetadata.Subscriptions)"
+    $safeTimestamp = _EscapeHtml "$($FilterMetadata.RunTimestamp)"
+    $safePsVersion = _EscapeHtml "$($FilterMetadata.PowerShellVersion)"
+    $calcBlobs = if ($FilterMetadata.CalculateBlobSizes) { "Yes" } else { "No" }
+    $filterAuditHtml = @"
+    <div class="info-card" style="margin-top: 16px;">
+      <div class="info-card-title">Assessment Parameters</div>
+      <div class="info-card-text">
+        <table style="font-size: 13px; width: auto;">
+          <tr><td style="padding: 4px 16px 4px 0; font-weight: 600;">Run Timestamp</td><td>$safeTimestamp</td></tr>
+          <tr><td style="padding: 4px 16px 4px 0; font-weight: 600;">Region Filter</td><td>$safeRegionFilter</td></tr>
+          <tr><td style="padding: 4px 16px 4px 0; font-weight: 600;">Tag Filter</td><td>$safeTagFilter</td></tr>
+          <tr><td style="padding: 4px 16px 4px 0; font-weight: 600;">Subscriptions</td><td>$safeSubFilter</td></tr>
+          <tr><td style="padding: 4px 16px 4px 0; font-weight: 600;">Blob Size Calculation</td><td>$calcBlobs</td></tr>
+          <tr><td style="padding: 4px 16px 4px 0; font-weight: 600;">PowerShell Version</td><td>$safePsVersion</td></tr>
+        </table>
+      </div>
+    </div>
+"@
+  }
+
   $methodologyHtml = @"
   <details class="section">
     <summary>Methodology</summary>
@@ -1664,22 +2028,10 @@ $subTableRows
     <div class="info-card">
       <div class="info-card-title">Data Collection</div>
       <div class="info-card-text">
-        This assessment uses Azure Resource Manager APIs to inventory VMs, SQL databases, storage accounts, and existing Azure Backup configuration across $subCount subscription(s). All data is read-only and no changes are made to your environment.
+        This assessment uses Azure Resource Manager APIs to inventory VMs, VMSS, SQL databases, storage accounts, Key Vaults, AKS clusters, App Services, and existing Azure Backup configuration across $subCount subscription(s). Disk encryption status, managed identities, and NSG exposure are analyzed for security posture assessment. All data is read-only and no changes are made to your environment.
       </div>
     </div>
-    <div class="info-card">
-      <div class="info-card-title">Veeam Sizing Calculations</div>
-      <div class="info-card-text">
-        Snapshot and repository capacity estimates are mathematical models based on provisioned storage, daily change rates, and retention policies. Actual consumption depends on backup configuration, data deduplication, and compression ratios.
-      </div>
-    </div>
-    <div class="code-block">
-      <span class="code-line">SnapshotStorageGB = ProvisionedDiskGB x (RetentionDays / 30) x DailyChangeRate</span>
-      <span class="code-line">                  = TotalVMStorageGB x ($SnapshotRetentionDays / 30) x $DailyChangeRate</span>
-      <span class="code-line"></span>
-      <span class="code-line">RepositoryGB      = SourceDataGB x OverheadMultiplier</span>
-      <span class="code-line">                  = TotalSourceGB x $RepositoryOverhead</span>
-    </div>
+$filterAuditHtml
     <div class="info-card" style="margin-top: 16px;">
       <div class="info-card-title">Backup Coverage Score</div>
       <div class="info-card-text">
@@ -1689,7 +2041,7 @@ $subTableRows
     <div class="info-card" style="border-left-color: var(--color-warning);">
       <div class="info-card-title">Disclaimer</div>
       <div class="info-card-text">
-        These are sizing estimates for planning purposes. Actual storage consumption will vary based on backup policies, data change rates, compression ratios, and workload characteristics. Validate estimates with a proof-of-concept deployment before production sizing decisions.
+        This is a community-maintained discovery tool, not an official Veeam product. Source data collected here is intended for use with external Veeam sizing calculators. Actual storage requirements depend on backup policies, data change rates, compression ratios, and workload characteristics.
       </div>
     </div>
     </div>
@@ -1715,7 +2067,7 @@ $subTableRows
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
-<title>Veeam Backup for Azure - Sizing Assessment</title>
+<title>Veeam Backup for Azure - Discovery &amp; Inventory</title>
 <style>
 $cssBlock
 </style>
@@ -1729,9 +2081,12 @@ $execSummaryHtml
 $workloadDistHtml
 $vmInventoryHtml
 $vmsByRegionHtml
+$vmssHtml
+$securityPostureHtml
+$additionalResourcesHtml
 $sqlHtml
 $backupCoverageHtml
-$veeamSizingHtml
+$sourceSummaryHtml
 $subscriptionsHtml
 $methodologyHtml
 $footerHtml
