@@ -171,6 +171,7 @@ $requiredLibs = @(
   "DataCollection.ps1",
   "IdentityAssessment.ps1",
   "LicenseAnalysis.ps1",
+  "BackupWindow.ps1",
   "Findings.ps1",
   "Compliance.ps1",
   "Persistence.ps1",
@@ -260,6 +261,12 @@ if ($Full) {
   $script:licenseData = Get-LicenseAnalysis
 }
 
+# Step 6b: Backup window estimation (always runs)
+$script:backupWindow = Get-BackupWindowEstimate
+if ($script:backupWindow -and $script:backupWindow.Total_LikelyHours -gt 0) {
+  Write-Log "Backup window estimate: $($script:backupWindow.Total_LikelyHours)h likely (initial full)"
+}
+
 # Step 7: Zero Trust scores, findings & recommendations (Full mode only)
 $script:ztScores = Get-ZeroTrustScores
 $script:findings = Get-Findings
@@ -310,6 +317,7 @@ $summary = Export-SummaryData
 $wl      = Export-WorkloadData
 $sec     = Export-SecurityData
 
+Export-BackupWindowData
 Export-LicenseData
 Export-FindingsData
 Export-RecommendationsData

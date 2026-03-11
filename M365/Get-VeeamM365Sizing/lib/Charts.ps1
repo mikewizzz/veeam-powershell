@@ -382,6 +382,141 @@ $gridSvg
 .EXAMPLE
   New-SvgMiniRing -Percent 73 -Color "#0078D4"
 #>
+<#
+.SYNOPSIS
+  Generates a backup window timeline SVG showing Exchange, SPO+ODB, and Total bars.
+.PARAMETER BackupWindow
+  PSCustomObject from Get-BackupWindowEstimate.
+.PARAMETER TargetHours
+  Backup window target in hours (dashed line). Default 8.
+.EXAMPLE
+  New-SvgBackupTimeline -BackupWindow $script:backupWindow
+#>
+function New-SvgBackupTimeline {
+  param(
+    [PSCustomObject]$BackupWindow,
+    [double]$TargetHours = 8
+  )
+
+  if (-not $BackupWindow) { return "" }
+
+  # Colors
+  $exColor  = "#0078D4"   # Microsoft blue
+  $spoColor = "#00B336"   # Veeam green
+  $totColor = "#8764B8"   # Purple
+  $winColor = "#F7630C"   # Warning orange
+
+  # Determine max value for scale
+  $maxHrs = $BackupWindow.Total_MaxHours
+  if ($BackupWindow.Ex_MaxHours -gt $maxHrs) { $maxHrs = $BackupWindow.Ex_MaxHours }
+  if ($BackupWindow.SPO_MaxHours -gt $maxHrs) { $maxHrs = $BackupWindow.SPO_MaxHours }
+  if ($TargetHours -gt $maxHrs) { $maxHrs = $TargetHours }
+  if ($maxHrs -le 0) { $maxHrs = 1 }
+  $maxHrs = $maxHrs * 1.15  # 15% headroom
+
+  # Layout
+  $chartW = 520; $labelW = 130; $rightPad = 40
+  $totalW = $labelW + $chartW + $rightPad
+  $barH = 32; $rowGap = 16; $topPad = 30
+  $rowCount = 3  # Exchange, SPO+ODB, Total
+  $totalH = $topPad + $rowCount * ($barH + $rowGap) + 60
+
+  # Build rows
+  $rows = @(
+    @{ Label = "Exchange";      Min = $BackupWindow.Ex_MinHours;   Likely = $BackupWindow.Ex_LikelyHours;   Max = $BackupWindow.Ex_MaxHours;    Color = $exColor }
+    @{ Label = "SPO + OneDrive"; Min = $BackupWindow.SPO_MinHours; Likely = $BackupWindow.SPO_LikelyHours;  Max = $BackupWindow.SPO_MaxHours;   Color = $spoColor }
+    @{ Label = "Total (parallel)"; Min = $BackupWindow.Total_MinHours; Likely = $BackupWindow.Total_LikelyHours; Max = $BackupWindow.Total_MaxHours; Color = $totColor }
+  )
+
+  $svgBars = ""
+
+  for ($i = 0; $i -lt $rows.Count; $i++) {
+    $row = $rows[$i]
+    $y = $topPad + $i * ($barH + $rowGap)
+
+    $minW    = [Math]::Round(($row.Min / $maxHrs) * $chartW, 1)
+    $likelyW = [Math]::Round(($row.Likely / $maxHrs) * $chartW, 1)
+    $maxW    = [Math]::Round(($row.Max / $maxHrs) * $chartW, 1)
+    if ($minW -lt 2 -and $row.Min -gt 0) { $minW = 2 }
+    if ($likelyW -lt 2 -and $row.Likely -gt 0) { $likelyW = 2 }
+    if ($maxW -lt 2 -and $row.Max -gt 0) { $maxW = 2 }
+
+    $escapedLabel = Escape-Html $row.Label
+
+    # Label
+    $svgBars += "      <text x=`"$($labelW - 10)`" y=`"$($y + $barH / 2 + 1)`" text-anchor=`"end`" dominant-baseline=`"middle`" fill=`"#323130`" font-size=`"12`" font-weight=`"600`" font-family=`"'Segoe UI',sans-serif`">$escapedLabel</text>`n"
+
+    # Max band (light, dashed outline)
+    if ($maxW -gt 0) {
+      $svgBars += "      <rect x=`"$labelW`" y=`"$y`" width=`"$maxW`" height=`"$barH`" rx=`"4`" fill=`"$($row.Color)`" opacity=`"0.15`" stroke=`"$($row.Color)`" stroke-width=`"1`" stroke-dasharray=`"4,3`" />`n"
+    }
+    # Likely band (medium opacity)
+    if ($likelyW -gt 0) {
+      $svgBars += "      <rect x=`"$labelW`" y=`"$y`" width=`"$likelyW`" height=`"$barH`" rx=`"4`" fill=`"$($row.Color)`" opacity=`"0.55`" />`n"
+    }
+    # Min band (full opacity)
+    if ($minW -gt 0) {
+      $svgBars += "      <rect x=`"$labelW`" y=`"$y`" width=`"$minW`" height=`"$barH`" rx=`"4`" fill=`"$($row.Color)`" opacity=`"0.9`" />`n"
+    }
+
+    # Value label
+    $valLabel = "{0:N1}h" -f $row.Likely
+    $svgBars += "      <text x=`"$($labelW + $maxW + 8)`" y=`"$($y + $barH / 2 + 1)`" dominant-baseline=`"middle`" fill=`"#605E5C`" font-size=`"11`" font-weight=`"600`" font-family=`"'Cascadia Code','Consolas',monospace`">$valLabel</text>`n"
+  }
+
+  # Target window dashed line
+  $targetX = $labelW + [Math]::Round(($TargetHours / $maxHrs) * $chartW, 1)
+  $lineTop = $topPad - 8
+  $lineBot = $topPad + $rowCount * ($barH + $rowGap)
+  $svgBars += "      <line x1=`"$targetX`" y1=`"$lineTop`" x2=`"$targetX`" y2=`"$lineBot`" stroke=`"$winColor`" stroke-width=`"2`" stroke-dasharray=`"6,4`" />`n"
+  $svgBars += "      <text x=`"$targetX`" y=`"$($lineTop - 4)`" text-anchor=`"middle`" fill=`"$winColor`" font-size=`"10`" font-weight=`"600`" font-family=`"'Segoe UI',sans-serif`">${TargetHours}h window</text>`n"
+
+  # X-axis scale
+  $axisY = $lineBot + 16
+  $gridSteps = 4
+  if ($maxHrs -gt 24) { $gridSteps = 6 }
+  $stepSize = [Math]::Ceiling($maxHrs / $gridSteps)
+
+  for ($h = 0; $h -le $maxHrs; $h += $stepSize) {
+    $gx = $labelW + [Math]::Round(($h / $maxHrs) * $chartW, 1)
+    # Grid line
+    $svgBars += "      <line x1=`"$gx`" y1=`"$topPad`" x2=`"$gx`" y2=`"$lineBot`" stroke=`"#EDEBE9`" stroke-width=`"0.5`" />`n"
+    # Label
+    $svgBars += "      <text x=`"$gx`" y=`"$axisY`" text-anchor=`"middle`" fill=`"#A19F9D`" font-size=`"10`" font-family=`"'Segoe UI',sans-serif`">${h}h</text>`n"
+  }
+
+  # Legend
+  $legY = $axisY + 20
+  $svgBars += "      <rect x=`"$labelW`" y=`"$legY`" width=`"14`" height=`"10`" rx=`"2`" fill=`"#605E5C`" opacity=`"0.9`" />`n"
+  $svgBars += "      <text x=`"$($labelW + 18)`" y=`"$($legY + 9)`" fill=`"#605E5C`" font-size=`"10`" font-family=`"'Segoe UI',sans-serif`">Best case</text>`n"
+  $svgBars += "      <rect x=`"$($labelW + 80)`" y=`"$legY`" width=`"14`" height=`"10`" rx=`"2`" fill=`"#605E5C`" opacity=`"0.55`" />`n"
+  $svgBars += "      <text x=`"$($labelW + 98 + 4)`" y=`"$($legY + 9)`" fill=`"#605E5C`" font-size=`"10`" font-family=`"'Segoe UI',sans-serif`">Likely</text>`n"
+  $svgBars += "      <rect x=`"$($labelW + 152)`" y=`"$legY`" width=`"14`" height=`"10`" rx=`"2`" fill=`"#605E5C`" opacity=`"0.15`" stroke=`"#605E5C`" stroke-width=`"1`" stroke-dasharray=`"3,2`" />`n"
+  $svgBars += "      <text x=`"$($labelW + 170)`" y=`"$($legY + 9)`" fill=`"#605E5C`" font-size=`"10`" font-family=`"'Segoe UI',sans-serif`">Conservative</text>`n"
+  $svgBars += "      <line x1=`"$($labelW + 246)`" y1=`"$($legY + 5)`" x2=`"$($labelW + 264)`" y2=`"$($legY + 5)`" stroke=`"$winColor`" stroke-width=`"2`" stroke-dasharray=`"4,3`" />`n"
+  $svgBars += "      <text x=`"$($labelW + 268)`" y=`"$($legY + 9)`" fill=`"#605E5C`" font-size=`"10`" font-family=`"'Segoe UI',sans-serif`">Backup window target</text>`n"
+
+  $svgH = $legY + 24
+
+  return @"
+    <svg viewBox="0 0 $totalW $svgH" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Backup window timeline" style="max-width:${totalW}px">
+$svgBars
+    </svg>
+"@
+}
+
+<#
+.SYNOPSIS
+  Generates a tiny progress ring SVG (48px) for use inside KPI cards.
+.PARAMETER Percent
+  Fill percentage (0-100).
+.PARAMETER Color
+  Stroke color for the filled arc. Default blue.
+.PARAMETER Size
+  Width/height in pixels. Default 48.
+.EXAMPLE
+  New-SvgMiniRing -Percent 73 -Color "#0078D4"
+#>
 function New-SvgMiniRing {
   param(
     [double]$Percent = 0,

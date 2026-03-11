@@ -120,3 +120,37 @@ function Mask-UPN([string]$upn) {
   $hash  = ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") }) -join ""
   return "user_" + $hash.Substring(0,12)
 }
+
+# =========================================================================
+# Backup Window Estimation: Microsoft Graph Throttle Limits
+# =========================================================================
+# Sources tagged: [DOCUMENTED] = learn.microsoft.com, [ESTIMATED] = practical assumption
+
+# ── Exchange ── [DOCUMENTED per-mailbox limits]
+$BW_EX_UPLOAD_MB_PER_5MIN     = 150       # [DOCUMENTED] per mailbox per app
+$BW_EX_REQUESTS_PER_10MIN     = 10000     # [DOCUMENTED] per app per mailbox
+$BW_EX_CONCURRENT_PER_MBX     = 4         # [DOCUMENTED] per mailbox
+$BW_EX_GB_PER_MBX_PER_HR      = 1.8       # [DOCUMENTED] derived: 150 MB/5 min = 1.8 GB/hr
+$BW_EX_AVG_ITEM_SIZE_KB       = 75        # [ESTIMATED]
+$BW_EX_ITEMS_PER_REQUEST      = 10        # [ESTIMATED]
+
+# ── SharePoint + OneDrive ── [DOCUMENTED shared RU pool]
+$BW_SPO_EGRESS_GB_PER_HR      = 400       # [DOCUMENTED] per app per tenant
+$BW_SPO_RU_DOWNLOAD           = 1         # [DOCUMENTED]
+$BW_SPO_RU_LIST               = 2         # [DOCUMENTED]
+$BW_SPO_AVG_FILE_SIZE_MB      = 2         # [ESTIMATED]
+$BW_SPO_BLENDED_RU_PER_FILE   = 1.5       # [ESTIMATED]
+
+# RU tiers by license count [DOCUMENTED]
+$BW_SPO_RU_TIERS = @(
+    @{ MaxLicenses = 1000;           TenantRU5Min = 18750;  AppRUPerMin = 1250 }
+    @{ MaxLicenses = 5000;           TenantRU5Min = 37500;  AppRUPerMin = 2500 }
+    @{ MaxLicenses = 15000;          TenantRU5Min = 56250;  AppRUPerMin = 3750 }
+    @{ MaxLicenses = 50000;          TenantRU5Min = 75000;  AppRUPerMin = 5000 }
+    @{ MaxLicenses = [int]::MaxValue; TenantRU5Min = 93750; AppRUPerMin = 6250 }
+)
+
+# ── VDC concurrency & efficiency ── [ESTIMATED]
+$BW_VDC_CONCURRENT_MBX  = @{ Min = 64;  Likely = 32;   Max = 8   }
+$BW_EX_EFFICIENCY        = @{ Min = 1.0; Likely = 0.60; Max = 0.35 }
+$BW_SPO_EFFICIENCY       = @{ Min = 1.0; Likely = 0.55; Max = 0.30 }

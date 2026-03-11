@@ -243,6 +243,33 @@ details.section > summary:hover {
   margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.04em;
 }
 
+/* ===== Backup Window ===== */
+.bw-table { margin-top: 16px; }
+.bw-table th, .bw-table td { padding: 8px 12px; text-align: right; }
+.bw-table th:first-child, .bw-table td:first-child { text-align: left; }
+.bw-table tr.bw-total { background: var(--ms-gray-20); font-weight: 700; }
+.bw-table tr.bw-incr td { font-size: 12px; color: var(--ms-gray-90); }
+.bw-fit {
+  padding: 12px 20px; border-radius: 6px; margin-top: 16px;
+  font-size: 14px; font-weight: 600; text-align: center;
+}
+.bw-fit.fits { background: #DFF6DD; color: #107C10; border: 1px solid #107C10; }
+.bw-fit.exceeds { background: #FDE7E9; color: #D13438; border: 1px solid #D13438; }
+.bw-transparency {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 20px;
+}
+.bw-transparency h4 {
+  font-size: 13px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; margin-bottom: 8px; color: var(--ms-gray-130);
+}
+.bw-transparency ul {
+  list-style: none; padding: 0; margin: 0; font-size: 12px; color: var(--ms-gray-90);
+}
+.bw-transparency ul li { padding: 3px 0; border-bottom: 1px solid var(--ms-gray-20); }
+.bw-documented { border-left: 3px solid var(--color-info); padding-left: 12px; }
+.bw-estimated { border-left: 3px solid var(--color-warning); padding-left: 12px; }
+@media (max-width: 768px) { .bw-transparency { grid-template-columns: 1fr; } }
+
 /* ===== Tables ===== */
 .table-container { overflow-x: auto; margin-top: 16px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -783,6 +810,120 @@ $actionsHtml
     <div class="svg-container">
 $capacityChart
     </div>
+    </div>
+  </details>
+"@)
+  }
+
+  # =============================
+  # Backup Window Estimation (VDC)
+  # =============================
+  if ($script:backupWindow -and ($script:backupWindow.Total_LikelyHours -gt 0)) {
+    $bw = $script:backupWindow
+    $bwTimeline = New-SvgBackupTimeline -BackupWindow $bw
+
+    # Format helper
+    $fmtH = { param($h) if ($h -le 0) { "-" } else { "{0:N1}h" -f $h } }
+
+    # Fit assessment (8-hour window)
+    $bwTarget = 8
+    $bwFitsClass = if ($bw.Total_LikelyHours -le $bwTarget) { "fits" } else { "exceeds" }
+    $bwFitsIcon  = if ($bw.Total_LikelyHours -le $bwTarget) { "&#10003;" } else { "&#10007;" }
+    $bwFitsText  = if ($bw.Total_LikelyHours -le $bwTarget) {
+      "Initial full backup likely completes within a $bwTarget-hour window"
+    } else {
+      "Initial full backup likely exceeds a $bwTarget-hour window &mdash; consider phased rollout or off-hours scheduling"
+    }
+
+    # Transparency lists
+    $docItems = ""
+    foreach ($d in $bw.DocumentedLimits) { $docItems += "          <li>$(Escape-Html $d)</li>`n" }
+    $estItems = ""
+    foreach ($e in $bw.EstimatedAssumptions) { $estItems += "          <li>$(Escape-Html $e)</li>`n" }
+
+    $htmlParts.Add(@"
+  <details class="section">
+    <summary>Backup Window Estimation (VDC)</summary>
+    <div class="section-content">
+    <div class="svg-container">
+$bwTimeline
+    </div>
+    <div class="table-container">
+      <table class="bw-table">
+        <thead>
+          <tr>
+            <th>Workload</th>
+            <th>Best Case</th>
+            <th>Likely</th>
+            <th>Conservative</th>
+            <th>Binding Limit</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Exchange (initial)</strong></td>
+            <td>$(& $fmtH $bw.Ex_MinHours)</td>
+            <td>$(& $fmtH $bw.Ex_LikelyHours)</td>
+            <td>$(& $fmtH $bw.Ex_MaxHours)</td>
+            <td>$(Escape-Html $bw.Ex_BindingConstraint)</td>
+          </tr>
+          <tr class="bw-incr">
+            <td>Exchange (daily incremental)</td>
+            <td>$(& $fmtH $bw.Ex_IncrMinHours)</td>
+            <td>$(& $fmtH $bw.Ex_IncrLikelyHours)</td>
+            <td>$(& $fmtH $bw.Ex_IncrMaxHours)</td>
+            <td></td>
+          </tr>
+          <tr>
+            <td><strong>SPO + OneDrive (initial)</strong></td>
+            <td>$(& $fmtH $bw.SPO_MinHours)</td>
+            <td>$(& $fmtH $bw.SPO_LikelyHours)</td>
+            <td>$(& $fmtH $bw.SPO_MaxHours)</td>
+            <td>$(Escape-Html $bw.SPO_BindingConstraint)</td>
+          </tr>
+          <tr class="bw-incr">
+            <td>SPO + OneDrive (daily incremental)</td>
+            <td>$(& $fmtH $bw.SPO_IncrMinHours)</td>
+            <td>$(& $fmtH $bw.SPO_IncrLikelyHours)</td>
+            <td>$(& $fmtH $bw.SPO_IncrMaxHours)</td>
+            <td></td>
+          </tr>
+          <tr class="bw-total">
+            <td><strong>Total &mdash; Initial Full</strong></td>
+            <td>$(& $fmtH $bw.Total_MinHours)</td>
+            <td>$(& $fmtH $bw.Total_LikelyHours)</td>
+            <td>$(& $fmtH $bw.Total_MaxHours)</td>
+            <td>Parallel (max of above)</td>
+          </tr>
+          <tr class="bw-total bw-incr">
+            <td><strong>Total &mdash; Daily Incremental</strong></td>
+            <td>$(& $fmtH $bw.Total_IncrMinHours)</td>
+            <td>$(& $fmtH $bw.Total_IncrLikelyHours)</td>
+            <td>$(& $fmtH $bw.Total_IncrMaxHours)</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="bw-fit $bwFitsClass">$bwFitsIcon $bwFitsText</div>
+    <div class="bw-transparency">
+      <div class="bw-documented">
+        <h4>Documented Microsoft Limits</h4>
+        <ul>
+$docItems
+        </ul>
+      </div>
+      <div class="bw-estimated">
+        <h4>Estimated Assumptions</h4>
+        <ul>
+$estItems
+        </ul>
+      </div>
+    </div>
+    <p style="font-size:11px;color:#A19F9D;margin-top:12px">
+      Throttle tier: $(Escape-Html $bw.ThrottleTierLabel) licenses ($('{0:N0}' -f $bw.LicenseCount) detected).
+      Exchange and SPO/ODB run in parallel; SPO and ODB share the same RU pool.
+    </p>
     </div>
   </details>
 "@)
