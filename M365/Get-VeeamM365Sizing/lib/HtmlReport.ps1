@@ -818,7 +818,7 @@ $capacityChart
   # =============================
   # Backup Window Estimation (VDC)
   # =============================
-  if ($script:backupWindow -and ($script:backupWindow.Total_LikelyHours -gt 0)) {
+  if ($script:backupWindow) {
     $bw = $script:backupWindow
     $bwTimeline = New-SvgBackupTimeline -BackupWindow $bw
 
