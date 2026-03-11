@@ -140,6 +140,17 @@ function Invoke-DataCollection {
   $script:exUsers  = Apply-UpnFilters $exUsersAll  'User Principal Name'
   $script:exShared = $exSharedAll
 
+  # Diagnostic: log distinct Recipient Type values from the raw report
+  $recipientTypes = $script:exDetail | Group-Object 'Recipient Type' | ForEach-Object { "$($_.Name): $($_.Count)" }
+  Write-Log "Exchange report recipient types: $($recipientTypes -join ', ')"
+
+  # Warn if no shared mailboxes found (common Graph reporting gap)
+  if ($script:exShared.Count -eq 0 -and $script:exUsers.Count -gt 0) {
+    $warnMsg = "WARNING: No shared mailboxes found in usage report. If your tenant has shared mailboxes, they may not appear in Graph usage reports for up to 48 hours after creation. Use Exchange Admin Center for a definitive count."
+    Write-Log $warnMsg
+    Write-Host "  $warnMsg" -ForegroundColor Yellow
+  }
+
   $odActiveAll      = $script:odDetail | Where-Object { $_.'Is Deleted' -ne 'TRUE' }
   $script:odActive  = Apply-UpnFilters $odActiveAll 'Owner Principal Name'
 

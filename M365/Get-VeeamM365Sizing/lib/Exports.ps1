@@ -44,6 +44,10 @@ function Export-SummaryData {
     Mode                      = $(if($Full){"Full"}else{"Quick"})
     UsersToProtect            = $script:UsersToProtect
 
+    Exchange_Mailboxes        = $script:exUsers.Count
+    Exchange_SharedMailboxes  = $script:exShared.Count
+    Exchange_SharedMailboxGB  = (To-GB $script:exSharedBytes)
+
     Exchange_SourceBytes      = [int64]$script:exPrimaryBytes
     OneDrive_SourceBytes      = [int64]$script:odBytes
     SharePoint_SourceBytes    = [int64]$script:spBytes
