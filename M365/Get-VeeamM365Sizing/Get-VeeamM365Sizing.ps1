@@ -349,6 +349,11 @@ Write-Log "Completed run"
 # =============================
 Write-Host ""
 Write-Host "Sizing complete." -ForegroundColor Green
+Write-Host ""
+Write-Host "  Exchange      : $($script:exUsers.Count) mailboxes + $($script:exShared.Count) shared ($('{0:N2}' -f $script:exGB) GB)"
+Write-Host "  OneDrive      : $($script:odActive.Count) accounts ($('{0:N2}' -f $script:odGB) GB)"
+Write-Host "  SharePoint    : $($script:spActive.Count) sites ($('{0:N2}' -f $script:spGB) GB)"
+Write-Host ""
 Write-Host "Output folder : $runFolder"
 Write-Host "HTML report   : $outHtml"
 Write-Host "Summary CSV   : $outSummary"

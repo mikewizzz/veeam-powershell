@@ -688,7 +688,7 @@ $actionsHtml
         <div class="kpi-card-content">
           <div class="kpi-label">Users to Protect</div>
           <div class="kpi-value">$($script:UsersToProtect)</div>
-          <div class="kpi-subtext">Active user accounts</div>
+          <div class="kpi-subtext">Active user accounts$(if ($script:exShared.Count -gt 0) { " + $($script:exShared.Count) shared mailboxes" })</div>
         </div>
       </div>
       <div class="kpi-card">
