@@ -388,6 +388,53 @@ function Export-DeltaData {
 
 <#
 .SYNOPSIS
+  Exports backup window estimation CSV with model inputs, limits, and 3-band results.
+#>
+function Export-BackupWindowData {
+  if (-not $script:backupWindow) { return }
+  $bw = $script:backupWindow
+
+  $rows = New-Object System.Collections.Generic.List[object]
+
+  # Model inputs
+  $rows.Add([PSCustomObject]@{ Section = "Input"; Key = "LicenseCount"; Value = $bw.LicenseCount })
+  $rows.Add([PSCustomObject]@{ Section = "Input"; Key = "ThrottleTier"; Value = $bw.ThrottleTierLabel })
+  $rows.Add([PSCustomObject]@{ Section = "Input"; Key = "Ex_MailboxCount"; Value = $bw.Ex_MailboxCount })
+  $rows.Add([PSCustomObject]@{ Section = "Input"; Key = "Ex_TotalGB"; Value = $bw.Ex_TotalGB })
+  $rows.Add([PSCustomObject]@{ Section = "Input"; Key = "SPO_CombinedGB"; Value = $bw.SPO_CombinedGB })
+  $rows.Add([PSCustomObject]@{ Section = "Input"; Key = "SPO_FileCount"; Value = $bw.SPO_FileCount })
+
+  # Documented limits
+  $rows.Add([PSCustomObject]@{ Section = "Documented"; Key = "Ex_GB_Per_Mbx_Per_Hr"; Value = $BW_EX_GB_PER_MBX_PER_HR })
+  $rows.Add([PSCustomObject]@{ Section = "Documented"; Key = "SPO_Egress_GB_Per_Hr"; Value = $BW_SPO_EGRESS_GB_PER_HR })
+  $rows.Add([PSCustomObject]@{ Section = "Documented"; Key = "SPO_Blended_RU_Per_File"; Value = $BW_SPO_BLENDED_RU_PER_FILE })
+
+  # Efficiency factors
+  foreach ($band in @("Min", "Likely", "Max")) {
+    $rows.Add([PSCustomObject]@{ Section = "Efficiency"; Key = "VDC_Concurrent_Mbx_$band"; Value = $BW_VDC_CONCURRENT_MBX[$band] })
+    $rows.Add([PSCustomObject]@{ Section = "Efficiency"; Key = "Ex_Efficiency_$band"; Value = $BW_EX_EFFICIENCY[$band] })
+    $rows.Add([PSCustomObject]@{ Section = "Efficiency"; Key = "SPO_Efficiency_$band"; Value = $BW_SPO_EFFICIENCY[$band] })
+  }
+
+  # Results
+  $rows.Add([PSCustomObject]@{ Section = "Result"; Key = "Ex_BindingConstraint"; Value = $bw.Ex_BindingConstraint })
+  $rows.Add([PSCustomObject]@{ Section = "Result"; Key = "SPO_BindingConstraint"; Value = $bw.SPO_BindingConstraint })
+  foreach ($band in @("Min", "Likely", "Max")) {
+    $rows.Add([PSCustomObject]@{ Section = "Result"; Key = "Ex_${band}Hours"; Value = $bw."Ex_${band}Hours" })
+    $rows.Add([PSCustomObject]@{ Section = "Result"; Key = "SPO_${band}Hours"; Value = $bw."SPO_${band}Hours" })
+    $rows.Add([PSCustomObject]@{ Section = "Result"; Key = "Total_${band}Hours"; Value = $bw."Total_${band}Hours" })
+    $rows.Add([PSCustomObject]@{ Section = "Result"; Key = "Ex_Incr${band}Hours"; Value = $bw."Ex_Incr${band}Hours" })
+    $rows.Add([PSCustomObject]@{ Section = "Result"; Key = "SPO_Incr${band}Hours"; Value = $bw."SPO_Incr${band}Hours" })
+    $rows.Add([PSCustomObject]@{ Section = "Result"; Key = "Total_Incr${band}Hours"; Value = $bw."Total_Incr${band}Hours" })
+  }
+
+  $outBW = Join-Path $runFolder "Veeam-M365-BackupWindow-$stamp.csv"
+  $rows | Export-Csv -NoTypeInformation -Path $outBW
+  $script:outBackupWindow = $outBW
+}
+
+<#
+.SYNOPSIS
   Exports the methodology notes TXT file.
 #>
 function Export-NotesFile {
