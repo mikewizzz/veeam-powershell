@@ -146,6 +146,45 @@
 .PARAMETER SkipPreflight
   Skip all preflight health checks. Not recommended for production.
 
+.PARAMETER TargetRTOMinutes
+  Target Recovery Time Objective in minutes (e.g., 60 = 1-hour RTO).
+  When provided, the report includes SLA compliance scoring showing
+  what percentage of VMs met the RTO target.
+
+.PARAMETER TargetRPOHours
+  Target Recovery Point Objective in hours (e.g., 24 = daily RPO).
+  When provided, the report includes SLA compliance scoring and
+  preflight checks use RPO as the restore point recency threshold
+  if stricter than -PreflightMaxAgeDays.
+
+.PARAMETER ResumeCheckpoint
+  Path to SureBackup_Checkpoint.json from an interrupted run.
+  Skips completed groups/batches and restores prior test results.
+
+.PARAMETER UseJumpVM
+  Enable jump VM for isolated network testing. Deploys a dual-homed Ubuntu VM
+  (management NIC + isolated NIC) and proxies network tests (ping, port, DNS, HTTP)
+  through it via SSH. Solves the air-gapped isolated network problem where the
+  script host has no L3 path to recovered VMs. Same pattern as Veeam's VMware
+  SureBackup proxy appliance.
+
+.PARAMETER JumpVMImageName
+  Override: use this pre-uploaded image for the jump VM instead of auto-downloading
+  Ubuntu Minimal. Required for air-gapped clusters with no internet access.
+
+.PARAMETER ManagementNetworkName
+  Override: name of the management network reachable from the script host.
+  If omitted with -UseJumpVM, the management network is auto-detected by
+  keyword (mgmt, management, admin, default, prod, infra), DHCP heuristic,
+  or single-remaining-network logic. Use -Interactive for a picker fallback.
+
+.PARAMETER ManagementNetworkUUID
+  Override: UUID of the management network. Alternative to -ManagementNetworkName.
+
+.PARAMETER JumpVMBootTimeoutSec
+  Maximum seconds to wait for the jump VM to boot and obtain a management IP
+  (default: 180).
+
 .EXAMPLE
   $vbrCred = Get-Credential
   .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -VBRCredential $vbrCred -PrismCentral "pc01" -PrismCredential $cred
@@ -168,10 +207,22 @@
   .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -VBRCredential $vbrCred -PrismCentral "pc01" -PrismCredential $cred -Interactive
   # Interactive mode - search/filter VMs by name, then select which to test
 
+.EXAMPLE
+  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -VBRCredential $vbrCred -PrismCentral "pc01" -PrismCredential $cred -UseJumpVM -TestPorts @(22,443)
+  # Jump VM mode - auto-detects management network, deploys dual-homed proxy VM, tests isolated VMs via SSH
+
+.EXAMPLE
+  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -VBRCredential $vbrCred -PrismCentral "pc01" -PrismCredential $cred -UseJumpVM -ManagementNetworkName "MGMT" -TestPorts @(22,443)
+  # Jump VM with explicit management network override (bypasses auto-detection)
+
+.EXAMPLE
+  .\Start-VeeamAHVSureBackup.ps1 -VBRServer "vbr01" -VBRCredential $vbrCred -PrismCentral "pc01" -PrismCredential $cred -UseJumpVM -JumpVMImageName "my-cloud-image"
+  # Jump VM with pre-uploaded image (air-gapped cluster, no internet)
+
 .NOTES
-  Version: 1.3.0
+  Version: 1.4.0
   Author: Community Contributors
-  Date: 2026-03-08
+  Date: 2026-03-11
   Requires: PowerShell 5.1+ (7.x recommended)
   Modules: None
   Nutanix: Prism Central v4 API (pc.2024.3+ GA, default) or v3 (legacy)
@@ -263,7 +314,24 @@ param(
   # Preflight Health Checks
   [ValidateRange(1, 365)]
   [int]$PreflightMaxAgeDays = 7,
-  [switch]$SkipPreflight
+  [switch]$SkipPreflight,
+
+  # SLA Targets (optional — enables compliance scoring in reports)
+  [ValidateRange(1, 1440)]
+  [int]$TargetRTOMinutes,
+  [ValidateRange(1, 8760)]
+  [int]$TargetRPOHours,
+
+  # Checkpoint / Resume
+  [string]$ResumeCheckpoint,
+
+  # Jump VM (isolated network testing)
+  [switch]$UseJumpVM,
+  [string]$JumpVMImageName,
+  [string]$ManagementNetworkName,
+  [string]$ManagementNetworkUUID,
+  [ValidateRange(60, 600)]
+  [int]$JumpVMBootTimeoutSec = 180
 )
 
 $ErrorActionPreference = "Stop"
@@ -281,6 +349,8 @@ $script:TotalSteps = 10
 $script:CurrentStep = 0
 $script:FatalError = $false
 $script:CompletedSuccessfully = $false
+$script:JumpVM = $null
+$script:VMTimings = New-Object System.Collections.Generic.List[object]
 
 # API version-aware base URL and endpoint mapping
 $script:PrismOrigin = "https://${PrismCentral}:${PrismPort}"
@@ -510,6 +580,9 @@ try {
   Write-Log "Restore method: Full VM Restore (VBAHV REST API)" -Level "INFO"
   Write-Log "Isolated network: $($isolatedNet.Name) (VLAN $($isolatedNet.VlanId))" -Level "INFO"
   Write-Log "Tests: Heartbeat$(if($TestPing){', Ping'})$(if($TestPorts){', Ports: '+($TestPorts -join ',')})$(if($TestDNS){', DNS'})$(if($TestHttpEndpoints){', HTTP'})$(if($TestCustomScript){', Custom Script'})" -Level "INFO"
+  if ($UseJumpVM) {
+    Write-Log "Jump VM: ENABLED — network tests will execute via SSH proxy on isolated network" -Level "INFO"
+  }
 
   # Runtime estimate
   $vmCount = $restorePoints.Count
@@ -547,28 +620,174 @@ try {
       Write-Log "  Could not retrieve cluster info for preflight: $($_.Exception.Message)" -Level "WARNING"
     }
 
-    $preflightResult = Test-PreflightRequirements `
-      -Clusters $clusters `
-      -IsolatedNetwork $isolatedNet `
-      -RestorePoints $restorePoints `
-      -BackupJobs $ahvJobs `
-      -MaxConcurrentVMs $MaxConcurrentVMs `
-      -MaxAgeDays $PreflightMaxAgeDays
+    $preflightParams = @{
+      Clusters        = $clusters
+      IsolatedNetwork = $isolatedNet
+      RestorePoints   = $restorePoints
+      BackupJobs      = $ahvJobs
+      MaxConcurrentVMs = $MaxConcurrentVMs
+      MaxAgeDays      = $PreflightMaxAgeDays
+    }
+    if ($TargetRPOHours) { $preflightParams.TargetRPOHours = $TargetRPOHours }
+    if ($UseJumpVM) {
+      $preflightParams.UseJumpVM = $true
+      if ($JumpVMImageName) { $preflightParams.JumpVMImageName = $JumpVMImageName }
+      if ($ManagementNetworkName) { $preflightParams.ManagementNetworkName = $ManagementNetworkName }
+      if ($ManagementNetworkUUID) { $preflightParams.ManagementNetworkUUID = $ManagementNetworkUUID }
+    }
+    $preflightResult = Test-PreflightRequirements @preflightParams
 
     if (-not $preflightResult.Success) {
       throw "Preflight health checks FAILED with $($preflightResult.Issues.Count) blocking issue(s). Fix the issues above and re-run, or use -SkipPreflight to bypass (not recommended)."
     }
   }
 
-  # ---- Step 7: (Reserved — VBAHV Plugin already authenticated in Step 4) ----
-  $script:CurrentStep++
+  # ---- Step 7: Deploy Jump VM (if -UseJumpVM) ----
+  if ($UseJumpVM -and -not $DryRun) {
+    Write-ProgressStep -Activity "Deploying Jump VM" -Status "Creating dual-homed proxy VM for isolated network testing..."
+
+    # 1. Generate ephemeral SSH keypair
+    $sshKey = New-EphemeralSSHKey
+    Write-Log "Ephemeral SSH keypair generated: $($sshKey.PrivatePath)" -Level "INFO"
+
+    # 2. Resolve management network UUID (auto-detect if not explicitly provided)
+    $mgmtNetUUID = Resolve-ManagementNetwork `
+      -ManagementNetworkName $ManagementNetworkName `
+      -ManagementNetworkUUID $ManagementNetworkUUID `
+      -IsolatedNetworkUUID $isolatedNet.UUID `
+      -Interactive:$Interactive
+    Write-Log "Management network resolved: $mgmtNetUUID" -Level "INFO"
+
+    # 3. Resolve jump VM image UUID
+    $jumpImageUUID = Get-OrCreateJumpVMImage -JumpVMImageName $JumpVMImageName
+
+    # 4. Build cloud-init userdata
+    $jumpVMName = "SureBackup_JumpVM_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+    $cloudInitUserdata = @"
+#cloud-config
+ssh_authorized_keys:
+  - $($sshKey.PublicKey)
+package_update: false
+package_upgrade: false
+"@
+
+    # 5. Create VM via Prism API
+    $jumpVMUUID = New-PrismVM -Name $jumpVMName -ImageUUID $jumpImageUUID `
+      -ManagementSubnetUUID $mgmtNetUUID -IsolatedSubnetUUID $isolatedNet.UUID `
+      -CloudInitUserdata $cloudInitUserdata `
+      -ClusterUUID $isolatedNet.ClusterRef
+
+    # 6. Power on
+    Write-Log "Powering on jump VM '$jumpVMName'..." -Level "INFO"
+    Set-PrismVMPowerState -UUID $jumpVMUUID -State "ON"
+
+    # 7. Wait for IP on management NIC
+    Write-Log "Waiting for jump VM management IP (timeout: ${JumpVMBootTimeoutSec}s)..." -Level "INFO"
+    $jumpIP = Wait-PrismVMIPAddress -UUID $jumpVMUUID -TimeoutSec $JumpVMBootTimeoutSec
+
+    if (-not $jumpIP) {
+      throw "Jump VM did not obtain an IP address within ${JumpVMBootTimeoutSec}s. Check DHCP on management network."
+    }
+    Write-Log "Jump VM management IP: $jumpIP" -Level "SUCCESS"
+
+    # 8. SSH connectivity test (retry loop — cloud-init needs time to inject key)
+    $sshReady = $false
+    $sshDeadline = (Get-Date).AddSeconds(90)
+    while ((Get-Date) -lt $sshDeadline) {
+      $testResult = Invoke-SSHCommand -HostIP $jumpIP -KeyPath $sshKey.PrivatePath -User "ubuntu" `
+        -Command "echo ready" -TimeoutSec 5
+      if ($testResult.ExitCode -eq 0 -and $testResult.Output -match "ready") {
+        $sshReady = $true
+        break
+      }
+      Start-Sleep -Seconds 5
+    }
+
+    if (-not $sshReady) {
+      throw "Jump VM SSH not reachable at $jumpIP after 90s. Verify cloud-init and SSH key injection."
+    }
+    Write-Log "Jump VM SSH connectivity verified" -Level "SUCCESS"
+
+    # 9. Store jump VM info for test functions
+    $script:JumpVM = @{
+      IP      = $jumpIP
+      KeyPath = $sshKey.PrivatePath
+      User    = "ubuntu"
+      UUID    = $jumpVMUUID
+      Name    = $jumpVMName
+    }
+    Write-Log "Jump VM ready: $jumpVMName ($jumpIP) — network tests will proxy through this VM" -Level "SUCCESS"
+  }
+  elseif ($UseJumpVM -and $DryRun) {
+    Write-ProgressStep -Activity "Jump VM (Dry Run)" -Status "Would deploy dual-homed jump VM for isolated network testing"
+    # Resolve management network even in dry run to show the user what would be selected
+    try {
+      $dryRunMgmtUUID = Resolve-ManagementNetwork `
+        -ManagementNetworkName $ManagementNetworkName `
+        -ManagementNetworkUUID $ManagementNetworkUUID `
+        -IsolatedNetworkUUID $isolatedNet.UUID `
+        -Interactive:$Interactive
+      $dryRunSubnets = Get-PrismSubnets
+      $dryRunMgmtNet = $dryRunSubnets | Where-Object { (Get-SubnetUUID $_) -eq $dryRunMgmtUUID }
+      $dryRunMgmtName = if ($dryRunMgmtNet) { Get-SubnetName $dryRunMgmtNet } else { $dryRunMgmtUUID }
+      Write-Log "[DRY RUN] Would deploy jump VM with management NIC on '$dryRunMgmtName' and isolated NIC on '$($isolatedNet.Name)'" -Level "INFO"
+    }
+    catch {
+      Write-Log "[DRY RUN] Would deploy jump VM (management network resolution failed: $($_.Exception.Message))" -Level "WARNING"
+    }
+  }
+  else {
+    $script:CurrentStep++
+  }
 
   # ---- Step 8: Execute SureBackup recovery and testing ----
   Write-ProgressStep -Activity "Executing SureBackup Verification" -Status "Recovering and testing VMs..."
 
   $bootOrder = Get-VMBootOrder -RestorePoints $restorePoints
 
+  # Checkpoint / Resume state
+  $completedGroups = New-Object System.Collections.Generic.List[string]
+  $checkpointPath = Join-Path $OutputPath "SureBackup_Checkpoint.json"
+  $resumeFromGroup = $null
+  $resumeFromBatch = 0
+
+  if ($ResumeCheckpoint) {
+    $ckpt = Import-SureBackupCheckpoint -CheckpointPath $ResumeCheckpoint
+    Write-Log "Resuming from checkpoint: $($ckpt.Timestamp) (status: $($ckpt.Status))" -Level "WARNING"
+
+    foreach ($g in $ckpt.CompletedGroups) { $completedGroups.Add($g) }
+    $resumeFromGroup = $ckpt.CurrentGroup
+    $resumeFromBatch = $ckpt.CurrentBatch
+
+    # Restore test results from checkpoint
+    foreach ($tr in $ckpt.TestResults) {
+      $script:TestResults.Add([PSCustomObject]@{
+        VMName    = $tr.VMName
+        TestName  = $tr.TestName
+        Passed    = $tr.Passed
+        Details   = $tr.Details
+        Duration  = $tr.Duration
+        Timestamp = [datetime]$tr.Timestamp
+      })
+    }
+    Write-Log "  Restored $($script:TestResults.Count) test result(s) from checkpoint" -Level "INFO"
+
+    # Warn about orphaned VMs from interrupted run
+    $orphans = @($ckpt.RecoverySessions | Where-Object { $_.Status -eq "Running" })
+    if ($orphans.Count -gt 0) {
+      Write-Log "  WARNING: $($orphans.Count) VM(s) from previous run may still exist:" -Level "WARNING"
+      foreach ($o in $orphans) {
+        Write-Log "    - $($o.RecoveryVMName) (UUID: $($o.RecoveryVMUUID))" -Level "WARNING"
+      }
+    }
+  }
+
   foreach ($groupName in $bootOrder.Keys) {
+    # Skip groups already completed in previous run
+    if ($completedGroups -contains $groupName) {
+      Write-Log "--- Skipping $groupName (completed in previous run) ---" -Level "INFO"
+      continue
+    }
     $groupRPs = @($bootOrder[$groupName])
     Write-Log "--- Processing $groupName ($($groupRPs.Count) VM(s)) ---" -Level "INFO"
 
@@ -599,7 +818,16 @@ try {
         $batches += , @($groupRPs[$i..($batchEnd - 1)])
       }
 
+      $batchIndex = 0
       foreach ($batch in $batches) {
+        # Skip batches completed in previous run (same group, earlier batch)
+        if ($groupName -eq $resumeFromGroup -and $batchIndex -lt $resumeFromBatch) {
+          Write-Log "  Skipping batch $($batchIndex + 1) (completed in previous run)" -Level "INFO"
+          $batchIndex++
+          continue
+        }
+        if ($resumeFromGroup -eq $groupName) { $resumeFromGroup = $null }
+
         $recoveries = @()
 
         # Start recovery for each VM in the batch
@@ -626,15 +854,42 @@ try {
 
         # Run verification tests on each recovered VM
         foreach ($recovery in $recoveries) {
-          $null = Invoke-VMVerificationTests -RecoveryInfo $recovery -IsolatedNetwork $isolatedNet
+          $verifyParams = @{ RecoveryInfo = $recovery; IsolatedNetwork = $isolatedNet }
+          if ($script:JumpVM) { $verifyParams.JumpVM = $script:JumpVM }
+          $null = Invoke-VMVerificationTests @verifyParams
+        }
+
+        # Capture per-VM timing data for SLA scoring (before cleanup destroys recovery info)
+        foreach ($recovery in $recoveries) {
+          $vmTests = @($script:TestResults | Where-Object { $_.VMName -eq $recovery.OriginalVMName })
+          $lastTest = if ($vmTests.Count -gt 0) {
+            ($vmTests | Sort-Object Timestamp | Select-Object -Last 1).Timestamp
+          } else { Get-Date }
+
+          $script:VMTimings.Add([PSCustomObject]@{
+            VMName        = $recovery.OriginalVMName
+            RecoveryStart = $recovery.StartTime
+            TestsComplete = $lastTest
+            RTOMinutes    = [math]::Round(($lastTest - $recovery.StartTime).TotalMinutes, 1)
+            RPOHours      = $null
+          })
         }
 
         # Cleanup this batch before moving to next
         foreach ($recovery in $recoveries) {
           Stop-AHVFullRestore -RecoveryInfo $recovery
         }
+
+        # Save checkpoint after batch completes
+        $batchIndex++
+        Save-SureBackupCheckpoint -CheckpointPath $checkpointPath `
+          -CurrentGroup $groupName -CurrentBatch $batchIndex -Status "in-progress" `
+          -CompletedGroups @($completedGroups)
       }
     }
+
+    # Mark group as completed for checkpoint tracking
+    $completedGroups.Add($groupName)
 
     # If using application groups, enforce dependency chain: stop if current group failed
     if ($ApplicationGroups -and $groupName -ne "Ungrouped") {
@@ -657,9 +912,30 @@ try {
     }
   }
 
+  # ---- SLA scoring (before reports) ----
+  $slaSummary = $null
+  if (($TargetRTOMinutes -or $TargetRPOHours) -and $script:VMTimings.Count -gt 0) {
+    # Populate RPO from restore points
+    foreach ($timing in $script:VMTimings) {
+      $rp = $restorePoints | Where-Object { $_.VMName -eq $timing.VMName } | Select-Object -First 1
+      if ($rp) {
+        $timing.RPOHours = [math]::Round(((Get-Date) - $rp.CreationTime).TotalHours, 1)
+      }
+    }
+    $slaSummary = _GetSLASummary -VMTimings $script:VMTimings `
+      -TargetRTOMinutes $TargetRTOMinutes -TargetRPOHours $TargetRPOHours
+  }
+
   # ---- Step 9: Generate reports ----
   Write-ProgressStep -Activity "Generating Reports" -Status "Creating HTML report and CSVs..."
-  Export-Results -TestResults $script:TestResults -RestorePoints $restorePoints -IsolatedNetwork $isolatedNet
+  $exportParams = @{
+    TestResults     = $script:TestResults
+    RestorePoints   = $restorePoints
+    IsolatedNetwork = $isolatedNet
+  }
+  if ($slaSummary) { $exportParams.SLASummary = $slaSummary }
+  if ($script:VMTimings.Count -gt 0) { $exportParams.VMTimings = $script:VMTimings }
+  Export-Results @exportParams
 
   # ---- Final summary ----
   Write-ProgressStep -Activity "Complete" -Status "SureBackup verification finished"
@@ -682,11 +958,28 @@ try {
   }
 
   Write-Log "  Pass Rate:    $($summary.PassRate)%" -Level $(if ($summary.FailedTests -eq 0) { "SUCCESS" } else { "WARNING" })
+
+  if ($slaSummary) {
+    if ($slaSummary.RPOTarget) {
+      Write-Log "  RPO Target:   $($slaSummary.RPOTarget)h - $($slaSummary.RPORate)% compliant (avg: $($slaSummary.AvgRPOHours)h, worst: $($slaSummary.WorstRPOHours)h)" -Level $(if ($slaSummary.RPORate -ge 95) { "SUCCESS" } else { "WARNING" })
+    }
+    if ($slaSummary.RTOTarget) {
+      Write-Log "  RTO Target:   $($slaSummary.RTOTarget)min - $($slaSummary.RTORate)% compliant (avg: $($slaSummary.AvgRTOMinutes)min, worst: $($slaSummary.WorstRTOMinutes)min)" -Level $(if ($slaSummary.RTORate -ge 95) { "SUCCESS" } else { "WARNING" })
+    }
+  }
+
   Write-Log "  Duration:     $((Get-Date) - $script:StartTime)" -Level "INFO"
   Write-Log "  Report:       $OutputPath" -Level "INFO"
   Write-Log "========================================" -Level "INFO"
 
   $script:CompletedSuccessfully = $true
+
+  # Save completed checkpoint
+  if (Test-Path $OutputPath) {
+    Save-SureBackupCheckpoint -CheckpointPath $checkpointPath `
+      -CurrentGroup "" -CurrentBatch 0 -Status "completed" `
+      -CompletedGroups @($completedGroups)
+  }
 
   # Return structured result for pipeline use
   [PSCustomObject]@{
@@ -700,6 +993,16 @@ try {
     OutputPath  = (Resolve-Path $OutputPath -ErrorAction SilentlyContinue)
     DryRun      = [bool]$DryRun
     Results     = $script:TestResults
+    SLA         = if ($slaSummary) {
+      [PSCustomObject]@{
+        RTOTarget     = $slaSummary.RTOTarget
+        RTORate       = $slaSummary.RTORate
+        RPOTarget     = $slaSummary.RPOTarget
+        RPORate       = $slaSummary.RPORate
+        AvgRTOMinutes = $slaSummary.AvgRTOMinutes
+        AvgRPOHours   = $slaSummary.AvgRPOHours
+      }
+    } else { $null }
   }
 }
 catch {
@@ -715,6 +1018,17 @@ finally {
   if (-not $script:FatalError -and -not $script:CompletedSuccessfully -and $script:RecoverySessions.Count -gt 0) {
     $script:FatalError = $true
   }
+
+  # Save checkpoint for resume on interruption
+  try {
+    if (-not $script:CompletedSuccessfully -and $OutputPath -and (Test-Path $OutputPath)) {
+      $interruptCkptPath = Join-Path $OutputPath "SureBackup_Checkpoint.json"
+      Save-SureBackupCheckpoint -CheckpointPath $interruptCkptPath `
+        -CurrentGroup "" -CurrentBatch 0 -Status "interrupted" `
+        -CompletedGroups @(if ($completedGroups) { $completedGroups } else { @() })
+      Write-Log "Checkpoint saved. Resume with: -ResumeCheckpoint '$interruptCkptPath'" -Level "WARNING"
+    }
+  } catch { }
 
   # Emergency cleanup — always clean up recovered VMs to prevent production exposure.
   # Wrapped in try to ensure credential cleanup always runs.
@@ -743,6 +1057,30 @@ finally {
   catch {
     # Cleanup itself failed — ensure we still clear credentials below
   }
+
+  # Jump VM cleanup — tear down after all recovered VMs are cleaned up
+  try {
+    if ($script:JumpVM -and $script:JumpVM.UUID) {
+      Write-Log "Cleaning up jump VM '$($script:JumpVM.Name)'..." -Level "INFO"
+      try {
+        Set-PrismVMPowerState -UUID $script:JumpVM.UUID -State "OFF"
+        Start-Sleep -Seconds 5
+      }
+      catch { }
+      Remove-PrismVM -UUID $script:JumpVM.UUID
+      Write-Log "Jump VM deleted: $($script:JumpVM.Name)" -Level "SUCCESS"
+    }
+    if ($script:JumpVM -and $script:JumpVM.KeyPath) {
+      Remove-EphemeralSSHKey -KeyPath $script:JumpVM.KeyPath
+      Write-Log "Ephemeral SSH keypair deleted" -Level "INFO"
+    }
+  }
+  catch {
+    if ($script:JumpVM) {
+      Write-Log "Jump VM cleanup failed: $($_.Exception.Message). Manual cleanup may be needed for VM '$($script:JumpVM.Name)' (UUID: $($script:JumpVM.UUID))" -Level "WARNING"
+    }
+  }
+  $script:JumpVM = $null
 
   # Credential cleanup — clear sensitive tokens and headers from memory
   try {

@@ -3,6 +3,61 @@
 # HTML Report Generation
 # =============================
 
+function _BuildSLASection {
+  <#
+  .SYNOPSIS
+    Build the SLA Compliance HTML section for the report.
+    Returns empty string when no SLA summary is provided.
+  #>
+  param($SLASummary)
+
+  if (-not $SLASummary) { return "" }
+
+  # Color thresholds: green >=95%, amber >=80%, red <80%
+  $rpoColor = "#999"
+  $rtoColor = "#999"
+  $rpoRateDisplay = "N/A"
+  $rtoRateDisplay = "N/A"
+
+  if ($null -ne $SLASummary.RPORate) {
+    $rpoRateDisplay = "$($SLASummary.RPORate)%"
+    if ($SLASummary.RPORate -ge 95) { $rpoColor = "#00B336" }
+    elseif ($SLASummary.RPORate -ge 80) { $rpoColor = "#986F0B" }
+    else { $rpoColor = "#D13438" }
+  }
+  if ($null -ne $SLASummary.RTORate) {
+    $rtoRateDisplay = "$($SLASummary.RTORate)%"
+    if ($SLASummary.RTORate -ge 95) { $rtoColor = "#00B336" }
+    elseif ($SLASummary.RTORate -ge 80) { $rtoColor = "#986F0B" }
+    else { $rtoColor = "#D13438" }
+  }
+
+  $rpoTargetLabel = if ($SLASummary.RPOTarget) { "$($SLASummary.RPOTarget)h" } else { "Not set" }
+  $rtoTargetLabel = if ($SLASummary.RTOTarget) { "$($SLASummary.RTOTarget)min" } else { "Not set" }
+  $rpoMetLabel = if ($null -ne $SLASummary.RPORate) { "$($SLASummary.RPOMet)/$($SLASummary.VMCount)" } else { "N/A" }
+  $rtoMetLabel = if ($null -ne $SLASummary.RTORate) { "$($SLASummary.RTOMet)/$($SLASummary.VMCount)" } else { "N/A" }
+
+  return @"
+  <div class="section">
+    <div class="section-title">SLA Compliance</div>
+    <div class="kpi-grid" style="grid-template-columns: 1fr 1fr;">
+      <div class="kpi-card" style="border-top-color: ${rpoColor};">
+        <div class="kpi-label">Recovery Point Objective (RPO)</div>
+        <div class="kpi-value" style="color: ${rpoColor};">$rpoRateDisplay</div>
+        <div class="kpi-subtext">Target: $rpoTargetLabel | Met: $rpoMetLabel</div>
+        <div class="kpi-subtext">Avg: $($SLASummary.AvgRPOHours)h | Worst: $($SLASummary.WorstRPOHours)h</div>
+      </div>
+      <div class="kpi-card" style="border-top-color: ${rtoColor};">
+        <div class="kpi-label">Recovery Time Objective (RTO)</div>
+        <div class="kpi-value" style="color: ${rtoColor};">$rtoRateDisplay</div>
+        <div class="kpi-subtext">Target: $rtoTargetLabel | Met: $rtoMetLabel</div>
+        <div class="kpi-subtext">Avg: $($SLASummary.AvgRTOMinutes)min | Worst: $($SLASummary.WorstRTOMinutes)min</div>
+      </div>
+    </div>
+  </div>
+"@
+}
+
 function _EscapeHTML {
   <#
   .SYNOPSIS
@@ -17,11 +72,18 @@ function New-HTMLReport {
   <#
   .SYNOPSIS
     Generate a professional HTML report with SureBackup test results
+  .PARAMETER SLASummary
+    Optional SLA compliance summary from _GetSLASummary. When provided,
+    an SLA Compliance section is rendered between KPI cards and VM table.
+  .PARAMETER VMTimings
+    Optional per-VM timing data for RPO/RTO columns in the VM table.
   #>
   param(
     [Parameter(Mandatory = $true)]$TestResults,
     [Parameter(Mandatory = $true)]$RestorePoints,
-    [Parameter(Mandatory = $true)]$IsolatedNetwork
+    [Parameter(Mandatory = $true)]$IsolatedNetwork,
+    $SLASummary,
+    $VMTimings
   )
 
   $reportDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -76,11 +138,40 @@ function New-HTMLReport {
     $safeJob = _EscapeHTML $rpJob
     $safeDate = _EscapeHTML $rpDate
 
+    # RPO/RTO columns (only when SLA targets provided)
+    $slaColumns = ""
+    if ($VMTimings) {
+      $vmTiming = $VMTimings | Where-Object { $_.VMName -eq $vm } | Select-Object -First 1
+      if ($vmTiming) {
+        $rpoVal = if ($null -ne $vmTiming.RPOHours) { $vmTiming.RPOHours } else { "N/A" }
+        $rtoVal = $vmTiming.RTOMinutes
+
+        # Build RPO cell
+        $rpoBadge = ""
+        if ($SLASummary -and $SLASummary.RPOTarget -and $null -ne $vmTiming.RPOHours) {
+          $rpoBadge = if ($vmTiming.RPOHours -le $SLASummary.RPOTarget) { "status-pass" } else { "status-fail" }
+        }
+        $rpoCell = if ($rpoBadge) { '<span class="{0}">{1}</span>' -f $rpoBadge, $rpoVal } else { "$rpoVal" }
+
+        # Build RTO cell
+        $rtoBadge = ""
+        if ($SLASummary -and $SLASummary.RTOTarget) {
+          $rtoBadge = if ($vmTiming.RTOMinutes -le $SLASummary.RTOTarget) { "status-pass" } else { "status-fail" }
+        }
+        $rtoCell = if ($rtoBadge) { '<span class="{0}">{1}</span>' -f $rtoBadge, $rtoVal } else { "$rtoVal" }
+
+        $slaColumns = "      <td>$rpoCell</td>`n      <td>$rtoCell</td>"
+      } else {
+        $slaColumns = "      <td>N/A</td>`n      <td>N/A</td>"
+      }
+    }
+
     $vmDetailRows += @"
     <tr>
       <td><strong>$safeVM</strong></td>
       <td>$safeJob</td>
       <td>$safeDate</td>
+$slaColumns
       <td>$vmPassed / $vmTotal</td>
       <td><span class="$vmStatusClass">$vmStatus</span></td>
     </tr>
@@ -430,6 +521,8 @@ tbody tr:hover { background: var(--ms-gray-10); }
     </div>
   </div>
 
+$(_BuildSLASection -SLASummary $SLASummary)
+
   <div class="section">
     <div class="section-title">VM Verification Summary</div>
     <table>
@@ -438,6 +531,8 @@ tbody tr:hover { background: var(--ms-gray-10); }
           <th>VM Name</th>
           <th>Backup Job</th>
           <th>Restore Point</th>
+$(if ($VMTimings) { '          <th>RPO (h)</th>
+          <th>RTO (min)</th>' })
           <th>Tests (Pass/Total)</th>
           <th>Status</th>
         </tr>

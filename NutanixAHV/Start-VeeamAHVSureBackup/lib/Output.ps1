@@ -7,11 +7,17 @@ function Export-Results {
   <#
   .SYNOPSIS
     Export all SureBackup results to files (HTML, CSV, log)
+  .PARAMETER SLASummary
+    Optional SLA compliance summary for report and JSON export
+  .PARAMETER VMTimings
+    Optional per-VM timing data for RPO/RTO columns in HTML report
   #>
   param(
     [Parameter(Mandatory = $true)]$TestResults,
     [Parameter(Mandatory = $true)]$RestorePoints,
-    [Parameter(Mandatory = $true)]$IsolatedNetwork
+    [Parameter(Mandatory = $true)]$IsolatedNetwork,
+    $SLASummary,
+    $VMTimings
   )
 
   # Create output directory
@@ -35,7 +41,14 @@ function Export-Results {
   # HTML Report
   if ($GenerateHTML) {
     $htmlPath = Join-Path $OutputPath "SureBackup_Report.html"
-    $htmlContent = New-HTMLReport -TestResults $TestResults -RestorePoints $RestorePoints -IsolatedNetwork $IsolatedNetwork
+    $reportParams = @{
+      TestResults     = $TestResults
+      RestorePoints   = $RestorePoints
+      IsolatedNetwork = $IsolatedNetwork
+    }
+    if ($SLASummary) { $reportParams.SLASummary = $SLASummary }
+    if ($VMTimings) { $reportParams.VMTimings = $VMTimings }
+    $htmlContent = New-HTMLReport @reportParams
     $htmlContent | Out-File -FilePath $htmlPath -Encoding UTF8
     Write-Log "  HTML report: $htmlPath" -Level "SUCCESS"
   }
@@ -47,7 +60,7 @@ function Export-Results {
   # Summary JSON — convert Generic.List to plain array for PS 5.1 ConvertTo-Json compatibility
   $summaryPath = Join-Path $OutputPath "SureBackup_Summary.json"
   $safeResults = @($TestResults | Where-Object { $null -ne $_ })
-  $summary = [PSCustomObject]@{
+  $summaryProps = [ordered]@{
     Timestamp        = Get-Date -Format "o"
     VBRServer        = $VBRServer
     PrismCentral     = $PrismCentral
@@ -60,6 +73,28 @@ function Export-Results {
     Duration         = ((Get-Date) - $script:StartTime).ToString()
     Results          = $safeResults
   }
+  if ($SLASummary) {
+    $summaryProps.SLA = [PSCustomObject]@{
+      RTOTarget       = $SLASummary.RTOTarget
+      RTORate         = $SLASummary.RTORate
+      RPOTarget       = $SLASummary.RPOTarget
+      RPORate         = $SLASummary.RPORate
+      AvgRTOMinutes   = $SLASummary.AvgRTOMinutes
+      AvgRPOHours     = $SLASummary.AvgRPOHours
+      WorstRTOMinutes = $SLASummary.WorstRTOMinutes
+      WorstRPOHours   = $SLASummary.WorstRPOHours
+      VMDetails       = @($SLASummary.VMDetails | ForEach-Object {
+        [PSCustomObject]@{
+          VMName        = $_.VMName
+          RTOMinutes    = $_.RTOMinutes
+          RPOHours      = $_.RPOHours
+          RecoveryStart = $_.RecoveryStart.ToString("o")
+          TestsComplete = $_.TestsComplete.ToString("o")
+        }
+      })
+    }
+  }
+  $summary = [PSCustomObject]$summaryProps
   $summary | ConvertTo-Json -Depth 10 | Out-File -FilePath $summaryPath -Encoding UTF8
 
   # ZIP archive
