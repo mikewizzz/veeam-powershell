@@ -5,7 +5,7 @@
 
 <#
 .SYNOPSIS
-  Aggregates source infrastructure totals from VM, SQL, storage, and VMSS inventory data.
+  Aggregates source infrastructure totals from VM, SQL, PaaS database, storage, and VMSS inventory data.
 .PARAMETER VmInventory
   Collection of VM inventory objects from Get-VMInventory.
 .PARAMETER SqlInventory
@@ -14,6 +14,10 @@
   Hashtable with Files and Blobs lists from Get-StorageInventory.
 .PARAMETER VMSSInventory
   Collection of VMSS inventory objects from Get-VMSSInventory.
+.PARAMETER PaaSInventory
+  Hashtable with PostgreSQL, MySQL, CosmosDB, and Redis lists from Get-PaaSInventory.
+.PARAMETER AdditionalResources
+  Hashtable with OrphanedDisks list from Get-AdditionalResources.
 .OUTPUTS
   PSCustomObject with source totals for external sizing calculators.
 #>
@@ -22,7 +26,9 @@ function Get-VeeamSizing {
     [Parameter(Mandatory=$true)]$VmInventory,
     [Parameter(Mandatory=$true)]$SqlInventory,
     $StorageInventory = $null,
-    $VMSSInventory = $null
+    $VMSSInventory = $null,
+    $PaaSInventory = $null,
+    $AdditionalResources = $null
   )
 
   Write-ProgressStep -Activity "Aggregating Source Totals" -Status "Summarizing discovered infrastructure..."
@@ -90,8 +96,67 @@ function Get-VeeamSizing {
   $totalFileSharesCount = $fileShares.Count
   $totalFileShareStorageGB = _SafeSum $fileShares 'QuotaGiB'
 
-  # Combined source totals (includes VMSS)
-  $totalSourceStorage = $totalVMStorage + $totalVMSSStorageGB + $totalSQLStorage + $totalFileShareStorageGB
+  # PaaS database totals — PostgreSQL
+  $pgArr = @()
+  if ($null -ne $PaaSInventory -and $null -ne $PaaSInventory.PostgreSQL) {
+    if ($PaaSInventory.PostgreSQL -is [System.Collections.IList]) {
+      $pgArr = @($PaaSInventory.PostgreSQL.GetEnumerator())
+    } else {
+      $pgArr = @($PaaSInventory.PostgreSQL)
+    }
+  }
+  $totalPostgreSQL = $pgArr.Count
+  $totalPostgreSQLStorageGB = _SafeSum $pgArr 'StorageSizeGB'
+
+  # PaaS database totals — MySQL
+  $mysqlArr = @()
+  if ($null -ne $PaaSInventory -and $null -ne $PaaSInventory.MySQL) {
+    if ($PaaSInventory.MySQL -is [System.Collections.IList]) {
+      $mysqlArr = @($PaaSInventory.MySQL.GetEnumerator())
+    } else {
+      $mysqlArr = @($PaaSInventory.MySQL)
+    }
+  }
+  $totalMySQL = $mysqlArr.Count
+  $totalMySQLStorageGB = _SafeSum $mysqlArr 'StorageSizeGB'
+
+  # PaaS database totals — Cosmos DB (count only; ARM does not expose storage metrics)
+  $cosmosArr = @()
+  if ($null -ne $PaaSInventory -and $null -ne $PaaSInventory.CosmosDB) {
+    if ($PaaSInventory.CosmosDB -is [System.Collections.IList]) {
+      $cosmosArr = @($PaaSInventory.CosmosDB.GetEnumerator())
+    } else {
+      $cosmosArr = @($PaaSInventory.CosmosDB)
+    }
+  }
+  $totalCosmosDB = $cosmosArr.Count
+
+  # PaaS database totals — Redis (count only; ARM does not expose storage metrics)
+  $redisArr = @()
+  if ($null -ne $PaaSInventory -and $null -ne $PaaSInventory.Redis) {
+    if ($PaaSInventory.Redis -is [System.Collections.IList]) {
+      $redisArr = @($PaaSInventory.Redis.GetEnumerator())
+    } else {
+      $redisArr = @($PaaSInventory.Redis)
+    }
+  }
+  $totalRedis = $redisArr.Count
+
+  # Orphaned disk totals
+  $orphanedDisks = @()
+  if ($null -ne $AdditionalResources -and $null -ne $AdditionalResources.OrphanedDisks) {
+    if ($AdditionalResources.OrphanedDisks -is [System.Collections.IList]) {
+      $orphanedDisks = @($AdditionalResources.OrphanedDisks.GetEnumerator())
+    } else {
+      $orphanedDisks = @($AdditionalResources.OrphanedDisks)
+    }
+  }
+  $totalOrphanedDisks = $orphanedDisks.Count
+  $totalOrphanedDiskStorageGB = _SafeSum $orphanedDisks 'DiskSizeGB'
+
+  # Combined source totals (includes VMSS, PaaS databases, and orphaned disks)
+  $totalPaaSStorage = $totalPostgreSQLStorageGB + $totalMySQLStorageGB
+  $totalSourceStorage = $totalVMStorage + $totalVMSSStorageGB + $totalSQLStorage + $totalFileShareStorageGB + $totalPaaSStorage + $totalOrphanedDiskStorageGB
 
   return [PSCustomObject]@{
     TotalVMs = $totalVMs
@@ -104,6 +169,14 @@ function Get-VeeamSizing {
     TotalSQLStorageGB = [math]::Round($totalSQLStorage, 2)
     TotalFileShares = $totalFileSharesCount
     TotalFileShareStorageGB = [math]::Round($totalFileShareStorageGB, 2)
+    TotalPostgreSQL = $totalPostgreSQL
+    TotalPostgreSQLStorageGB = [math]::Round($totalPostgreSQLStorageGB, 2)
+    TotalMySQL = $totalMySQL
+    TotalMySQLStorageGB = [math]::Round($totalMySQLStorageGB, 2)
+    TotalCosmosDB = $totalCosmosDB
+    TotalRedis = $totalRedis
+    TotalOrphanedDisks = $totalOrphanedDisks
+    TotalOrphanedDiskStorageGB = [math]::Round($totalOrphanedDiskStorageGB, 2)
     TotalSourceStorageGB = [math]::Round($totalSourceStorage, 2)
   }
 }

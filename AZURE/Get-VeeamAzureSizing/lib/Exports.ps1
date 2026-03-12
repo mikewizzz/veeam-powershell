@@ -19,7 +19,11 @@
 .PARAMETER VMSSInventory
   VMSS inventory collection.
 .PARAMETER AdditionalResources
-  Hashtable with KeyVaults, AKSClusters, AppServices.
+  Hashtable with KeyVaults, AKSClusters, WebApps, FunctionApps, ContainerRegistries, etc.
+.PARAMETER PaaSInventory
+  Hashtable with PostgreSQL, MySQL, CosmosDB, Redis.
+.PARAMETER NetworkInventory
+  Hashtable with VNets, PrivateEndpoints.
 .PARAMETER FilterMetadata
   Hashtable with runtime parameters for audit trail.
 #>
@@ -32,6 +36,8 @@ function Export-InventoryData {
     [Parameter(Mandatory=$true)]$VeeamSizing,
     $VMSSInventory = $null,
     $AdditionalResources = $null,
+    $PaaSInventory = $null,
+    $NetworkInventory = $null,
     $FilterMetadata = $null
   )
 
@@ -51,9 +57,33 @@ function Export-InventoryData {
 
   # Additional resource exports
   if ($null -ne $AdditionalResources) {
-    $csvExports.Add(@{ Data = $AdditionalResources.KeyVaults;   Path = $script:kvCsv })
-    $csvExports.Add(@{ Data = $AdditionalResources.AKSClusters; Path = $script:aksCsv })
-    $csvExports.Add(@{ Data = $AdditionalResources.AppServices; Path = $script:appSvcCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.KeyVaults;          Path = $script:kvCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.AKSClusters;        Path = $script:aksCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.WebApps;            Path = $script:webAppsCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.FunctionApps;       Path = $script:funcAppsCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.ContainerRegistries; Path = $script:acrCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.LogicApps;          Path = $script:logicAppsCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.DataFactories;      Path = $script:dfCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.APIManagement;      Path = $script:apimCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.EventHubs;          Path = $script:ehCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.ServiceBus;         Path = $script:sbCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.OrphanedDisks;      Path = $script:orphanedDisksCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.Snapshots;          Path = $script:snapshotsCsv })
+    $csvExports.Add(@{ Data = $AdditionalResources.AvailabilitySets;   Path = $script:avSetsCsv })
+  }
+
+  # PaaS database exports
+  if ($null -ne $PaaSInventory) {
+    $csvExports.Add(@{ Data = $PaaSInventory.PostgreSQL; Path = $script:pgCsv })
+    $csvExports.Add(@{ Data = $PaaSInventory.MySQL;      Path = $script:mysqlCsv })
+    $csvExports.Add(@{ Data = $PaaSInventory.CosmosDB;   Path = $script:cosmosCsv })
+    $csvExports.Add(@{ Data = $PaaSInventory.Redis;      Path = $script:redisCsv })
+  }
+
+  # Network resource exports
+  if ($null -ne $NetworkInventory) {
+    $csvExports.Add(@{ Data = $NetworkInventory.VNets;            Path = $script:vnetsCsv })
+    $csvExports.Add(@{ Data = $NetworkInventory.PrivateEndpoints; Path = $script:peCsv })
   }
 
   foreach ($export in $csvExports) {
