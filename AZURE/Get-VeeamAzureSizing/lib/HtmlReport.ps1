@@ -45,6 +45,8 @@ function New-HtmlReport {
     [Parameter(Mandatory=$true)][datetime]$StartTime,
     $VMSSInventory = $null,
     $AdditionalResources = $null,
+    $PaaSInventory = $null,
+    $NetworkInventory = $null,
     $FilterMetadata = $null
   )
 
@@ -98,7 +100,17 @@ function New-HtmlReport {
   # Additional resources
   $keyVaults = @()
   $aksClusters = @()
-  $appServices = @()
+  $webApps = @()
+  $functionApps = @()
+  $containerRegistries = @()
+  $logicApps2 = @()
+  $dataFactories = @()
+  $apiMgmt = @()
+  $eventHubsArr = @()
+  $serviceBusArr = @()
+  $orphanedDisks = @()
+  $snapshotsArr = @()
+  $availSets = @()
   if ($null -ne $AdditionalResources) {
     if ($null -ne $AdditionalResources.KeyVaults) {
       if ($AdditionalResources.KeyVaults -is [System.Collections.IList]) { $keyVaults = @($AdditionalResources.KeyVaults.GetEnumerator()) }
@@ -108,9 +120,87 @@ function New-HtmlReport {
       if ($AdditionalResources.AKSClusters -is [System.Collections.IList]) { $aksClusters = @($AdditionalResources.AKSClusters.GetEnumerator()) }
       else { $aksClusters = @($AdditionalResources.AKSClusters) }
     }
-    if ($null -ne $AdditionalResources.AppServices) {
-      if ($AdditionalResources.AppServices -is [System.Collections.IList]) { $appServices = @($AdditionalResources.AppServices.GetEnumerator()) }
-      else { $appServices = @($AdditionalResources.AppServices) }
+    if ($null -ne $AdditionalResources.WebApps) {
+      if ($AdditionalResources.WebApps -is [System.Collections.IList]) { $webApps = @($AdditionalResources.WebApps.GetEnumerator()) }
+      else { $webApps = @($AdditionalResources.WebApps) }
+    }
+    if ($null -ne $AdditionalResources.FunctionApps) {
+      if ($AdditionalResources.FunctionApps -is [System.Collections.IList]) { $functionApps = @($AdditionalResources.FunctionApps.GetEnumerator()) }
+      else { $functionApps = @($AdditionalResources.FunctionApps) }
+    }
+    if ($null -ne $AdditionalResources.ContainerRegistries) {
+      if ($AdditionalResources.ContainerRegistries -is [System.Collections.IList]) { $containerRegistries = @($AdditionalResources.ContainerRegistries.GetEnumerator()) }
+      else { $containerRegistries = @($AdditionalResources.ContainerRegistries) }
+    }
+    if ($null -ne $AdditionalResources.LogicApps) {
+      if ($AdditionalResources.LogicApps -is [System.Collections.IList]) { $logicApps2 = @($AdditionalResources.LogicApps.GetEnumerator()) }
+      else { $logicApps2 = @($AdditionalResources.LogicApps) }
+    }
+    if ($null -ne $AdditionalResources.DataFactories) {
+      if ($AdditionalResources.DataFactories -is [System.Collections.IList]) { $dataFactories = @($AdditionalResources.DataFactories.GetEnumerator()) }
+      else { $dataFactories = @($AdditionalResources.DataFactories) }
+    }
+    if ($null -ne $AdditionalResources.APIManagement) {
+      if ($AdditionalResources.APIManagement -is [System.Collections.IList]) { $apiMgmt = @($AdditionalResources.APIManagement.GetEnumerator()) }
+      else { $apiMgmt = @($AdditionalResources.APIManagement) }
+    }
+    if ($null -ne $AdditionalResources.EventHubs) {
+      if ($AdditionalResources.EventHubs -is [System.Collections.IList]) { $eventHubsArr = @($AdditionalResources.EventHubs.GetEnumerator()) }
+      else { $eventHubsArr = @($AdditionalResources.EventHubs) }
+    }
+    if ($null -ne $AdditionalResources.ServiceBus) {
+      if ($AdditionalResources.ServiceBus -is [System.Collections.IList]) { $serviceBusArr = @($AdditionalResources.ServiceBus.GetEnumerator()) }
+      else { $serviceBusArr = @($AdditionalResources.ServiceBus) }
+    }
+    if ($null -ne $AdditionalResources.OrphanedDisks) {
+      if ($AdditionalResources.OrphanedDisks -is [System.Collections.IList]) { $orphanedDisks = @($AdditionalResources.OrphanedDisks.GetEnumerator()) }
+      else { $orphanedDisks = @($AdditionalResources.OrphanedDisks) }
+    }
+    if ($null -ne $AdditionalResources.Snapshots) {
+      if ($AdditionalResources.Snapshots -is [System.Collections.IList]) { $snapshotsArr = @($AdditionalResources.Snapshots.GetEnumerator()) }
+      else { $snapshotsArr = @($AdditionalResources.Snapshots) }
+    }
+    if ($null -ne $AdditionalResources.AvailabilitySets) {
+      if ($AdditionalResources.AvailabilitySets -is [System.Collections.IList]) { $availSets = @($AdditionalResources.AvailabilitySets.GetEnumerator()) }
+      else { $availSets = @($AdditionalResources.AvailabilitySets) }
+    }
+  }
+
+  # PaaS databases
+  $pgServers = @()
+  $mysqlServers = @()
+  $cosmosAccounts = @()
+  $redisCaches = @()
+  if ($null -ne $PaaSInventory) {
+    if ($null -ne $PaaSInventory.PostgreSQL) {
+      if ($PaaSInventory.PostgreSQL -is [System.Collections.IList]) { $pgServers = @($PaaSInventory.PostgreSQL.GetEnumerator()) }
+      else { $pgServers = @($PaaSInventory.PostgreSQL) }
+    }
+    if ($null -ne $PaaSInventory.MySQL) {
+      if ($PaaSInventory.MySQL -is [System.Collections.IList]) { $mysqlServers = @($PaaSInventory.MySQL.GetEnumerator()) }
+      else { $mysqlServers = @($PaaSInventory.MySQL) }
+    }
+    if ($null -ne $PaaSInventory.CosmosDB) {
+      if ($PaaSInventory.CosmosDB -is [System.Collections.IList]) { $cosmosAccounts = @($PaaSInventory.CosmosDB.GetEnumerator()) }
+      else { $cosmosAccounts = @($PaaSInventory.CosmosDB) }
+    }
+    if ($null -ne $PaaSInventory.Redis) {
+      if ($PaaSInventory.Redis -is [System.Collections.IList]) { $redisCaches = @($PaaSInventory.Redis.GetEnumerator()) }
+      else { $redisCaches = @($PaaSInventory.Redis) }
+    }
+  }
+
+  # Network
+  $vnetsArr = @()
+  $privateEndpointsArr = @()
+  if ($null -ne $NetworkInventory) {
+    if ($null -ne $NetworkInventory.VNets) {
+      if ($NetworkInventory.VNets -is [System.Collections.IList]) { $vnetsArr = @($NetworkInventory.VNets.GetEnumerator()) }
+      else { $vnetsArr = @($NetworkInventory.VNets) }
+    }
+    if ($null -ne $NetworkInventory.PrivateEndpoints) {
+      if ($NetworkInventory.PrivateEndpoints -is [System.Collections.IList]) { $privateEndpointsArr = @($NetworkInventory.PrivateEndpoints.GetEnumerator()) }
+      else { $privateEndpointsArr = @($NetworkInventory.PrivateEndpoints) }
     }
   }
 
@@ -134,14 +224,27 @@ function New-HtmlReport {
   $policiesCount = $policies.Count
   $kvCount = $keyVaults.Count
   $aksCount = $aksClusters.Count
-  $appSvcCount = $appServices.Count
+  $webAppCount = $webApps.Count
+  $funcAppCount = $functionApps.Count
+  $acrCount = $containerRegistries.Count
   $storageAcctCount = $storageAccts.Count
+  $pgCount = $pgServers.Count
+  $mysqlCount = $mysqlServers.Count
+  $cosmosCount = $cosmosAccounts.Count
+  $redisCount = $redisCaches.Count
+  $orphanedDiskCount = $orphanedDisks.Count
+  $snapshotCount = $snapshotsArr.Count
+  $vnetCount = $vnetsArr.Count
+  $peCount = $privateEndpointsArr.Count
 
   # Storage metrics
   $vmStorageGB = [math]::Round($VeeamSizing.TotalVMStorageGB, 0)
   $vmssStorageGB = [math]::Round($VeeamSizing.TotalVMSSStorageGB, 0)
   $sqlStorageGB = [math]::Round($VeeamSizing.TotalSQLStorageGB, 0)
   $fileStorageGB = [math]::Round($VeeamSizing.TotalFileShareStorageGB, 0)
+  $pgStorageGB = if ($null -ne $VeeamSizing.TotalPostgreSQLStorageGB) { [math]::Round($VeeamSizing.TotalPostgreSQLStorageGB, 0) } else { 0 }
+  $mysqlStorageGB = if ($null -ne $VeeamSizing.TotalMySQLStorageGB) { [math]::Round($VeeamSizing.TotalMySQLStorageGB, 0) } else { 0 }
+  $orphanedDiskStorageGB = if ($null -ne $VeeamSizing.TotalOrphanedDiskStorageGB) { [math]::Round($VeeamSizing.TotalOrphanedDiskStorageGB, 0) } else { 0 }
 
   # Formatted storage strings
   $sourceFormatted = _FormatStorageGB $VeeamSizing.TotalSourceStorageGB
@@ -192,7 +295,7 @@ function New-HtmlReport {
   }
 
   # SQL percentage of total workloads
-  $totalWorkloads = $totalVMs + $totalVMSSInstances + $totalSQLDbs + $totalSQLMIs + $kvCount + $aksCount + $appSvcCount
+  $totalWorkloads = $totalVMs + $totalVMSSInstances + $totalSQLDbs + $totalSQLMIs + $kvCount + $aksCount + $webAppCount + $funcAppCount + $pgCount + $mysqlCount + $cosmosCount + $redisCount
   $sqlPct = 0
   if ($totalWorkloads -gt 0) {
     $sqlPct = [math]::Round(($totalSQLDbs + $totalSQLMIs) / $totalWorkloads * 100, 0)
@@ -348,6 +451,39 @@ function New-HtmlReport {
       Title       = "Immutability Configuration"
       Description = "No immutable Recovery Services Vaults detected"
       Section     = "Security"
+    })
+  }
+
+  # Orphaned disk finding
+  if ($orphanedDiskCount -gt 0) {
+    $orphanedTotalGB = _SafeSum $orphanedDisks 'DiskSizeGB'
+    $findings.Add([PSCustomObject]@{
+      Severity    = "Info"
+      Title       = "Orphaned Managed Disks"
+      Description = "$orphanedDiskCount unattached managed disk(s) consuming $([math]::Round($orphanedTotalGB, 0)) GB — review for cleanup or backup inclusion"
+      Section     = "Infrastructure"
+    })
+  }
+
+  # ADLS Gen2 finding
+  $adlsCount = @($storageAccts | Where-Object { $_.IsHnsEnabled -eq $true }).Count
+  if ($adlsCount -gt 0) {
+    $findings.Add([PSCustomObject]@{
+      Severity    = "Info"
+      Title       = "Data Lake Storage Gen2 Detected"
+      Description = "$adlsCount storage account(s) with hierarchical namespace (ADLS Gen2) — ensure data lake backup strategy is defined"
+      Section     = "Coverage"
+    })
+  }
+
+  # PaaS databases without backup finding
+  $totalPaasDBs = $pgCount + $mysqlCount + $cosmosCount
+  if ($totalPaasDBs -gt 0) {
+    $findings.Add([PSCustomObject]@{
+      Severity    = "Medium"
+      Title       = "PaaS Databases Require Backup Strategy"
+      Description = "$totalPaasDBs PaaS database(s) discovered ($pgCount PostgreSQL, $mysqlCount MySQL, $cosmosCount Cosmos DB) — verify backup policies are configured"
+      Section     = "Coverage"
     })
   }
 
@@ -1147,6 +1283,15 @@ $actionsHtml
   if ($sqlStorageGB -gt 0) {
     $donutSegments.Add(@{ Label = "SQL Storage"; Value = $sqlStorageGB; Color = "#8661C5" })
   }
+  if ($pgStorageGB -gt 0) {
+    $donutSegments.Add(@{ Label = "PostgreSQL"; Value = $pgStorageGB; Color = "#336791" })
+  }
+  if ($mysqlStorageGB -gt 0) {
+    $donutSegments.Add(@{ Label = "MySQL"; Value = $mysqlStorageGB; Color = "#4479A1" })
+  }
+  if ($orphanedDiskStorageGB -gt 0) {
+    $donutSegments.Add(@{ Label = "Orphaned Disks"; Value = $orphanedDiskStorageGB; Color = "#605E5C" })
+  }
 
   $donutChart = New-SvgDonutChart -Segments $donutSegments -CenterLabel $sourceFormatted -CenterSubLabel "Source Data"
 
@@ -1163,6 +1308,18 @@ $actionsHtml
   if ($filesCount -gt 0) {
     $workloadRows += "              <tr><td><strong>Azure File Shares</strong></td><td>$filesCount</td><td>$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalFileShareStorageGB))</td></tr>`n"
   }
+  if ($pgCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>PostgreSQL Servers</strong></td><td>$pgCount</td><td>$(_EscapeHtml (_FormatStorageGB $pgStorageGB))</td></tr>`n"
+  }
+  if ($mysqlCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>MySQL Servers</strong></td><td>$mysqlCount</td><td>$(_EscapeHtml (_FormatStorageGB $mysqlStorageGB))</td></tr>`n"
+  }
+  if ($cosmosCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>Cosmos DB Accounts</strong></td><td>$cosmosCount</td><td>&mdash;</td></tr>`n"
+  }
+  if ($redisCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>Redis Caches</strong></td><td>$redisCount</td><td>&mdash;</td></tr>`n"
+  }
   if ($kvCount -gt 0) {
     $workloadRows += "              <tr><td><strong>Key Vaults</strong></td><td>$kvCount</td><td>&mdash;</td></tr>`n"
   }
@@ -1171,8 +1328,20 @@ $actionsHtml
     foreach ($c in $aksClusters) { if ($null -ne $c.TotalNodeCount) { $totalNodes += $c.TotalNodeCount } }
     $workloadRows += "              <tr><td><strong>AKS Clusters</strong></td><td>$aksCount ($totalNodes nodes)</td><td>&mdash;</td></tr>`n"
   }
-  if ($appSvcCount -gt 0) {
-    $workloadRows += "              <tr><td><strong>App Services</strong></td><td>$appSvcCount</td><td>&mdash;</td></tr>`n"
+  if ($webAppCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>Web Apps</strong></td><td>$webAppCount</td><td>&mdash;</td></tr>`n"
+  }
+  if ($funcAppCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>Function Apps</strong></td><td>$funcAppCount</td><td>&mdash;</td></tr>`n"
+  }
+  if ($orphanedDiskCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>Orphaned Disks</strong></td><td>$orphanedDiskCount</td><td>$(_EscapeHtml (_FormatStorageGB $orphanedDiskStorageGB))</td></tr>`n"
+  }
+  if ($vnetCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>Virtual Networks</strong></td><td>$vnetCount</td><td>&mdash;</td></tr>`n"
+  }
+  if ($acrCount -gt 0) {
+    $workloadRows += "              <tr><td><strong>Container Registries</strong></td><td>$acrCount</td><td>&mdash;</td></tr>`n"
   }
   if ($storageAcctCount -gt 0) {
     $workloadRows += "              <tr><td><strong>Storage Accounts</strong></td><td>$storageAcctCount</td><td>&mdash;</td></tr>`n"
@@ -1570,7 +1739,7 @@ $secContent
 
   # ---- Section 05c: Additional Resources ----
   $additionalResourcesHtml = ""
-  $hasAdditional = ($kvCount -gt 0 -or $aksCount -gt 0 -or $appSvcCount -gt 0)
+  $hasAdditional = ($kvCount -gt 0 -or $aksCount -gt 0 -or $webAppCount -gt 0 -or $funcAppCount -gt 0 -or $acrCount -gt 0)
   if ($hasAdditional) {
     $addlContent = ""
 
@@ -1621,25 +1790,74 @@ $aksRows
 "@
     }
 
-    if ($appSvcCount -gt 0) {
-      $appRows = ""
-      foreach ($app in $appServices) {
+    if ($webAppCount -gt 0) {
+      $waRows = ""
+      foreach ($app in $webApps) {
         $safeAppName = _EscapeHtml $app.Name
         $safeAppLoc = _EscapeHtml $app.Location
         $safeAppSub = _EscapeHtml $app.SubscriptionName
         $safeAppKind = _EscapeHtml $app.Kind
         $safeAppState = _EscapeHtml $app.State
         $httpsBadge = if ($app.HttpsOnly) { "<span class=`"status-dot green`"></span>Yes" } else { "<span class=`"status-dot orange`"></span>No" }
-        $appRows += "              <tr><td><strong>$safeAppName</strong></td><td>$safeAppSub</td><td>$safeAppLoc</td><td>$safeAppKind</td><td>$safeAppState</td><td>$httpsBadge</td></tr>`n"
+        $waRows += "              <tr><td><strong>$safeAppName</strong></td><td>$safeAppSub</td><td>$safeAppLoc</td><td>$safeAppKind</td><td>$safeAppState</td><td>$httpsBadge</td></tr>`n"
       }
       if ($kvCount -gt 0 -or $aksCount -gt 0) { $addlContent += "`n    <div style=`"margin-top: 24px;`"></div>`n" }
       $addlContent += @"
-    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">App Services ($appSvcCount)</div>
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">Web Apps ($webAppCount)</div>
     <div class="table-container">
       <table>
         <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>Kind</th><th>State</th><th>HTTPS Only</th></tr></thead>
         <tbody>
-$appRows
+$waRows
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    if ($funcAppCount -gt 0) {
+      $faRows = ""
+      foreach ($app in $functionApps) {
+        $safeAppName = _EscapeHtml $app.Name
+        $safeAppLoc = _EscapeHtml $app.Location
+        $safeAppSub = _EscapeHtml $app.SubscriptionName
+        $safeAppState = _EscapeHtml $app.State
+        $safeRuntime = _EscapeHtml $app.Runtime
+        $httpsBadge = if ($app.HttpsOnly) { "<span class=`"status-dot green`"></span>Yes" } else { "<span class=`"status-dot orange`"></span>No" }
+        $faRows += "              <tr><td><strong>$safeAppName</strong></td><td>$safeAppSub</td><td>$safeAppLoc</td><td>$safeAppState</td><td>$safeRuntime</td><td>$httpsBadge</td></tr>`n"
+      }
+      if ($kvCount -gt 0 -or $aksCount -gt 0 -or $webAppCount -gt 0) { $addlContent += "`n    <div style=`"margin-top: 24px;`"></div>`n" }
+      $addlContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">Function Apps ($funcAppCount)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>State</th><th>Runtime</th><th>HTTPS Only</th></tr></thead>
+        <tbody>
+$faRows
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    if ($acrCount -gt 0) {
+      $acrRows = ""
+      foreach ($reg in $containerRegistries) {
+        $safeName = _EscapeHtml $reg.Name
+        $safeLoc = _EscapeHtml $reg.Location
+        $safeSub = _EscapeHtml $reg.SubscriptionName
+        $safeSku = _EscapeHtml $reg.Sku
+        $adminBadge = if ($reg.AdminEnabled) { "<span class=`"status-dot orange`"></span>Enabled" } else { "<span class=`"status-dot green`"></span>Disabled" }
+        $acrRows += "              <tr><td><strong>$safeName</strong></td><td>$safeSub</td><td>$safeLoc</td><td>$safeSku</td><td>$adminBadge</td></tr>`n"
+      }
+      $addlContent += "`n    <div style=`"margin-top: 24px;`"></div>`n"
+      $addlContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">Container Registries ($acrCount)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>SKU</th><th>Admin User</th></tr></thead>
+        <tbody>
+$acrRows
         </tbody>
       </table>
     </div>
@@ -1757,6 +1975,194 @@ $sqlSectionContent
       <div class="info-card-title">No SQL Workloads Discovered</div>
       <div class="info-card-text">No Azure SQL databases or managed instances were found in the scanned subscriptions.</div>
     </div>
+    </div>
+  </details>
+"@
+  }
+
+  # ---- Section: PaaS Databases ----
+  $paasHtml = ""
+  $hasPaasData = ($pgCount -gt 0 -or $mysqlCount -gt 0 -or $cosmosCount -gt 0 -or $redisCount -gt 0)
+  if ($hasPaasData) {
+    $paasContent = ""
+
+    if ($pgCount -gt 0) {
+      $pgRows = ""
+      foreach ($pg in $pgServers) {
+        $safeName = _EscapeHtml $pg.Name
+        $safeLoc = _EscapeHtml $pg.Location
+        $safeSub = _EscapeHtml $pg.SubscriptionName
+        $safeVer = _EscapeHtml $pg.Version
+        $safeSku = _EscapeHtml $pg.Sku
+        $safeTier = _EscapeHtml $pg.Tier
+        $safeHA = _EscapeHtml $pg.HAMode
+        $pgStorage = if ($null -ne $pg.StorageSizeGB) { $pg.StorageSizeGB } else { 0 }
+        $pgRows += "              <tr><td><strong>$safeName</strong></td><td>$safeSub</td><td>$safeLoc</td><td>$safeVer</td><td>$safeSku / $safeTier</td><td class=`"mono`">$pgStorage GB</td><td>$safeHA</td></tr>`n"
+      }
+      $paasContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">PostgreSQL Flexible Servers ($pgCount)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>Version</th><th>SKU</th><th>Storage</th><th>HA Mode</th></tr></thead>
+        <tbody>
+$pgRows
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    if ($mysqlCount -gt 0) {
+      $myRows = ""
+      foreach ($my in $mysqlServers) {
+        $safeName = _EscapeHtml $my.Name
+        $safeLoc = _EscapeHtml $my.Location
+        $safeSub = _EscapeHtml $my.SubscriptionName
+        $safeVer = _EscapeHtml $my.Version
+        $safeSku = _EscapeHtml $my.Sku
+        $safeTier = _EscapeHtml $my.Tier
+        $safeHA = _EscapeHtml $my.HAMode
+        $myStorage = if ($null -ne $my.StorageSizeGB) { $my.StorageSizeGB } else { 0 }
+        $myRows += "              <tr><td><strong>$safeName</strong></td><td>$safeSub</td><td>$safeLoc</td><td>$safeVer</td><td>$safeSku / $safeTier</td><td class=`"mono`">$myStorage GB</td><td>$safeHA</td></tr>`n"
+      }
+      if ($pgCount -gt 0) { $paasContent += "`n    <div style=`"margin-top: 24px;`"></div>`n" }
+      $paasContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">MySQL Flexible Servers ($mysqlCount)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>Version</th><th>SKU</th><th>Storage</th><th>HA Mode</th></tr></thead>
+        <tbody>
+$myRows
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    if ($cosmosCount -gt 0) {
+      $cosmosRows = ""
+      foreach ($c in $cosmosAccounts) {
+        $safeName = _EscapeHtml $c.Name
+        $safeLoc = _EscapeHtml $c.Location
+        $safeSub = _EscapeHtml $c.SubscriptionName
+        $safeKind = _EscapeHtml $c.Kind
+        $safeCon = _EscapeHtml $c.ConsistencyLevel
+        $safeLocs = _EscapeHtml $c.Locations
+        $mrBadge = if ($c.MultiRegionWrite) { "<span class=`"status-dot green`"></span>Yes" } else { "No" }
+        $cosmosRows += "              <tr><td><strong>$safeName</strong></td><td>$safeSub</td><td>$safeLoc</td><td>$safeKind</td><td>$safeCon</td><td>$safeLocs</td><td>$mrBadge</td></tr>`n"
+      }
+      if ($pgCount -gt 0 -or $mysqlCount -gt 0) { $paasContent += "`n    <div style=`"margin-top: 24px;`"></div>`n" }
+      $paasContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">Cosmos DB Accounts ($cosmosCount)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>Kind</th><th>Consistency</th><th>Locations</th><th>Multi-Region Write</th></tr></thead>
+        <tbody>
+$cosmosRows
+        </tbody>
+      </table>
+    </div>
+    <div class="info-card" style="margin-top: 8px; border-left-color: var(--color-info);">
+      <div class="info-card-text">Cosmos DB storage size is not available via ARM APIs. Use Azure Monitor metrics or the Azure portal to determine actual data sizes for backup sizing.</div>
+    </div>
+"@
+    }
+
+    if ($redisCount -gt 0) {
+      $redisRows = ""
+      foreach ($r in $redisCaches) {
+        $safeName = _EscapeHtml $r.Name
+        $safeLoc = _EscapeHtml $r.Location
+        $safeSub = _EscapeHtml $r.SubscriptionName
+        $safeSku = _EscapeHtml $r.SkuName
+        $safeVer = _EscapeHtml $r.Version
+        $rCap = if ($null -ne $r.SkuCapacity) { $r.SkuCapacity } else { 0 }
+        $rShards = if ($null -ne $r.ShardCount -and $r.ShardCount -gt 0) { $r.ShardCount } else { "&mdash;" }
+        $redisRows += "              <tr><td><strong>$safeName</strong></td><td>$safeSub</td><td>$safeLoc</td><td>$safeSku</td><td class=`"mono`">$rCap</td><td class=`"mono`">$rShards</td><td>$safeVer</td></tr>`n"
+      }
+      if ($pgCount -gt 0 -or $mysqlCount -gt 0 -or $cosmosCount -gt 0) { $paasContent += "`n    <div style=`"margin-top: 24px;`"></div>`n" }
+      $paasContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">Azure Cache for Redis ($redisCount)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>SKU</th><th>Capacity</th><th>Shards</th><th>Version</th></tr></thead>
+        <tbody>
+$redisRows
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    $paasHtml = @"
+  <details class="section">
+    <summary>PaaS Databases</summary>
+    <div class="section-content">
+$paasContent
+    </div>
+  </details>
+"@
+  }
+
+  # ---- Section: Network Topology ----
+  $networkHtml = ""
+  if ($vnetCount -gt 0 -or $peCount -gt 0) {
+    $netContent = ""
+
+    if ($vnetCount -gt 0) {
+      $vnetRows = ""
+      foreach ($vn in $vnetsArr) {
+        $safeName = _EscapeHtml $vn.Name
+        $safeLoc = _EscapeHtml $vn.Location
+        $safeSub = _EscapeHtml $vn.SubscriptionName
+        $safeAddr = _EscapeHtml $vn.AddressSpace
+        $safePeers = _EscapeHtml $vn.Peerings
+        $vnSubnets = if ($null -ne $vn.SubnetCount) { $vn.SubnetCount } else { 0 }
+        $vnPeering = if ($null -ne $vn.PeeringCount) { $vn.PeeringCount } else { 0 }
+        $vnetRows += "              <tr><td><strong>$safeName</strong></td><td>$safeSub</td><td>$safeLoc</td><td class=`"mono`">$safeAddr</td><td class=`"mono`">$vnSubnets</td><td class=`"mono`">$vnPeering</td><td>$safePeers</td></tr>`n"
+      }
+      $netContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">Virtual Networks ($vnetCount)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>Address Space</th><th>Subnets</th><th>Peerings</th><th>Peering Details</th></tr></thead>
+        <tbody>
+$vnetRows
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    if ($peCount -gt 0) {
+      $peRows = ""
+      foreach ($endpoint in $privateEndpointsArr) {
+        $safeName = _EscapeHtml $endpoint.Name
+        $safeLoc = _EscapeHtml $endpoint.Location
+        $safeSub = _EscapeHtml $endpoint.SubscriptionName
+        $safeTarget = _EscapeHtml $endpoint.TargetResource
+        $safeSubnet = _EscapeHtml $endpoint.Subnet
+        $peRows += "              <tr><td><strong>$safeName</strong></td><td>$safeSub</td><td>$safeLoc</td><td>$safeTarget</td><td>$safeSubnet</td></tr>`n"
+      }
+      if ($vnetCount -gt 0) { $netContent += "`n    <div style=`"margin-top: 24px;`"></div>`n" }
+      $netContent += @"
+    <div style="font-weight: 600; font-size: 14px; margin-bottom: 12px;">Private Endpoints ($peCount)</div>
+    <div class="table-container">
+      <table>
+        <thead><tr><th>Name</th><th>Subscription</th><th>Region</th><th>Target Resource</th><th>Subnet</th></tr></thead>
+        <tbody>
+$peRows
+        </tbody>
+      </table>
+    </div>
+"@
+    }
+
+    $networkHtml = @"
+  <details class="section">
+    <summary>Network Topology</summary>
+    <div class="section-content">
+$netContent
     </div>
   </details>
 "@
@@ -1915,9 +2321,24 @@ $backupCoverageContent
             <td>$filesCount file shares (quota-based)</td>
           </tr>
           <tr>
+            <td><strong>PostgreSQL Storage</strong></td>
+            <td class="mono">$(_EscapeHtml (_FormatStorageGB $pgStorageGB))</td>
+            <td>$pgCount PostgreSQL flexible servers</td>
+          </tr>
+          <tr>
+            <td><strong>MySQL Storage</strong></td>
+            <td class="mono">$(_EscapeHtml (_FormatStorageGB $mysqlStorageGB))</td>
+            <td>$mysqlCount MySQL flexible servers</td>
+          </tr>
+          <tr>
+            <td><strong>Orphaned Disk Storage</strong></td>
+            <td class="mono">$(_EscapeHtml (_FormatStorageGB $orphanedDiskStorageGB))</td>
+            <td>$orphanedDiskCount unattached managed disks</td>
+          </tr>
+          <tr>
             <td><strong>Total Source Data</strong></td>
             <td class="mono" style="color: var(--ms-blue); font-weight: 700;">$(_EscapeHtml (_FormatStorageGB $VeeamSizing.TotalSourceStorageGB))</td>
-            <td>Combined VM + VMSS + SQL + Files source data</td>
+            <td>Combined VM + VMSS + SQL + Files + PaaS + Orphaned Disks</td>
           </tr>
         </tbody>
       </table>
@@ -2028,7 +2449,7 @@ $subTableRows
     <div class="info-card">
       <div class="info-card-title">Data Collection</div>
       <div class="info-card-text">
-        This assessment uses Azure Resource Manager APIs to inventory VMs, VMSS, SQL databases, storage accounts, Key Vaults, AKS clusters, App Services, and existing Azure Backup configuration across $subCount subscription(s). Disk encryption status, managed identities, and NSG exposure are analyzed for security posture assessment. All data is read-only and no changes are made to your environment.
+        This assessment uses Azure Resource Manager APIs to inventory VMs, VMSS, SQL databases, PaaS databases (PostgreSQL, MySQL, Cosmos DB, Redis), storage accounts, Key Vaults, AKS clusters, container registries, web apps, function apps, messaging services (Event Hubs, Service Bus), Logic Apps, Data Factory, API Management, virtual networks, and private endpoints, along with existing Azure Backup configuration across $subCount subscription(s). Disk encryption status, managed identities, and NSG exposure are analyzed for security posture assessment. All data is read-only and no changes are made to your environment.
       </div>
     </div>
 $filterAuditHtml
@@ -2084,7 +2505,9 @@ $vmsByRegionHtml
 $vmssHtml
 $securityPostureHtml
 $additionalResourcesHtml
+$networkHtml
 $sqlHtml
+$paasHtml
 $backupCoverageHtml
 $sourceSummaryHtml
 $subscriptionsHtml

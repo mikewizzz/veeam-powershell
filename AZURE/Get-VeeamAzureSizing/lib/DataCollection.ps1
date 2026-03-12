@@ -565,6 +565,9 @@ function Get-StorageInventory {
       }
       $keyAccess = if ($null -ne $acct.AllowSharedKeyAccess) { $acct.AllowSharedKeyAccess } else { $true }
 
+      # ADLS Gen2 detection — hierarchical namespace enabled
+      $isHnsEnabled = if ($null -ne $acct.EnableHierarchicalNamespace) { $acct.EnableHierarchicalNamespace } else { $false }
+
       $storageAccounts.Add([PSCustomObject]@{
         SubscriptionName = $sub.Name
         SubscriptionId = $sub.Id
@@ -573,6 +576,7 @@ function Get-StorageInventory {
         Location = $acct.Location
         Kind = $acct.Kind
         SkuName = $acct.Sku.Name
+        IsHnsEnabled = $isHnsEnabled
         HttpsOnly = $httpsOnly
         MinTlsVersion = $minTls
         AllowBlobPublicAccess = $publicAccess
@@ -795,11 +799,21 @@ function Get-AzureBackupInventory {
   Hashtable with KeyVaults, AKSClusters, and AppServices lists.
 #>
 function Get-AdditionalResources {
-  Write-ProgressStep -Activity "Discovering Additional Resources" -Status "Scanning Key Vaults, AKS, App Services..."
+  Write-ProgressStep -Activity "Discovering Additional Resources" -Status "Scanning Key Vaults, AKS, App Services, and more..."
 
   $keyVaults = New-Object System.Collections.Generic.List[object]
   $aksClusters = New-Object System.Collections.Generic.List[object]
-  $appServices = New-Object System.Collections.Generic.List[object]
+  $webApps = New-Object System.Collections.Generic.List[object]
+  $functionApps = New-Object System.Collections.Generic.List[object]
+  $containerRegistries = New-Object System.Collections.Generic.List[object]
+  $logicApps = New-Object System.Collections.Generic.List[object]
+  $dataFactories = New-Object System.Collections.Generic.List[object]
+  $apiManagement = New-Object System.Collections.Generic.List[object]
+  $eventHubs = New-Object System.Collections.Generic.List[object]
+  $serviceBus = New-Object System.Collections.Generic.List[object]
+  $orphanedDisks = New-Object System.Collections.Generic.List[object]
+  $snapshots = New-Object System.Collections.Generic.List[object]
+  $availabilitySets = New-Object System.Collections.Generic.List[object]
 
   foreach ($sub in $script:Subs) {
     Write-Log "Scanning additional resources in subscription: $($sub.Name)" -Level "INFO"
@@ -832,19 +846,31 @@ function Get-AdditionalResources {
       Write-Log "Failed to enumerate Key Vaults in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
     }
 
-    # AKS Clusters
+    # AKS Clusters — deep node pool profiling
     try {
       $clusters = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.ContainerService/managedClusters' -ExpandProperties -ErrorAction Stop })
       foreach ($aks in $clusters) {
         if (-not (Test-RegionMatch $aks.Location)) { continue }
         $props = $aks.Properties
         $nodeCount = 0
+        $poolCount = 0
+        $poolDetails = New-Object System.Collections.Generic.List[string]
         if ($null -ne $props -and $null -ne $props.agentPoolProfiles) {
+          $poolCount = @($props.agentPoolProfiles).Count
           foreach ($pool in $props.agentPoolProfiles) {
-            if ($null -ne $pool.count) { $nodeCount += $pool.count }
+            $pCount = if ($null -ne $pool.count) { [int]$pool.count } else { 0 }
+            $nodeCount += $pCount
+            $pName = if ($null -ne $pool.name) { "$($pool.name)" } else { "unknown" }
+            $pSize = if ($null -ne $pool.vmSize) { "$($pool.vmSize)" } else { "?" }
+            $pMode = if ($null -ne $pool.mode) { "$($pool.mode)" } else { "?" }
+            $pOs = if ($null -ne $pool.osType) { "$($pool.osType)" } else { "?" }
+            $poolDetails.Add("${pName}:${pCount}x${pSize}(${pMode},${pOs})")
           }
         }
         $k8sVersion = if ($null -ne $props -and $null -ne $props.kubernetesVersion) { $props.kubernetesVersion } else { "Unknown" }
+        $networkPlugin = if ($null -ne $props -and $null -ne $props.networkProfile -and $null -ne $props.networkProfile.networkPlugin) { "$($props.networkProfile.networkPlugin)" } else { "Unknown" }
+        $networkPolicy = if ($null -ne $props -and $null -ne $props.networkProfile -and $null -ne $props.networkProfile.networkPolicy) { "$($props.networkProfile.networkPolicy)" } else { "None" }
+        $poolDisplay = if ($poolDetails.Count -gt 0) { $poolDetails -join '; ' } else { "None" }
         $aksClusters.Add([PSCustomObject]@{
           SubscriptionName = $sub.Name
           SubscriptionId = $sub.Id
@@ -853,22 +879,28 @@ function Get-AdditionalResources {
           Location = $aks.Location
           KubernetesVersion = $k8sVersion
           TotalNodeCount = $nodeCount
+          NodePoolCount = $poolCount
+          NodePoolProfiles = $poolDisplay
+          NetworkPlugin = $networkPlugin
+          NetworkPolicy = $networkPolicy
         })
       }
     } catch {
       Write-Log "Failed to enumerate AKS clusters in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
     }
 
-    # App Services (Web Apps + Function Apps)
+    # App Services — split Web Apps from Function Apps
     try {
-      $webApps = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.Web/sites' -ExpandProperties -ErrorAction Stop })
-      foreach ($app in $webApps) {
+      $allSites = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.Web/sites' -ExpandProperties -ErrorAction Stop })
+      foreach ($app in $allSites) {
         if (-not (Test-RegionMatch $app.Location)) { continue }
         $props = $app.Properties
         $kind = if ($null -ne $app.Kind) { "$($app.Kind)" } else { "app" }
         $state = if ($null -ne $props -and $null -ne $props.state) { "$($props.state)" } else { "Unknown" }
         $httpsOnly = if ($null -ne $props -and $null -ne $props.httpsOnly) { $props.httpsOnly } else { $false }
-        $appServices.Add([PSCustomObject]@{
+        $runtime = if ($null -ne $props -and $null -ne $props.siteConfig -and $null -ne $props.siteConfig.linuxFxVersion) { "$($props.siteConfig.linuxFxVersion)" } else { "" }
+
+        $siteObj = [PSCustomObject]@{
           SubscriptionName = $sub.Name
           SubscriptionId = $sub.Id
           ResourceGroup = $app.ResourceGroupName
@@ -877,19 +909,540 @@ function Get-AdditionalResources {
           Kind = $kind
           State = $state
           HttpsOnly = $httpsOnly
-        })
+          Runtime = $runtime
+        }
+
+        if ($kind -like "*functionapp*") {
+          $functionApps.Add($siteObj)
+        } else {
+          $webApps.Add($siteObj)
+        }
       }
     } catch {
       Write-Log "Failed to enumerate App Services in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
     }
+
+    # Azure Container Registry
+    try {
+      $registries = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.ContainerRegistry/registries' -ExpandProperties -ErrorAction Stop })
+      foreach ($acr in $registries) {
+        if (-not (Test-RegionMatch $acr.Location)) { continue }
+        $props = $acr.Properties
+        $acrSku = if ($null -ne $acr.Sku -and $null -ne $acr.Sku.name) { "$($acr.Sku.name)" } else { "Unknown" }
+        $adminEnabled = if ($null -ne $props -and $null -ne $props.adminUserEnabled) { $props.adminUserEnabled } else { $false }
+        $geoReplication = $false
+        if ($null -ne $props -and $null -ne $props.policies -and $null -ne $props.policies.replicationPolicy) {
+          $geoReplication = ($props.policies.replicationPolicy.status -eq 'enabled')
+        }
+        $containerRegistries.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $acr.ResourceGroupName
+          Name = $acr.Name
+          Location = $acr.Location
+          Sku = $acrSku
+          AdminEnabled = $adminEnabled
+          GeoReplication = $geoReplication
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate Container Registries in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Logic Apps
+    try {
+      $workflows = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.Logic/workflows' -ExpandProperties -ErrorAction Stop })
+      foreach ($la in $workflows) {
+        if (-not (Test-RegionMatch $la.Location)) { continue }
+        $props = $la.Properties
+        $laState = if ($null -ne $props -and $null -ne $props.state) { "$($props.state)" } else { "Unknown" }
+        $triggerCount = 0
+        $actionCount = 0
+        if ($null -ne $props -and $null -ne $props.definition) {
+          if ($null -ne $props.definition.triggers) { $triggerCount = @($props.definition.triggers.PSObject.Properties).Count }
+          if ($null -ne $props.definition.actions) { $actionCount = @($props.definition.actions.PSObject.Properties).Count }
+        }
+        $logicApps.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $la.ResourceGroupName
+          Name = $la.Name
+          Location = $la.Location
+          State = $laState
+          TriggerCount = $triggerCount
+          ActionCount = $actionCount
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate Logic Apps in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Data Factory
+    try {
+      $factories = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.DataFactory/factories' -ExpandProperties -ErrorAction Stop })
+      foreach ($df in $factories) {
+        if (-not (Test-RegionMatch $df.Location)) { continue }
+        $props = $df.Properties
+        $provState = if ($null -ne $props -and $null -ne $props.provisioningState) { "$($props.provisioningState)" } else { "Unknown" }
+        $gitConfigured = $false
+        if ($null -ne $props -and $null -ne $props.repoConfiguration) { $gitConfigured = $true }
+        $dataFactories.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $df.ResourceGroupName
+          Name = $df.Name
+          Location = $df.Location
+          ProvisioningState = $provState
+          GitConfigured = $gitConfigured
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate Data Factories in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # API Management
+    try {
+      $apims = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.ApiManagement/service' -ExpandProperties -ErrorAction Stop })
+      foreach ($apim in $apims) {
+        if (-not (Test-RegionMatch $apim.Location)) { continue }
+        $props = $apim.Properties
+        $apimSku = if ($null -ne $apim.Sku -and $null -ne $apim.Sku.name) { "$($apim.Sku.name)" } else { "Unknown" }
+        $apimCapacity = if ($null -ne $apim.Sku -and $null -ne $apim.Sku.capacity) { [int]$apim.Sku.capacity } else { 0 }
+        $gatewayUrl = if ($null -ne $props -and $null -ne $props.gatewayUrl) { "$($props.gatewayUrl)" } else { "" }
+        $apiManagement.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $apim.ResourceGroupName
+          Name = $apim.Name
+          Location = $apim.Location
+          Sku = $apimSku
+          Capacity = $apimCapacity
+          GatewayUrl = $gatewayUrl
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate API Management in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Event Hubs
+    try {
+      $ehNamespaces = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.EventHub/namespaces' -ExpandProperties -ErrorAction Stop })
+      foreach ($eh in $ehNamespaces) {
+        if (-not (Test-RegionMatch $eh.Location)) { continue }
+        $props = $eh.Properties
+        $ehSku = if ($null -ne $eh.Sku -and $null -ne $eh.Sku.name) { "$($eh.Sku.name)" } else { "Unknown" }
+        $ehCapacity = if ($null -ne $eh.Sku -and $null -ne $eh.Sku.capacity) { [int]$eh.Sku.capacity } else { 0 }
+        $captureEnabled = $false
+        $retentionDays = 0
+        if ($null -ne $props -and $null -ne $props.kafkaEnabled) { }
+        if ($null -ne $props -and $null -ne $props.maximumThroughputUnits) { $ehCapacity = [int]$props.maximumThroughputUnits }
+        $eventHubs.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $eh.ResourceGroupName
+          Name = $eh.Name
+          Location = $eh.Location
+          Sku = $ehSku
+          ThroughputUnits = $ehCapacity
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate Event Hubs in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Service Bus
+    try {
+      $sbNamespaces = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.ServiceBus/namespaces' -ExpandProperties -ErrorAction Stop })
+      foreach ($sb in $sbNamespaces) {
+        if (-not (Test-RegionMatch $sb.Location)) { continue }
+        $sbSku = if ($null -ne $sb.Sku -and $null -ne $sb.Sku.name) { "$($sb.Sku.name)" } else { "Unknown" }
+        $serviceBus.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $sb.ResourceGroupName
+          Name = $sb.Name
+          Location = $sb.Location
+          Sku = $sbSku
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate Service Bus in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Orphaned Managed Disks (not attached to any VM)
+    try {
+      $allDisks = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.Compute/disks' -ExpandProperties -ErrorAction Stop })
+      foreach ($disk in $allDisks) {
+        if (-not (Test-RegionMatch $disk.Location)) { continue }
+        $props = $disk.Properties
+        $managedBy = if ($null -ne $props -and $null -ne $props.managedBy) { "$($props.managedBy)" } else { $null }
+        if ([string]::IsNullOrWhiteSpace($managedBy)) {
+          $diskSizeGB = 0
+          if ($null -ne $props -and $null -ne $props.diskSizeGB) { $diskSizeGB = [int]$props.diskSizeGB }
+          $diskSku = if ($null -ne $disk.Sku -and $null -ne $disk.Sku.name) { "$($disk.Sku.name)" } else { "Unknown" }
+          $diskState = if ($null -ne $props -and $null -ne $props.diskState) { "$($props.diskState)" } else { "Unknown" }
+          $encType = "SSE-PMK"
+          if ($null -ne $props -and $null -ne $props.encryption -and $null -ne $props.encryption.diskEncryptionSetId) {
+            $encType = "SSE-CMK"
+          }
+          $orphanedDisks.Add([PSCustomObject]@{
+            SubscriptionName = $sub.Name
+            SubscriptionId = $sub.Id
+            ResourceGroup = $disk.ResourceGroupName
+            Name = $disk.Name
+            Location = $disk.Location
+            DiskSizeGB = $diskSizeGB
+            Sku = $diskSku
+            DiskState = $diskState
+            EncryptionType = $encType
+          })
+        }
+      }
+    } catch {
+      Write-Log "Failed to enumerate managed disks in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Existing Snapshots
+    try {
+      $allSnapshots = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.Compute/snapshots' -ExpandProperties -ErrorAction Stop })
+      foreach ($snap in $allSnapshots) {
+        if (-not (Test-RegionMatch $snap.Location)) { continue }
+        $props = $snap.Properties
+        $snapSizeGB = 0
+        if ($null -ne $props -and $null -ne $props.diskSizeGB) { $snapSizeGB = [int]$props.diskSizeGB }
+        $sourceId = if ($null -ne $props -and $null -ne $props.creationData -and $null -ne $props.creationData.sourceResourceId) { "$($props.creationData.sourceResourceId)" } else { "" }
+        $sourceDiskName = ""
+        if ($sourceId -ne "") {
+          $sourceDiskName = ($sourceId -split '/')[-1]
+        }
+        $incremental = if ($null -ne $props -and $null -ne $props.incremental) { $props.incremental } else { $false }
+        $snapshots.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $snap.ResourceGroupName
+          Name = $snap.Name
+          Location = $snap.Location
+          DiskSizeGB = $snapSizeGB
+          SourceDisk = $sourceDiskName
+          Incremental = $incremental
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate snapshots in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Availability Sets
+    try {
+      $allAvSets = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.Compute/availabilitySets' -ExpandProperties -ErrorAction Stop })
+      foreach ($avSet in $allAvSets) {
+        if (-not (Test-RegionMatch $avSet.Location)) { continue }
+        $props = $avSet.Properties
+        $faultDomains = if ($null -ne $props -and $null -ne $props.platformFaultDomainCount) { [int]$props.platformFaultDomainCount } else { 0 }
+        $updateDomains = if ($null -ne $props -and $null -ne $props.platformUpdateDomainCount) { [int]$props.platformUpdateDomainCount } else { 0 }
+        $vmCount = 0
+        if ($null -ne $props -and $null -ne $props.virtualMachines) { $vmCount = @($props.virtualMachines).Count }
+        $availabilitySets.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $avSet.ResourceGroupName
+          Name = $avSet.Name
+          Location = $avSet.Location
+          FaultDomains = $faultDomains
+          UpdateDomains = $updateDomains
+          VMCount = $vmCount
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate availability sets in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
   }
 
-  Write-Log "Discovered $($keyVaults.Count) Key Vaults, $($aksClusters.Count) AKS clusters, $($appServices.Count) App Services" -Level "SUCCESS"
+  $totalWebApps = $webApps.Count
+  $totalFuncApps = $functionApps.Count
+  Write-Log "Discovered $($keyVaults.Count) Key Vaults, $($aksClusters.Count) AKS clusters, $totalWebApps Web Apps, $totalFuncApps Function Apps, $($containerRegistries.Count) Container Registries, $($logicApps.Count) Logic Apps, $($dataFactories.Count) Data Factories, $($apiManagement.Count) API Management, $($eventHubs.Count) Event Hubs, $($serviceBus.Count) Service Bus, $($orphanedDisks.Count) orphaned disks, $($snapshots.Count) snapshots, $($availabilitySets.Count) availability sets" -Level "SUCCESS"
 
   return @{
     KeyVaults = $keyVaults
     AKSClusters = $aksClusters
-    AppServices = $appServices
+    WebApps = $webApps
+    FunctionApps = $functionApps
+    ContainerRegistries = $containerRegistries
+    LogicApps = $logicApps
+    DataFactories = $dataFactories
+    APIManagement = $apiManagement
+    EventHubs = $eventHubs
+    ServiceBus = $serviceBus
+    OrphanedDisks = $orphanedDisks
+    Snapshots = $snapshots
+    AvailabilitySets = $availabilitySets
+  }
+}
+
+#endregion
+
+#region PaaS Database Inventory
+
+<#
+.SYNOPSIS
+  Discovers PaaS database services (PostgreSQL, MySQL, Cosmos DB, Redis) with source sizing data.
+.OUTPUTS
+  Hashtable with PostgreSQL, MySQL, CosmosDB, and Redis lists.
+#>
+function Get-PaaSInventory {
+  Write-ProgressStep -Activity "Discovering PaaS Databases" -Status "Scanning PostgreSQL, MySQL, Cosmos DB, Redis..."
+
+  $postgresql = New-Object System.Collections.Generic.List[object]
+  $mysql = New-Object System.Collections.Generic.List[object]
+  $cosmosdb = New-Object System.Collections.Generic.List[object]
+  $redis = New-Object System.Collections.Generic.List[object]
+
+  foreach ($sub in $script:Subs) {
+    Write-Log "Scanning PaaS databases in subscription: $($sub.Name)" -Level "INFO"
+    try {
+      Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    } catch {
+      Write-Log "Failed to set context for subscription $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+      continue
+    }
+
+    # PostgreSQL Flexible Servers
+    try {
+      $pgServers = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.DBforPostgreSQL/flexibleServers' -ExpandProperties -ErrorAction Stop })
+      foreach ($pg in $pgServers) {
+        if (-not (Test-RegionMatch $pg.Location)) { continue }
+        $props = $pg.Properties
+        $storageGB = 0
+        if ($null -ne $props -and $null -ne $props.storage -and $null -ne $props.storage.storageSizeGB) {
+          $storageGB = [int]$props.storage.storageSizeGB
+        }
+        $version = if ($null -ne $props -and $null -ne $props.version) { "$($props.version)" } else { "Unknown" }
+        $sku = if ($null -ne $pg.Sku -and $null -ne $pg.Sku.name) { "$($pg.Sku.name)" } else { "Unknown" }
+        $tier = if ($null -ne $pg.Sku -and $null -ne $pg.Sku.tier) { "$($pg.Sku.tier)" } else { "Unknown" }
+        $haMode = if ($null -ne $props -and $null -ne $props.highAvailability -and $null -ne $props.highAvailability.mode) { "$($props.highAvailability.mode)" } else { "Disabled" }
+        $pgState = if ($null -ne $props -and $null -ne $props.state) { "$($props.state)" } else { "Unknown" }
+        $postgresql.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $pg.ResourceGroupName
+          Name = $pg.Name
+          Location = $pg.Location
+          Version = $version
+          Sku = $sku
+          Tier = $tier
+          StorageSizeGB = $storageGB
+          HAMode = $haMode
+          State = $pgState
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate PostgreSQL servers in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # MySQL Flexible Servers
+    try {
+      $mysqlServers = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.DBforMySQL/flexibleServers' -ExpandProperties -ErrorAction Stop })
+      foreach ($my in $mysqlServers) {
+        if (-not (Test-RegionMatch $my.Location)) { continue }
+        $props = $my.Properties
+        $storageGB = 0
+        if ($null -ne $props -and $null -ne $props.storage -and $null -ne $props.storage.storageSizeGB) {
+          $storageGB = [int]$props.storage.storageSizeGB
+        }
+        $version = if ($null -ne $props -and $null -ne $props.version) { "$($props.version)" } else { "Unknown" }
+        $sku = if ($null -ne $my.Sku -and $null -ne $my.Sku.name) { "$($my.Sku.name)" } else { "Unknown" }
+        $tier = if ($null -ne $my.Sku -and $null -ne $my.Sku.tier) { "$($my.Sku.tier)" } else { "Unknown" }
+        $haMode = if ($null -ne $props -and $null -ne $props.highAvailability -and $null -ne $props.highAvailability.mode) { "$($props.highAvailability.mode)" } else { "Disabled" }
+        $myState = if ($null -ne $props -and $null -ne $props.state) { "$($props.state)" } else { "Unknown" }
+        $mysql.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $my.ResourceGroupName
+          Name = $my.Name
+          Location = $my.Location
+          Version = $version
+          Sku = $sku
+          Tier = $tier
+          StorageSizeGB = $storageGB
+          HAMode = $haMode
+          State = $myState
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate MySQL servers in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Cosmos DB Accounts
+    try {
+      $cosmosAccounts = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.DocumentDB/databaseAccounts' -ExpandProperties -ErrorAction Stop })
+      foreach ($cosmos in $cosmosAccounts) {
+        if (-not (Test-RegionMatch $cosmos.Location)) { continue }
+        $props = $cosmos.Properties
+        $kind = if ($null -ne $cosmos.Kind) { "$($cosmos.Kind)" } else { "GlobalDocumentDB" }
+        $consistency = if ($null -ne $props -and $null -ne $props.consistencyPolicy -and $null -ne $props.consistencyPolicy.defaultConsistencyLevel) { "$($props.consistencyPolicy.defaultConsistencyLevel)" } else { "Unknown" }
+        $offerType = if ($null -ne $props -and $null -ne $props.databaseAccountOfferType) { "$($props.databaseAccountOfferType)" } else { "Unknown" }
+        $replicaLocations = New-Object System.Collections.Generic.List[string]
+        if ($null -ne $props -and $null -ne $props.locations) {
+          foreach ($loc in $props.locations) {
+            if ($null -ne $loc.locationName) { $replicaLocations.Add("$($loc.locationName)") }
+          }
+        }
+        $locDisplay = if ($replicaLocations.Count -gt 0) { $replicaLocations -join ', ' } else { $cosmos.Location }
+        $multiWrite = if ($null -ne $props -and $null -ne $props.enableMultipleWriteLocations) { $props.enableMultipleWriteLocations } else { $false }
+        $cosmosdb.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $cosmos.ResourceGroupName
+          Name = $cosmos.Name
+          Location = $cosmos.Location
+          Kind = $kind
+          ConsistencyLevel = $consistency
+          OfferType = $offerType
+          Locations = $locDisplay
+          MultiRegionWrite = $multiWrite
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate Cosmos DB accounts in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Azure Cache for Redis
+    try {
+      $redisCaches = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.Cache/redis' -ExpandProperties -ErrorAction Stop })
+      foreach ($rc in $redisCaches) {
+        if (-not (Test-RegionMatch $rc.Location)) { continue }
+        $props = $rc.Properties
+        $rSku = if ($null -ne $rc.Sku -and $null -ne $rc.Sku.name) { "$($rc.Sku.name)" } else { "Unknown" }
+        $rCapacity = if ($null -ne $rc.Sku -and $null -ne $rc.Sku.capacity) { [int]$rc.Sku.capacity } else { 0 }
+        $rFamily = if ($null -ne $rc.Sku -and $null -ne $rc.Sku.family) { "$($rc.Sku.family)" } else { "" }
+        $shardCount = 0
+        if ($null -ne $props -and $null -ne $props.shardCount) { $shardCount = [int]$props.shardCount }
+        $rVersion = if ($null -ne $props -and $null -ne $props.redisVersion) { "$($props.redisVersion)" } else { "Unknown" }
+        $redis.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $rc.ResourceGroupName
+          Name = $rc.Name
+          Location = $rc.Location
+          SkuName = $rSku
+          SkuFamily = $rFamily
+          SkuCapacity = $rCapacity
+          ShardCount = $shardCount
+          Version = $rVersion
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate Redis caches in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+  }
+
+  Write-Log "Discovered $($postgresql.Count) PostgreSQL, $($mysql.Count) MySQL, $($cosmosdb.Count) Cosmos DB, $($redis.Count) Redis" -Level "SUCCESS"
+
+  return @{
+    PostgreSQL = $postgresql
+    MySQL = $mysql
+    CosmosDB = $cosmosdb
+    Redis = $redis
+  }
+}
+
+#endregion
+
+#region Network Inventory
+
+<#
+.SYNOPSIS
+  Discovers VNets, subnets, peering, and private endpoints for backup data path context.
+.OUTPUTS
+  Hashtable with VNets and PrivateEndpoints lists.
+#>
+function Get-NetworkInventory {
+  Write-ProgressStep -Activity "Discovering Network Topology" -Status "Scanning VNets, subnets, private endpoints..."
+
+  $vnets = New-Object System.Collections.Generic.List[object]
+  $privateEndpoints = New-Object System.Collections.Generic.List[object]
+
+  foreach ($sub in $script:Subs) {
+    Write-Log "Scanning network topology in subscription: $($sub.Name)" -Level "INFO"
+    try {
+      Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    } catch {
+      Write-Log "Failed to set context for subscription $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+      continue
+    }
+
+    # Virtual Networks with subnets and peering
+    try {
+      $allVnets = @(Invoke-AzWithRetry { Get-AzVirtualNetwork -ErrorAction Stop })
+      foreach ($vnet in $allVnets) {
+        if (-not (Test-RegionMatch $vnet.Location)) { continue }
+        $addressSpace = if ($null -ne $vnet.AddressSpace -and $null -ne $vnet.AddressSpace.AddressPrefixes) { ($vnet.AddressSpace.AddressPrefixes -join ', ') } else { "" }
+        $subnetCount = if ($null -ne $vnet.Subnets) { $vnet.Subnets.Count } else { 0 }
+        $peeringCount = if ($null -ne $vnet.VirtualNetworkPeerings) { $vnet.VirtualNetworkPeerings.Count } else { 0 }
+        $peeringDetails = New-Object System.Collections.Generic.List[string]
+        if ($null -ne $vnet.VirtualNetworkPeerings) {
+          foreach ($peer in $vnet.VirtualNetworkPeerings) {
+            $remoteVnet = if ($null -ne $peer.RemoteVirtualNetwork -and $null -ne $peer.RemoteVirtualNetwork.Id) { ($peer.RemoteVirtualNetwork.Id -split '/')[-1] } else { "?" }
+            $peerState = if ($null -ne $peer.PeeringState) { "$($peer.PeeringState)" } else { "?" }
+            $peeringDetails.Add("${remoteVnet}($peerState)")
+          }
+        }
+        $peerDisplay = if ($peeringDetails.Count -gt 0) { $peeringDetails -join '; ' } else { "None" }
+        $vnets.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $vnet.ResourceGroupName
+          Name = $vnet.Name
+          Location = $vnet.Location
+          AddressSpace = $addressSpace
+          SubnetCount = $subnetCount
+          PeeringCount = $peeringCount
+          Peerings = $peerDisplay
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate VNets in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Private Endpoints
+    try {
+      $allPe = @(Invoke-AzWithRetry { Get-AzResource -ResourceType 'Microsoft.Network/privateEndpoints' -ExpandProperties -ErrorAction Stop })
+      foreach ($pe in $allPe) {
+        if (-not (Test-RegionMatch $pe.Location)) { continue }
+        $props = $pe.Properties
+        $targetResource = ""
+        if ($null -ne $props -and $null -ne $props.privateLinkServiceConnections) {
+          foreach ($conn in $props.privateLinkServiceConnections) {
+            if ($null -ne $conn.properties -and $null -ne $conn.properties.privateLinkServiceId) {
+              $targetResource = ($conn.properties.privateLinkServiceId -split '/')[-1]
+              break
+            }
+          }
+        }
+        $subnetId = ""
+        if ($null -ne $props -and $null -ne $props.subnet -and $null -ne $props.subnet.id) {
+          $subnetParts = $props.subnet.id -split '/'
+          $subnetId = "$($subnetParts[-3])/$($subnetParts[-1])"
+        }
+        $privateEndpoints.Add([PSCustomObject]@{
+          SubscriptionName = $sub.Name
+          SubscriptionId = $sub.Id
+          ResourceGroup = $pe.ResourceGroupName
+          Name = $pe.Name
+          Location = $pe.Location
+          TargetResource = $targetResource
+          Subnet = $subnetId
+        })
+      }
+    } catch {
+      Write-Log "Failed to enumerate private endpoints in $($sub.Name): $($_.Exception.Message)" -Level "WARNING"
+    }
+  }
+
+  Write-Log "Discovered $($vnets.Count) VNets and $($privateEndpoints.Count) private endpoints" -Level "SUCCESS"
+
+  return @{
+    VNets = $vnets
+    PrivateEndpoints = $privateEndpoints
   }
 }
 

@@ -8,13 +8,16 @@
 
   WHAT THIS SCRIPT DOES:
   1. Inventories Azure VMs, VMSS, SQL Databases, Managed Instances, Storage Accounts
-  2. Discovers Key Vaults, AKS clusters, and App Services
-  3. Analyzes disk encryption, managed identities, and NSG exposure
-  4. Evaluates storage account security posture
-  5. Analyzes current Azure Backup configuration (vaults, policies, protected items)
-  6. Aggregates source infrastructure totals for external sizing calculators
-  7. Generates professional HTML report with Microsoft Fluent Design System
-  8. Provides executive summary with actionable recommendations
+  2. Discovers Key Vaults, AKS clusters, Web Apps, Function Apps, and Container Registries
+  3. Inventories PaaS databases (PostgreSQL, MySQL, Cosmos DB, Redis)
+  4. Maps network topology (VNets, Private Endpoints, Availability Sets)
+  5. Discovers messaging services (Event Hubs, Service Bus), Logic Apps, Data Factory, API Management
+  6. Analyzes disk encryption, managed identities, and NSG exposure
+  7. Evaluates storage account security posture and identifies orphaned disks and snapshots
+  8. Analyzes current Azure Backup configuration (vaults, policies, protected items)
+  9. Aggregates source infrastructure totals for external sizing calculators
+  10. Generates professional HTML report with Microsoft Fluent Design System
+  11. Provides executive summary with actionable recommendations
 
   QUICK START:
   .\Get-VeeamAzureSizing.ps1
@@ -153,7 +156,23 @@ $script:vaultsCsv      = Join-Path $OutputPath "azure_backup_vaults.csv"
 $script:polCsv         = Join-Path $OutputPath "azure_backup_policies.csv"
 $script:kvCsv          = Join-Path $OutputPath "azure_key_vaults.csv"
 $script:aksCsv         = Join-Path $OutputPath "azure_aks_clusters.csv"
-$script:appSvcCsv      = Join-Path $OutputPath "azure_app_services.csv"
+$script:pgCsv          = Join-Path $OutputPath "azure_postgresql.csv"
+$script:mysqlCsv       = Join-Path $OutputPath "azure_mysql.csv"
+$script:cosmosCsv      = Join-Path $OutputPath "azure_cosmosdb.csv"
+$script:redisCsv       = Join-Path $OutputPath "azure_redis.csv"
+$script:webAppsCsv     = Join-Path $OutputPath "azure_web_apps.csv"
+$script:funcAppsCsv    = Join-Path $OutputPath "azure_function_apps.csv"
+$script:acrCsv         = Join-Path $OutputPath "azure_container_registries.csv"
+$script:logicAppsCsv   = Join-Path $OutputPath "azure_logic_apps.csv"
+$script:dfCsv          = Join-Path $OutputPath "azure_data_factories.csv"
+$script:apimCsv        = Join-Path $OutputPath "azure_api_management.csv"
+$script:ehCsv          = Join-Path $OutputPath "azure_event_hubs.csv"
+$script:sbCsv          = Join-Path $OutputPath "azure_service_bus.csv"
+$script:orphanedDisksCsv = Join-Path $OutputPath "azure_orphaned_disks.csv"
+$script:snapshotsCsv   = Join-Path $OutputPath "azure_snapshots.csv"
+$script:avSetsCsv      = Join-Path $OutputPath "azure_availability_sets.csv"
+$script:vnetsCsv       = Join-Path $OutputPath "azure_vnets.csv"
+$script:peCsv          = Join-Path $OutputPath "azure_private_endpoints.csv"
 $script:logCsv         = Join-Path $OutputPath "execution_log.csv"
 
 # =============================
@@ -180,7 +199,7 @@ foreach ($lib in $requiredLibs) {
 
 # Set total progress steps dynamically
 # auth + resolve + access-check + 6 inventory + sizing + export + optional html + optional zip
-$script:TotalSteps = 12
+$script:TotalSteps = 14
 if (-not $SkipHTML) { $script:TotalSteps++ }
 if (-not $SkipZip)  { $script:TotalSteps++ }
 
@@ -220,15 +239,19 @@ try {
   $stInv    = Get-StorageInventory
   $abInv    = Get-AzureBackupInventory
   $addlInv  = Get-AdditionalResources
+  $paasInv  = Get-PaaSInventory
+  $netInv   = Get-NetworkInventory
 
   # Sizing
   $veeamSizing = Get-VeeamSizing -VmInventory $vmInv -SqlInventory $sqlInv `
-    -StorageInventory $stInv -VMSSInventory $vmssInv
+    -StorageInventory $stInv -VMSSInventory $vmssInv `
+    -PaaSInventory $paasInv -AdditionalResources $addlInv
 
   # Exports
   Export-InventoryData -VmInventory $vmInv -SqlInventory $sqlInv `
     -StorageInventory $stInv -AzureBackupInventory $abInv -VeeamSizing $veeamSizing `
-    -VMSSInventory $vmssInv -AdditionalResources $addlInv -FilterMetadata $filterMetadata
+    -VMSSInventory $vmssInv -AdditionalResources $addlInv -FilterMetadata $filterMetadata `
+    -PaaSInventory $paasInv -NetworkInventory $netInv
 
   $htmlPath = $null
   if (-not $SkipHTML) {
@@ -237,7 +260,8 @@ try {
       -VeeamSizing $veeamSizing -OutputPath $OutputPath `
       -Subscriptions $script:Subs -StartTime $script:StartTime `
       -VMSSInventory $vmssInv -AdditionalResources $addlInv `
-      -FilterMetadata $filterMetadata
+      -FilterMetadata $filterMetadata -PaaSInventory $paasInv `
+      -NetworkInventory $netInv
   }
 
   # Write log before ZIP (ZIP deletes output folder)
@@ -257,7 +281,14 @@ try {
   $rvCount = if ($null -ne $abInv.Vaults -and $abInv.Vaults -is [System.Collections.IList]) { $abInv.Vaults.Count } else { 0 }
   $kvCount = if ($null -ne $addlInv.KeyVaults -and $addlInv.KeyVaults -is [System.Collections.IList]) { $addlInv.KeyVaults.Count } else { 0 }
   $aksCount = if ($null -ne $addlInv.AKSClusters -and $addlInv.AKSClusters -is [System.Collections.IList]) { $addlInv.AKSClusters.Count } else { 0 }
-  $appSvcCount = if ($null -ne $addlInv.AppServices -and $addlInv.AppServices -is [System.Collections.IList]) { $addlInv.AppServices.Count } else { 0 }
+  $webAppCount = if ($null -ne $addlInv.WebApps -and $addlInv.WebApps -is [System.Collections.IList]) { $addlInv.WebApps.Count } else { 0 }
+  $funcAppCount = if ($null -ne $addlInv.FunctionApps -and $addlInv.FunctionApps -is [System.Collections.IList]) { $addlInv.FunctionApps.Count } else { 0 }
+  $pgCount = if ($null -ne $paasInv.PostgreSQL -and $paasInv.PostgreSQL -is [System.Collections.IList]) { $paasInv.PostgreSQL.Count } else { 0 }
+  $myCount = if ($null -ne $paasInv.MySQL -and $paasInv.MySQL -is [System.Collections.IList]) { $paasInv.MySQL.Count } else { 0 }
+  $cosmosCount = if ($null -ne $paasInv.CosmosDB -and $paasInv.CosmosDB -is [System.Collections.IList]) { $paasInv.CosmosDB.Count } else { 0 }
+  $redisCount = if ($null -ne $paasInv.Redis -and $paasInv.Redis -is [System.Collections.IList]) { $paasInv.Redis.Count } else { 0 }
+  $orphanDiskCount = if ($null -ne $addlInv.OrphanedDisks -and $addlInv.OrphanedDisks -is [System.Collections.IList]) { $addlInv.OrphanedDisks.Count } else { 0 }
+  $vnetCount = if ($null -ne $netInv.VNets -and $netInv.VNets -is [System.Collections.IList]) { $netInv.VNets.Count } else { 0 }
   $skippedSA = if ($null -ne $stInv.SkippedAccounts) { $stInv.SkippedAccounts } else { 0 }
 
   Write-Host "`n========== Assessment Complete ==========" -ForegroundColor Green
@@ -268,13 +299,20 @@ try {
   Write-Host "  - SQL Databases: $($veeamSizing.TotalSQLDatabases)" -ForegroundColor White
   Write-Host "  - SQL Managed Instances: $($veeamSizing.TotalSQLManagedInstances)" -ForegroundColor White
   Write-Host "  - SQL Storage: $([math]::Round($veeamSizing.TotalSQLStorageGB, 0)) GB" -ForegroundColor White
+  Write-Host "  - PostgreSQL Servers: $pgCount" -ForegroundColor White
+  Write-Host "  - MySQL Servers: $myCount" -ForegroundColor White
+  Write-Host "  - Cosmos DB Accounts: $cosmosCount" -ForegroundColor White
+  Write-Host "  - Redis Caches: $redisCount" -ForegroundColor White
   Write-Host "  - Azure File Shares: $($veeamSizing.TotalFileShares)" -ForegroundColor White
   Write-Host "  - Blob Containers: $blobCount" -ForegroundColor White
   Write-Host "  - Storage Accounts: $saCount" -ForegroundColor White
   Write-Host "  - Recovery Services Vaults: $rvCount" -ForegroundColor White
   Write-Host "  - Key Vaults: $kvCount" -ForegroundColor White
   Write-Host "  - AKS Clusters: $aksCount" -ForegroundColor White
-  Write-Host "  - App Services: $appSvcCount" -ForegroundColor White
+  Write-Host "  - Web Apps: $webAppCount" -ForegroundColor White
+  Write-Host "  - Function Apps: $funcAppCount" -ForegroundColor White
+  Write-Host "  - Orphaned Disks: $orphanDiskCount" -ForegroundColor White
+  Write-Host "  - VNets: $vnetCount" -ForegroundColor White
   Write-Host "  - Total Source Storage: $([math]::Round($veeamSizing.TotalSourceStorageGB, 0)) GB" -ForegroundColor Green
 
   if ($skippedSA -gt 0) {
