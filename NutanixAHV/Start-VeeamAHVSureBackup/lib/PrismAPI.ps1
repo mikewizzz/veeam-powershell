@@ -1187,3 +1187,362 @@ function Wait-PrismTask {
 
   throw "Prism task $TaskUUID timed out after ${TimeoutSec}s"
 }
+
+# =============================
+# Jump VM Image & VM Management
+# =============================
+
+function Get-PrismImages {
+  <#
+  .SYNOPSIS
+    Retrieve images from Prism Central image service (v3/v4)
+  #>
+  if ($script:PrismApiVersion -eq "v4") {
+    $endpoint = "vmm/v4.0/images"
+    $raw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint "${endpoint}?`$limit=100")
+    if ($raw.data) { return @($raw.data) }
+    return @()
+  }
+  else {
+    $result = Invoke-PrismAPI -Method "POST" -Endpoint "images/list" -Body @{ kind = "image"; length = 100 }
+    if ($result.entities) { return @($result.entities) }
+    return @()
+  }
+}
+
+function Get-OrCreateJumpVMImage {
+  <#
+  .SYNOPSIS
+    Resolve the jump VM image UUID. Uses cached image if available,
+    downloads Ubuntu Minimal cloud image if not.
+  .PARAMETER JumpVMImageName
+    Override: use this pre-uploaded image name (for air-gapped clusters)
+  .OUTPUTS
+    Image UUID string
+  #>
+  param([string]$JumpVMImageName)
+
+  $defaultImageName = "SureBackup_JumpVM_Image"
+  $targetName = if ($JumpVMImageName) { $JumpVMImageName } else { $defaultImageName }
+
+  Write-Log "Resolving jump VM image '$targetName'..." -Level "INFO"
+
+  # Check if image already exists in Prism
+  $images = Get-PrismImages
+  foreach ($img in $images) {
+    $imgName = if ($script:PrismApiVersion -eq "v4") { $img.name } else { $img.spec.name }
+    $imgId = if ($script:PrismApiVersion -eq "v4") { $img.extId } else { $img.metadata.uuid }
+    if ($imgName -eq $targetName) {
+      Write-Log "Jump VM image found in Prism: $targetName ($imgId)" -Level "SUCCESS"
+      return $imgId
+    }
+  }
+
+  # Image not found — if user specified a custom name, it must already exist
+  if ($JumpVMImageName) {
+    throw "Jump VM image '$JumpVMImageName' not found in Prism image service. Upload it manually or omit -JumpVMImageName to auto-download Ubuntu Minimal."
+  }
+
+  # Auto-download Ubuntu Minimal cloud image and upload to Prism
+  Write-Log "Image '$defaultImageName' not found — downloading Ubuntu Minimal cloud image..." -Level "INFO"
+  $ubuntuUrl = "https://cloud-images.ubuntu.com/minimal/releases/jammy/release/ubuntu-22.04-minimal-cloudimg-amd64.img"
+
+  if ($script:PrismApiVersion -eq "v4") {
+    # v4: create image with source URL (Prism downloads it)
+    $imageBody = @{
+      name       = $defaultImageName
+      type       = "DISK_IMAGE"
+      source     = @{
+        url = $ubuntuUrl
+      }
+    }
+    $result = Invoke-PrismAPI -Method "POST" -Endpoint "vmm/v4.0/images" -Body $imageBody -TimeoutSec 120
+    $taskId = _ExtractTaskId $result
+  }
+  else {
+    # v3: create image with source_uri
+    $imageBody = @{
+      spec = @{
+        name      = $defaultImageName
+        resources = @{
+          image_type = "DISK_IMAGE"
+          source_uri = $ubuntuUrl
+        }
+      }
+      metadata = @{ kind = "image" }
+    }
+    $result = Invoke-PrismAPI -Method "POST" -Endpoint "images" -Body $imageBody -TimeoutSec 120
+    $taskId = _ExtractTaskId $result
+  }
+
+  if ($taskId) {
+    Write-Log "Image upload task started ($taskId) — waiting for completion (this may take a few minutes)..." -Level "INFO"
+    $completedTask = Wait-PrismTask -TaskUUID $taskId -TimeoutSec 600
+  }
+
+  # Re-query to get the image UUID
+  $images = Get-PrismImages
+  foreach ($img in $images) {
+    $imgName = if ($script:PrismApiVersion -eq "v4") { $img.name } else { $img.spec.name }
+    $imgId = if ($script:PrismApiVersion -eq "v4") { $img.extId } else { $img.metadata.uuid }
+    if ($imgName -eq $defaultImageName) {
+      Write-Log "Jump VM image uploaded successfully: $defaultImageName ($imgId)" -Level "SUCCESS"
+      return $imgId
+    }
+  }
+
+  throw "Failed to create jump VM image — image not found after upload task completed"
+}
+
+function New-PrismVM {
+  <#
+  .SYNOPSIS
+    Create a new VM in Prism Central with dual NICs and cloud-init (v3/v4)
+  .PARAMETER Name
+    VM display name
+  .PARAMETER ImageUUID
+    Boot disk image UUID (clone source)
+  .PARAMETER ManagementSubnetUUID
+    NIC 1 subnet UUID (management/reachable network)
+  .PARAMETER IsolatedSubnetUUID
+    NIC 2 subnet UUID (isolated SureBackup network)
+  .PARAMETER CloudInitUserdata
+    Cloud-init userdata string (will be base64-encoded)
+  .PARAMETER ClusterUUID
+    Target cluster UUID (optional — required if multi-cluster)
+  .OUTPUTS
+    VM UUID string
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][string]$ImageUUID,
+    [Parameter(Mandatory = $true)][string]$ManagementSubnetUUID,
+    [Parameter(Mandatory = $true)][string]$IsolatedSubnetUUID,
+    [Parameter(Mandatory = $true)][string]$CloudInitUserdata,
+    [string]$ClusterUUID
+  )
+
+  $userdataB64 = [System.Convert]::ToBase64String(
+    [System.Text.Encoding]::UTF8.GetBytes($CloudInitUserdata)
+  )
+
+  if ($script:PrismApiVersion -eq "v4") {
+    $vmBody = @{
+      name              = $Name
+      numSockets        = 1
+      numCoresPerSocket = 1
+      memorySizeBytes   = 1073741824  # 1 GB
+      nics              = @(
+        @{ networkInfo = @{ subnet = @{ extId = $ManagementSubnetUUID } } }
+        @{ networkInfo = @{ subnet = @{ extId = $IsolatedSubnetUUID } } }
+      )
+      disks             = @(
+        @{
+          backingInfo = @{
+            vmDisk = @{
+              dataSourceReference = @{ extId = $ImageUUID }
+            }
+          }
+        }
+      )
+      guestCustomization = @{
+        config = @{
+          cloudInit = @{ cloudInitScript = $userdataB64 }
+        }
+      }
+    }
+    if ($ClusterUUID) {
+      $vmBody.cluster = @{ extId = $ClusterUUID }
+    }
+
+    $result = Invoke-PrismAPI -Method "POST" -Endpoint $script:PrismEndpoints.VMs -Body $vmBody -TimeoutSec 120
+    $taskId = _ExtractTaskId $result
+  }
+  else {
+    $vmBody = @{
+      metadata = @{ kind = "vm" }
+      spec     = @{
+        name      = $Name
+        resources = @{
+          num_sockets          = 1
+          num_vcpus_per_socket = 1
+          memory_size_mib      = 1024
+          power_state          = "OFF"
+          nic_list             = @(
+            @{ subnet_reference = @{ kind = "subnet"; uuid = $ManagementSubnetUUID }; is_connected = $true }
+            @{ subnet_reference = @{ kind = "subnet"; uuid = $IsolatedSubnetUUID }; is_connected = $true }
+          )
+          disk_list            = @(
+            @{
+              data_source_reference = @{ kind = "image"; uuid = $ImageUUID }
+              device_properties     = @{
+                device_type  = "DISK"
+                disk_address = @{ adapter_type = "SCSI"; device_index = 0 }
+              }
+            }
+          )
+          guest_customization  = @{
+            cloud_init = @{ user_data = $userdataB64 }
+          }
+        }
+      }
+    }
+    if ($ClusterUUID) {
+      $vmBody.spec.cluster_reference = @{ kind = "cluster"; uuid = $ClusterUUID }
+    }
+
+    $result = Invoke-PrismAPI -Method "POST" -Endpoint "vms" -Body $vmBody -TimeoutSec 120
+    $taskId = _ExtractTaskId $result
+  }
+
+  if ($taskId) {
+    Write-Log "Jump VM create task: $taskId" -Level "INFO"
+    $completedTask = Wait-PrismTask -TaskUUID $taskId -TimeoutSec 300
+  }
+
+  # Find the VM by name to get its UUID
+  $vm = Get-PrismVMByName -Name $Name
+  if (-not $vm) {
+    throw "Jump VM '$Name' not found after creation task completed"
+  }
+  $vmUUID = if ($script:PrismApiVersion -eq "v4") { $vm.extId } else { $vm.metadata.uuid }
+
+  Write-Log "Jump VM created: $Name ($vmUUID)" -Level "SUCCESS"
+  return $vmUUID
+}
+
+function Resolve-SubnetUUID {
+  <#
+  .SYNOPSIS
+    Resolve a subnet by name or UUID, return the UUID
+  .PARAMETER SubnetName
+    Subnet name to look up
+  .PARAMETER SubnetUUID
+    Subnet UUID (returned directly if provided)
+  #>
+  param(
+    [string]$SubnetName,
+    [string]$SubnetUUID
+  )
+
+  if ($SubnetUUID) { return $SubnetUUID }
+  if (-not $SubnetName) { throw "Either SubnetName or SubnetUUID must be provided" }
+
+  $subnets = Get-PrismSubnets
+  $target = $subnets | Where-Object { (Get-SubnetName $_) -eq $SubnetName }
+  if (-not $target) {
+    $available = ($subnets | ForEach-Object { Get-SubnetName $_ }) -join ", "
+    throw "Management network '$SubnetName' not found in Prism Central. Available: $available"
+  }
+  if ($target.Count -gt 1) {
+    $target = $target[0]
+  }
+  return (Get-SubnetUUID $target)
+}
+
+function Resolve-ManagementNetwork {
+  <#
+  .SYNOPSIS
+    Auto-detect or resolve the management network for the jump VM
+  .DESCRIPTION
+    3-tier resolution mirroring Resolve-IsolatedNetwork:
+    1. Explicit UUID override
+    2. Explicit name override
+    3. Auto-detect by keyword, DHCP heuristic, single-remaining, or interactive picker
+  .PARAMETER ManagementNetworkName
+    Explicit network name override
+  .PARAMETER ManagementNetworkUUID
+    Explicit network UUID override
+  .PARAMETER IsolatedNetworkUUID
+    UUID of the isolated network to exclude from candidates
+  .PARAMETER Interactive
+    Enable interactive picker fallback when auto-detect is ambiguous
+  #>
+  param(
+    [string]$ManagementNetworkName,
+    [string]$ManagementNetworkUUID,
+    [string]$IsolatedNetworkUUID,
+    [switch]$Interactive
+  )
+
+  $subnets = Get-PrismSubnets
+
+  # Tier 1: Explicit UUID
+  if ($ManagementNetworkUUID) {
+    $target = $subnets | Where-Object { (Get-SubnetUUID $_) -eq $ManagementNetworkUUID }
+    if (-not $target) {
+      throw "Management network UUID '$ManagementNetworkUUID' not found in Prism Central"
+    }
+    return (Get-SubnetUUID $target)
+  }
+
+  # Tier 2: Explicit name
+  if ($ManagementNetworkName) {
+    $target = $subnets | Where-Object { (Get-SubnetName $_) -eq $ManagementNetworkName }
+    if (-not $target) {
+      $available = ($subnets | ForEach-Object { Get-SubnetName $_ }) -join ", "
+      throw "Management network '$ManagementNetworkName' not found in Prism Central. Available: $available"
+    }
+    if (@($target).Count -gt 1) {
+      $target = @($target)[0]
+    }
+    return (Get-SubnetUUID $target)
+  }
+
+  # Tier 3: Auto-detect — exclude isolated network from candidates
+  $candidates = @($subnets | Where-Object { (Get-SubnetUUID $_) -ne $IsolatedNetworkUUID })
+
+  # 3a. Keyword match: management, mgmt, admin, default, production, prod, infra
+  $target = $candidates | Where-Object {
+    (Get-SubnetName $_) -imatch "^mgmt|^management|^admin|^default$|^prod|^infra"
+  } | Select-Object -First 1
+
+  # 3b. DHCP heuristic — first non-isolated subnet with IPAM/DHCP configured
+  if (-not $target) {
+    $target = $candidates | Where-Object {
+      $hasIPAM = if ($script:PrismApiVersion -eq "v4") {
+        $null -ne $_.ipConfig
+      } else {
+        $ipCfg = $null
+        if ($_.spec -and $_.spec.resources) { $ipCfg = $_.spec.resources.ip_config }
+        $null -ne $ipCfg
+      }
+      $hasIPAM
+    } | Select-Object -First 1
+  }
+
+  # 3c. Single remaining network — if only one non-isolated subnet exists, use it
+  if (-not $target -and $candidates.Count -eq 1) {
+    $target = $candidates | Select-Object -First 1
+  }
+
+  # 3d. Interactive picker fallback
+  if (-not $target -and $Interactive) {
+    Write-Log "Multiple networks found. Select the management network (reachable from this host):" -Level "INFO"
+    for ($i = 0; $i -lt $candidates.Count; $i++) {
+      $name = Get-SubnetName $candidates[$i]
+      $vlan = if ($script:PrismApiVersion -eq "v4") {
+        $candidates[$i].vlanId
+      } else {
+        if ($candidates[$i].spec -and $candidates[$i].spec.resources) { $candidates[$i].spec.resources.vlan_id } else { "N/A" }
+      }
+      Write-Log "  [$($i + 1)] $name (VLAN $vlan)" -Level "INFO"
+    }
+    $selection = Read-Host "  Selection"
+    $idx = 0
+    if ([int]::TryParse($selection, [ref]$idx) -and $idx -ge 1 -and $idx -le $candidates.Count) {
+      $target = $candidates[$idx - 1]
+    } else {
+      throw "Invalid selection. Use -ManagementNetworkName to specify the management network explicitly."
+    }
+  }
+
+  # 3e. Fail with actionable error
+  if (-not $target) {
+    $available = ($candidates | ForEach-Object { Get-SubnetName $_ }) -join ", "
+    throw "Cannot auto-detect management network. Available: $available. Use -ManagementNetworkName or -Interactive."
+  }
+
+  Write-Log "Auto-detected management network: $(Get-SubnetName $target)" -Level "WARNING"
+  return (Get-SubnetUUID $target)
+}
