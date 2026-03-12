@@ -148,24 +148,38 @@ function Test-RestorePointRecency {
     Warn about stale restore points
   .DESCRIPTION
     Checks if any restore points are older than the configured maximum age.
+    When a TargetRPOHours value is provided and is stricter than MaxAgeDays,
+    the RPO target is used as the effective threshold instead.
     Stale restore points may not reflect current application state and could
     give a false sense of recoverability.
   #>
   param(
     [Parameter(Mandatory = $true)]$RestorePoints,
-    [Parameter(Mandatory = $true)][int]$MaxAgeDays
+    [Parameter(Mandatory = $true)][int]$MaxAgeDays,
+    [int]$TargetRPOHours
   )
 
   $issues = @()
   $warnings = @()
 
-  $cutoff = (Get-Date).AddDays(-$MaxAgeDays)
+  # If TargetRPOHours provided and is stricter than MaxAgeDays, use it
+  $effectiveMaxHours = $MaxAgeDays * 24
+  if ($TargetRPOHours -and $TargetRPOHours -lt $effectiveMaxHours) {
+    $effectiveMaxHours = $TargetRPOHours
+  }
+  $cutoff = (Get-Date).AddHours(-$effectiveMaxHours)
   $stale = @($RestorePoints | Where-Object { $_.CreationTime -lt $cutoff })
 
   if ($stale.Count -gt 0) {
+    $usingRPO = $TargetRPOHours -and $TargetRPOHours -lt ($MaxAgeDays * 24)
     foreach ($rp in $stale) {
-      $ageDays = [math]::Round([double](((Get-Date) - $rp.CreationTime).TotalDays), 1)
-      $warnings += "Restore point for '$($rp.VMName)' is $ageDays days old (threshold: $MaxAgeDays days)"
+      if ($usingRPO) {
+        $ageHours = [math]::Round([double](((Get-Date) - $rp.CreationTime).TotalHours), 1)
+        $warnings += "Restore point for '$($rp.VMName)' is ${ageHours}h old (RPO target: ${TargetRPOHours}h)"
+      } else {
+        $ageDays = [math]::Round([double](((Get-Date) - $rp.CreationTime).TotalDays), 1)
+        $warnings += "Restore point for '$($rp.VMName)' is $ageDays days old (threshold: $MaxAgeDays days)"
+      }
     }
   }
 
@@ -362,6 +376,128 @@ function Test-MultiClusterSubnet {
   return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
 }
 
+function Test-SSHAvailable {
+  <#
+  .SYNOPSIS
+    Verify that the ssh command is available on the system PATH
+  #>
+  $issues = @()
+  $warnings = @()
+
+  $sshCmd = Get-Command ssh -ErrorAction SilentlyContinue
+  if (-not $sshCmd) {
+    $sshExe = Get-Command ssh.exe -ErrorAction SilentlyContinue
+    if (-not $sshExe) {
+      $issues += "SSH client not found on PATH. Install OpenSSH client (Windows: 'Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0', Linux/macOS: pre-installed)"
+    }
+  }
+
+  $keygenCmd = Get-Command ssh-keygen -ErrorAction SilentlyContinue
+  if (-not $keygenCmd) {
+    $keygenExe = Get-Command ssh-keygen.exe -ErrorAction SilentlyContinue
+    if (-not $keygenExe) {
+      $issues += "ssh-keygen not found on PATH. Required for ephemeral keypair generation."
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-JumpVMImage {
+  <#
+  .SYNOPSIS
+    Verify the jump VM image exists in Prism or is downloadable
+  .PARAMETER JumpVMImageName
+    Custom image name to check (if provided)
+  #>
+  param([string]$JumpVMImageName)
+
+  $issues = @()
+  $warnings = @()
+
+  if ($JumpVMImageName) {
+    # User specified a custom image — verify it exists
+    try {
+      $images = Get-PrismImages
+      $found = $false
+      foreach ($img in $images) {
+        $imgName = if ($script:PrismApiVersion -eq "v4") { $img.name } else { $img.spec.name }
+        if ($imgName -eq $JumpVMImageName) { $found = $true; break }
+      }
+      if (-not $found) {
+        $issues += "Jump VM image '$JumpVMImageName' not found in Prism image service. Upload it before running with -UseJumpVM."
+      }
+    }
+    catch {
+      $warnings += "Could not verify jump VM image: $($_.Exception.Message)"
+    }
+  }
+  else {
+    # Auto-download mode — check if default image already exists
+    try {
+      $images = Get-PrismImages
+      $found = $false
+      foreach ($img in $images) {
+        $imgName = if ($script:PrismApiVersion -eq "v4") { $img.name } else { $img.spec.name }
+        if ($imgName -eq "SureBackup_JumpVM_Image") { $found = $true; break }
+      }
+      if (-not $found) {
+        $warnings += "Jump VM image 'SureBackup_JumpVM_Image' not cached — will download Ubuntu Minimal cloud image (~250MB) on first run"
+      }
+    }
+    catch {
+      $warnings += "Could not check for cached jump VM image: $($_.Exception.Message)"
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-ManagementNetwork {
+  <#
+  .SYNOPSIS
+    Verify the management network exists in Prism
+  .PARAMETER ManagementNetworkName
+    Network name to validate
+  .PARAMETER ManagementNetworkUUID
+    Network UUID to validate
+  #>
+  param(
+    [string]$ManagementNetworkName,
+    [string]$ManagementNetworkUUID
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  if (-not $ManagementNetworkName -and -not $ManagementNetworkUUID) {
+    $warnings += "Management network will be auto-detected at deployment time"
+    return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+  }
+
+  try {
+    $subnets = Get-PrismSubnets
+    if ($ManagementNetworkUUID) {
+      $target = $subnets | Where-Object { (Get-SubnetUUID $_) -eq $ManagementNetworkUUID }
+      if (-not $target) {
+        $issues += "Management network UUID '$ManagementNetworkUUID' not found in Prism Central"
+      }
+    }
+    elseif ($ManagementNetworkName) {
+      $target = $subnets | Where-Object { (Get-SubnetName $_) -eq $ManagementNetworkName }
+      if (-not $target) {
+        $available = ($subnets | ForEach-Object { Get-SubnetName $_ }) -join ", "
+        $issues += "Management network '$ManagementNetworkName' not found in Prism Central. Available: $available"
+      }
+    }
+  }
+  catch {
+    $warnings += "Could not verify management network: $($_.Exception.Message)"
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
 function Test-PreflightRequirements {
   <#
   .SYNOPSIS
@@ -382,6 +518,14 @@ function Test-PreflightRequirements {
     Maximum concurrent recovery VMs
   .PARAMETER MaxAgeDays
     Maximum restore point age in days before warning
+  .PARAMETER UseJumpVM
+    Whether jump VM mode is enabled
+  .PARAMETER JumpVMImageName
+    Custom jump VM image name (if provided)
+  .PARAMETER ManagementNetworkName
+    Management network name for jump VM
+  .PARAMETER ManagementNetworkUUID
+    Management network UUID for jump VM
   #>
   param(
     [Parameter(Mandatory = $true)]$Clusters,
@@ -389,7 +533,12 @@ function Test-PreflightRequirements {
     [Parameter(Mandatory = $true)]$RestorePoints,
     [Parameter(Mandatory = $true)]$BackupJobs,
     [int]$MaxConcurrentVMs = 3,
-    [int]$MaxAgeDays = 7
+    [int]$MaxAgeDays = 7,
+    [int]$TargetRPOHours,
+    [switch]$UseJumpVM,
+    [string]$JumpVMImageName,
+    [string]$ManagementNetworkName,
+    [string]$ManagementNetworkUUID
   )
 
   $startTime = Get-Date
@@ -424,7 +573,9 @@ function Test-PreflightRequirements {
 
   # 5. Restore point recency
   Write-Log "  [Preflight] Checking restore point recency..." -Level "INFO"
-  $result = Test-RestorePointRecency -RestorePoints $RestorePoints -MaxAgeDays $MaxAgeDays
+  $recencyParams = @{ RestorePoints = $RestorePoints; MaxAgeDays = $MaxAgeDays }
+  if ($TargetRPOHours) { $recencyParams.TargetRPOHours = $TargetRPOHours }
+  $result = Test-RestorePointRecency @recencyParams
   $allIssues += $result.Issues
   $allWarnings += $result.Warnings
 
@@ -451,6 +602,23 @@ function Test-PreflightRequirements {
   $result = Test-MultiClusterSubnet -RestorePoints $RestorePoints -IsolatedNetwork $IsolatedNetwork
   $allIssues += $result.Issues
   $allWarnings += $result.Warnings
+
+  # 10-12. Jump VM preflight checks (only when -UseJumpVM is enabled)
+  if ($UseJumpVM) {
+    Write-Log "  [Preflight] Checking jump VM prerequisites..." -Level "INFO"
+
+    $result = Test-SSHAvailable
+    $allIssues += $result.Issues
+    $allWarnings += $result.Warnings
+
+    $result = Test-JumpVMImage -JumpVMImageName $JumpVMImageName
+    $allIssues += $result.Issues
+    $allWarnings += $result.Warnings
+
+    $result = Test-ManagementNetwork -ManagementNetworkName $ManagementNetworkName -ManagementNetworkUUID $ManagementNetworkUUID
+    $allIssues += $result.Issues
+    $allWarnings += $result.Warnings
+  }
 
   # Report results
   $durationSec = ((Get-Date) - $startTime).TotalSeconds
