@@ -48,45 +48,58 @@ function Test-VMPing {
   <#
   .SYNOPSIS
     Test ICMP connectivity to a recovered VM
+  .PARAMETER JumpVM
+    Optional hashtable with IP, KeyPath, User for SSH-proxied testing
   #>
   param(
     [Parameter(Mandatory = $true)][string]$IPAddress,
-    [Parameter(Mandatory = $true)][string]$VMName
+    [Parameter(Mandatory = $true)][string]$VMName,
+    [hashtable]$JumpVM
   )
 
   $testName = "ICMP Ping"
   $startTime = Get-Date
 
   try {
-    # Single call to avoid doubling ICMP traffic (PS 5.1 sends synchronously)
-    $pingResults = Test-Connection -ComputerName $IPAddress -Count 4 -ErrorAction SilentlyContinue
-
-    if ($null -ne $pingResults -and @($pingResults).Count -gt 0) {
-      # PS 7 returns objects even for timed-out pings — check Status property
-      if ($pingResults[0].PSObject.Properties['Status']) {
-        # PS 7: filter to successful replies only
-        $successfulPings = @($pingResults | Where-Object { $_.Status -eq 'Success' })
-        $passed = ($successfulPings.Count -gt 0)
+    if ($JumpVM) {
+      # Execute ping via SSH through jump VM
+      $r = Invoke-SSHCommand -HostIP $JumpVM.IP -KeyPath $JumpVM.KeyPath -User $JumpVM.User `
+        -Command "ping -c 4 -W 3 $IPAddress"
+      $passed = ($r.ExitCode -eq 0)
+      if ($passed) {
+        $details = "Reply from $IPAddress via jump VM ($($JumpVM.IP))"
       }
       else {
-        # PS 5.1: presence of results means success
-        $successfulPings = @($pingResults)
-        $passed = $true
+        $details = "No reply from $IPAddress via jump VM (4 packets sent)"
       }
     }
     else {
-      $successfulPings = @()
-      $passed = $false
-    }
+      # Local ping (original behavior)
+      $pingResults = Test-Connection -ComputerName $IPAddress -Count 4 -ErrorAction SilentlyContinue
 
-    if ($passed) {
-      # PS 7 uses 'Latency', PS 5.1 uses 'ResponseTime'
-      $latencyProp = if ($successfulPings[0].PSObject.Properties['Latency']) { 'Latency' } else { 'ResponseTime' }
-      $avgLatency = ($successfulPings | Measure-Object -Property $latencyProp -Average).Average
-      $details = "Reply from $IPAddress - Avg latency: $([math]::Round([double]$avgLatency, 1))ms"
-    }
-    else {
-      $details = "No reply from $IPAddress (4 packets sent, 0 received)"
+      if ($null -ne $pingResults -and @($pingResults).Count -gt 0) {
+        if ($pingResults[0].PSObject.Properties['Status']) {
+          $successfulPings = @($pingResults | Where-Object { $_.Status -eq 'Success' })
+          $passed = ($successfulPings.Count -gt 0)
+        }
+        else {
+          $successfulPings = @($pingResults)
+          $passed = $true
+        }
+      }
+      else {
+        $successfulPings = @()
+        $passed = $false
+      }
+
+      if ($passed) {
+        $latencyProp = if ($successfulPings[0].PSObject.Properties['Latency']) { 'Latency' } else { 'ResponseTime' }
+        $avgLatency = ($successfulPings | Measure-Object -Property $latencyProp -Average).Average
+        $details = "Reply from $IPAddress - Avg latency: $([math]::Round([double]$avgLatency, 1))ms"
+      }
+      else {
+        $details = "No reply from $IPAddress (4 packets sent, 0 received)"
+      }
     }
 
     _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
@@ -104,29 +117,50 @@ function Test-VMPort {
   <#
   .SYNOPSIS
     Test TCP port connectivity on a recovered VM
+  .PARAMETER JumpVM
+    Optional hashtable with IP, KeyPath, User for SSH-proxied testing
   #>
   param(
     [Parameter(Mandatory = $true)][string]$IPAddress,
     [Parameter(Mandatory = $true)][int]$Port,
-    [Parameter(Mandatory = $true)][string]$VMName
+    [Parameter(Mandatory = $true)][string]$VMName,
+    [hashtable]$JumpVM
   )
 
   $testName = "TCP Port $Port"
   $startTime = Get-Date
 
-  $tcpClient = $null
   try {
-    $tcpClient = New-Object System.Net.Sockets.TcpClient
-    $connectTask = $tcpClient.ConnectAsync($IPAddress, $Port)
-    $waitResult = $connectTask.Wait(5000)
-
-    if ($waitResult -and $tcpClient.Connected) {
-      $passed = $true
-      $details = "Port $Port is open on $IPAddress"
+    if ($JumpVM) {
+      # Execute port check via SSH through jump VM
+      $r = Invoke-SSHCommand -HostIP $JumpVM.IP -KeyPath $JumpVM.KeyPath -User $JumpVM.User `
+        -Command "nc -z -w 5 $IPAddress $Port"
+      $passed = ($r.ExitCode -eq 0)
+      $details = if ($passed) { "Port $Port is open on $IPAddress (via jump VM)" } else { "Port $Port closed/unreachable on $IPAddress (via jump VM)" }
     }
     else {
-      $passed = $false
-      $details = "Port $Port connection timed out on $IPAddress"
+      # Local TCP test (original behavior)
+      $tcpClient = $null
+      try {
+        $tcpClient = New-Object System.Net.Sockets.TcpClient
+        $connectTask = $tcpClient.ConnectAsync($IPAddress, $Port)
+        $waitResult = $connectTask.Wait(5000)
+
+        if ($waitResult -and $tcpClient.Connected) {
+          $passed = $true
+          $details = "Port $Port is open on $IPAddress"
+        }
+        else {
+          $passed = $false
+          $details = "Port $Port connection timed out on $IPAddress"
+        }
+      }
+      finally {
+        if ($tcpClient) {
+          try { $tcpClient.Close() } catch { }
+          $tcpClient.Dispose()
+        }
+      }
     }
 
     _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
@@ -136,12 +170,6 @@ function Test-VMPort {
     $details = "Port $Port refused/unreachable on ${IPAddress}: $($_.Exception.Message)"
     _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
   }
-  finally {
-    if ($tcpClient) {
-      try { $tcpClient.Close() } catch { }
-      $tcpClient.Dispose()
-    }
-  }
 
   return (_NewTestResult -VMName $VMName -TestName $testName -Passed $passed -Details $details -StartTime $startTime)
 }
@@ -149,31 +177,40 @@ function Test-VMPort {
 function Test-VMDNS {
   <#
   .SYNOPSIS
-    Test reverse DNS lookup for a recovered VM's IP (from script host)
+    Test DNS lookup for a recovered VM's IP
   .DESCRIPTION
-    Performs a reverse DNS lookup of the VM's IP address from the machine running
-    this script. This validates that the script host can resolve the VM's IP via
-    DNS, NOT that the VM itself has DNS capability. For true in-guest DNS testing,
-    use a custom script via -TestCustomScript.
+    When using a jump VM, performs nslookup from the jump VM on the isolated network.
+    Otherwise performs a reverse DNS lookup from the script host.
+  .PARAMETER JumpVM
+    Optional hashtable with IP, KeyPath, User for SSH-proxied testing
   #>
   param(
     [Parameter(Mandatory = $true)][string]$IPAddress,
-    [Parameter(Mandatory = $true)][string]$VMName
+    [Parameter(Mandatory = $true)][string]$VMName,
+    [hashtable]$JumpVM
   )
 
-  $testName = "Reverse DNS (from script host)"
+  $testName = if ($JumpVM) { "DNS Lookup (via jump VM)" } else { "Reverse DNS (from script host)" }
   $startTime = Get-Date
 
   try {
-    $resolved = [System.Net.Dns]::GetHostEntry($IPAddress)
-    $passed = ($null -ne $resolved)
-    $details = "Reverse DNS: $($resolved.HostName)"
+    if ($JumpVM) {
+      $r = Invoke-SSHCommand -HostIP $JumpVM.IP -KeyPath $JumpVM.KeyPath -User $JumpVM.User `
+        -Command "nslookup $IPAddress"
+      $passed = ($r.ExitCode -eq 0)
+      $details = if ($passed) { "DNS lookup succeeded for $IPAddress (via jump VM)" } else { "DNS lookup failed for $IPAddress (via jump VM)" }
+    }
+    else {
+      $resolved = [System.Net.Dns]::GetHostEntry($IPAddress)
+      $passed = ($null -ne $resolved)
+      $details = "Reverse DNS: $($resolved.HostName)"
+    }
 
     _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
   }
   catch {
     $passed = $false
-    $details = "Reverse DNS lookup failed for ${IPAddress}: $($_.Exception.Message)"
+    $details = "DNS lookup failed for ${IPAddress}: $($_.Exception.Message)"
     _WriteTestLog -VMName $VMName -TestName $testName -Passed $false -Details $details
   }
 
@@ -184,11 +221,14 @@ function Test-VMHttpEndpoint {
   <#
   .SYNOPSIS
     Test HTTP/HTTPS endpoint accessibility on a recovered VM
+  .PARAMETER JumpVM
+    Optional hashtable with IP, KeyPath, User for SSH-proxied testing
   #>
   param(
     [Parameter(Mandatory = $true)][string]$IPAddress,
     [Parameter(Mandatory = $true)][string]$Url,
-    [Parameter(Mandatory = $true)][string]$VMName
+    [Parameter(Mandatory = $true)][string]$VMName,
+    [hashtable]$JumpVM
   )
 
   # Replace localhost/127.0.0.1 in URL with actual VM IP
@@ -198,21 +238,30 @@ function Test-VMHttpEndpoint {
   $startTime = Get-Date
 
   try {
-    $webParams = @{
-      Uri            = $testUrl
-      TimeoutSec     = 15
-      UseBasicParsing = $true
-      ErrorAction    = "Stop"
+    if ($JumpVM) {
+      # Execute curl via SSH through jump VM
+      $r = Invoke-SSHCommand -HostIP $JumpVM.IP -KeyPath $JumpVM.KeyPath -User $JumpVM.User `
+        -Command "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 $testUrl"
+      $passed = ($r.Output -match '^[23]\d\d$')
+      $details = if ($passed) { "HTTP $($r.Output) (via jump VM)" } else { "HTTP request returned $($r.Output) (via jump VM)" }
     }
-    if ($script:SkipCert -and $PSVersionTable.PSVersion.Major -ge 7) {
-      $webParams.SkipCertificateCheck = $true
+    else {
+      # Local HTTP test (original behavior)
+      $webParams = @{
+        Uri            = $testUrl
+        TimeoutSec     = 15
+        UseBasicParsing = $true
+        ErrorAction    = "Stop"
+      }
+      if ($script:SkipCert -and $PSVersionTable.PSVersion.Major -ge 7) {
+        $webParams.SkipCertificateCheck = $true
+      }
+      $response = Invoke-WebRequest @webParams
+      $passed = ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400)
+      $contentLen = $response.Headers.'Content-Length'
+      if ($contentLen -is [System.Collections.IEnumerable] -and $contentLen -isnot [string]) { $contentLen = $contentLen[0] }
+      $details = "HTTP $($response.StatusCode) - Content-Length: $contentLen"
     }
-    $response = Invoke-WebRequest @webParams
-    $passed = ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400)
-    # PS 7 returns header values as string[] — extract scalar
-    $contentLen = $response.Headers.'Content-Length'
-    if ($contentLen -is [System.Collections.IEnumerable] -and $contentLen -isnot [string]) { $contentLen = $contentLen[0] }
-    $details = "HTTP $($response.StatusCode) - Content-Length: $contentLen"
 
     _WriteTestLog -VMName $VMName -TestName $testName -Passed $passed -Details $details
   }
@@ -276,10 +325,13 @@ function Invoke-VMVerificationTests {
   <#
   .SYNOPSIS
     Run all configured verification tests against a single recovered VM
+  .PARAMETER JumpVM
+    Optional hashtable with IP, KeyPath, User for SSH-proxied network testing
   #>
   param(
     [Parameter(Mandatory = $true)]$RecoveryInfo,
-    [Parameter(Mandatory = $true)]$IsolatedNetwork
+    [Parameter(Mandatory = $true)]$IsolatedNetwork,
+    [hashtable]$JumpVM
   )
 
   $vmName = $RecoveryInfo.OriginalVMName
@@ -331,25 +383,33 @@ function Invoke-VMVerificationTests {
 
   # Test 3: ICMP Ping
   if ($TestPing -and -not $skipNetworkTests) {
-    $vmResults += Test-VMPing -IPAddress $ipAddress -VMName $vmName
+    $pingParams = @{ IPAddress = $ipAddress; VMName = $vmName }
+    if ($JumpVM) { $pingParams.JumpVM = $JumpVM }
+    $vmResults += Test-VMPing @pingParams
   }
 
   # Test 4: TCP Port checks
   if ($TestPorts -and $TestPorts.Count -gt 0 -and -not $skipNetworkTests) {
     foreach ($port in $TestPorts) {
-      $vmResults += Test-VMPort -IPAddress $ipAddress -Port $port -VMName $vmName
+      $portParams = @{ IPAddress = $ipAddress; Port = $port; VMName = $vmName }
+      if ($JumpVM) { $portParams.JumpVM = $JumpVM }
+      $vmResults += Test-VMPort @portParams
     }
   }
 
   # Test 5: DNS resolution
   if ($TestDNS -and -not $skipNetworkTests) {
-    $vmResults += Test-VMDNS -IPAddress $ipAddress -VMName $vmName
+    $dnsParams = @{ IPAddress = $ipAddress; VMName = $vmName }
+    if ($JumpVM) { $dnsParams.JumpVM = $JumpVM }
+    $vmResults += Test-VMDNS @dnsParams
   }
 
   # Test 6: HTTP endpoint checks
   if ($TestHttpEndpoints -and $TestHttpEndpoints.Count -gt 0 -and -not $skipNetworkTests) {
     foreach ($endpoint in $TestHttpEndpoints) {
-      $vmResults += Test-VMHttpEndpoint -IPAddress $ipAddress -Url $endpoint -VMName $vmName
+      $httpParams = @{ IPAddress = $ipAddress; Url = $endpoint; VMName = $vmName }
+      if ($JumpVM) { $httpParams.JumpVM = $JumpVM }
+      $vmResults += Test-VMHttpEndpoint @httpParams
     }
   }
 
