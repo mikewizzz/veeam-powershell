@@ -47,7 +47,7 @@ veeam-powershell/
 │       └── README.md
 ├── M365/
 │   ├── Get-VeeamM365Sizing/
-│   │   ├── Get-VeeamM365Sizing.ps1         # M365 tenant sizing (production)
+│   │   ├── Get-VeeamM365Sizing.ps1         # M365 data footprint assessment for VDC (production)
 │   │   ├── test-minimal.ps1                # Basic integration tests
 │   │   └── README.md
 │   ├── CONTRIBUTING.md                     # Detailed coding standards
@@ -227,5 +227,5 @@ No automated test runner exists. The only test file is `M365/Get-VeeamM365Sizing
 - **SharePoint cannot be group-filtered** — Graph API limitation; always tenant-wide.
 - **Archive/RIF sizing is slow** — Sequential per-mailbox queries; can take 30+ minutes for large tenants.
 - **Report masking breaks group filtering** — If M365 Admin Center has "concealed names" enabled, UPN-based filtering fails.
-- **MBS estimates are models, not measurements** — Actual consumption depends on backup configuration.
+- **Teams files stored in SharePoint** — Teams file storage is included in SharePoint totals; no separate Teams storage metric exists.
 - **Azure Recovery script is a stub** — `Start-VROAzureRecovery.ps1` is a placeholder for future development.
