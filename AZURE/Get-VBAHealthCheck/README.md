@@ -1,173 +1,135 @@
-# Veeam Backup for Azure - Health Check & Compliance Assessment
+# Get-VBAHealthCheck
 
-Professional health check tool for Veeam Backup for Azure (VBA) deployments. Analyzes protection coverage, backup job health, security posture, snapshot hygiene, repository configuration, and network readiness — then calculates a weighted health score with actionable recommendations.
+Production-grade health check for Veeam Backup for Azure (VBA) appliances. Connects directly to the VBA REST API (v8.1) for comprehensive assessment across 9 health categories.
 
-## Features
-
-- **Weighted Health Score (0-100)** across 7 categories with letter grades
-- **Protection Coverage Analysis** — VMs, SQL Databases, Azure File Shares protected vs total
-- **Backup Job Health** — Success rates, RPO compliance, failure detection
-- **Security & Compliance Audit** — Soft delete, immutability, encryption, TLS, public access
-- **Appliance Health** — VBA appliance VM status, sizing validation
-- **Snapshot Health** — Age analysis, orphaned snapshot detection, storage consumption
-- **Repository Health** — Storage account state, redundancy, access tier optimization
-- **Network Assessment** — NSG rules, private endpoints, connectivity requirements
-- **Professional HTML Report** — Microsoft Fluent Design System with executive summary
-- **CSV Exports** — Structured data for every health check category
-- **Unprotected Resources Report** — Identifies VMs, SQL, and file shares at risk
-- **Modern Authentication** — Interactive, Managed Identity, Service Principal, Device Code
-
-## Prerequisites
-
-- **PowerShell** 7.x (recommended) or 5.1
-- **Azure PowerShell Modules** (auto-installed if missing):
-  - `Az.Accounts`
-  - `Az.Resources`
-  - `Az.Compute`
-  - `Az.Network`
-  - `Az.Sql`
-  - `Az.Storage`
-  - `Az.RecoveryServices`
-- **Azure Permissions**: Reader role on target subscriptions (minimum)
+**Zero dependencies** - no Azure PowerShell modules required. Only needs PowerShell 5.1+ and network access to the VBA appliance.
 
 ## Quick Start
 
 ```powershell
-# Basic health check — all accessible subscriptions
-.\Get-VBAHealthCheck.ps1
+# Interactive login with self-signed cert bypass
+.\Get-VBAHealthCheck.ps1 -Server vba.example.com -SkipCertificateCheck
 
-# Scope to specific subscription and region
-.\Get-VBAHealthCheck.ps1 -Subscriptions "Production-Sub" -Region "eastus"
+# Explicit credential
+.\Get-VBAHealthCheck.ps1 -Server 10.0.0.5 -Credential (Get-Credential)
 
-# Full analysis with snapshot scanning
-.\Get-VBAHealthCheck.ps1 -IncludeSnapshots
+# Automation with pre-obtained token
+.\Get-VBAHealthCheck.ps1 -Server vba.corp.com -Token "eyJ..." -SkipHTML
 
-# Strict RPO threshold (12 hours instead of default 24)
-.\Get-VBAHealthCheck.ps1 -RPOThresholdHours 12
+# Stricter thresholds
+.\Get-VBAHealthCheck.ps1 -Server vba.example.com -RPOThresholdHours 12 -SLATargetPercent 99
 ```
 
-## Authentication
+## What It Checks
 
-### Interactive (Default)
-```powershell
-.\Get-VBAHealthCheck.ps1
-```
-
-### Managed Identity (Azure VMs/Containers)
-```powershell
-.\Get-VBAHealthCheck.ps1 -UseManagedIdentity
-```
-
-### Service Principal (Certificate — Recommended for Automation)
-```powershell
-.\Get-VBAHealthCheck.ps1 -ServicePrincipalId "app-id" -CertificateThumbprint "thumb" -TenantId "tenant-id"
-```
-
-### Device Code (Headless/Remote)
-```powershell
-.\Get-VBAHealthCheck.ps1 -UseDeviceCode
-```
+| Category | Weight | What's Assessed |
+|----------|--------|-----------------|
+| Protection Coverage | 20% | VM, SQL, File Share, Cosmos DB protection rates |
+| Policy Health | 15% | Policy errors, disabled policies, SLA compliance |
+| Configuration Check | 15% | VBA built-in check: roles, workers, repos, MFA, SSO |
+| System Health | 10% | Services, version, system state, disabled features |
+| License Health | 10% | Type, expiry, instance usage, grace period |
+| Session Health | 10% | Success rate, recent failures, long-running policies |
+| Repository Health | 10% | Status, encryption, immutability, storage tier |
+| Worker Health | 5% | Worker status, bottlenecks (CPU, storage, wait time) |
+| Configuration Backup | 5% | Enabled, last backup status, backup age |
 
 ## Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `Subscriptions` | string[] | All | Subscription IDs or names to scan |
-| `TenantId` | string | Current | Azure AD tenant ID |
-| `Region` | string | All | Filter by Azure region |
-| `ApplianceNamePattern` | string | `veeam\|vba\|vbazure` | Regex to identify VBA appliance VMs |
-| `RPOThresholdHours` | int | 24 | Max hours since last successful backup |
-| `SnapshotAgeWarningDays` | int | 30 | Warn on snapshots older than N days |
-| `SnapshotAgeCriticalDays` | int | 90 | Critical alert for snapshots older than N days |
-| `IncludeSnapshots` | switch | false | Enable managed disk snapshot analysis |
-| `OutputPath` | string | Auto | Output folder path |
-| `GenerateHTML` | switch | true | Generate HTML report |
-| `ZipOutput` | switch | true | Create ZIP archive |
-| `SkipModuleInstall` | switch | false | Error on missing modules instead of auto-installing |
+| `-Server` | string | **required** | VBA appliance hostname or IP |
+| `-Port` | int | 443 | API port |
+| `-Credential` | PSCredential | interactive | Username/password for OAuth2 |
+| `-Token` | string | - | Pre-obtained bearer token |
+| `-SkipCertificateCheck` | switch | false | Bypass TLS cert validation |
+| `-RPOThresholdHours` | int | 24 | RPO compliance threshold |
+| `-SLATargetPercent` | int | 95 | SLA compliance target |
+| `-ConfigBackupAgeDays` | int | 7 | Max config backup age |
+| `-LicenseExpiryWarningDays` | int | 30 | License expiry warning threshold |
+| `-OutputPath` | string | auto-timestamped | Output directory |
+| `-SkipHTML` | switch | false | Skip HTML report |
+| `-SkipZip` | switch | false | Skip ZIP archive |
 
-## Health Score Methodology
+## Authentication
 
-The overall health score (0-100) is a weighted average across 7 categories:
+The tool supports three authentication methods:
 
-| Category | Weight | What It Checks |
-|----------|--------|----------------|
-| Protection Coverage | 25% | % of VMs, SQL, File Shares with backup configured |
-| Backup Job Health | 25% | Success rates, RPO compliance, policy configuration |
-| Security & Compliance | 15% | Soft delete, immutability, encryption, TLS, RBAC |
-| Appliance Health | 10% | VBA VM power state, sizing, provisioning |
-| Snapshot Health | 10% | Age distribution, orphaned snapshots |
-| Repository Health | 10% | Storage account state, redundancy, tier optimization |
-| Network Health | 5% | NSG rules, private endpoints, connectivity |
+1. **Interactive** (default) - prompts for credentials if neither `-Credential` nor `-Token` is provided
+2. **PSCredential** - pass credentials via `-Credential (Get-Credential)` or pre-built credential objects
+3. **Bearer Token** - pass a pre-obtained token via `-Token` for CI/CD pipelines
 
-Each finding scores: **100** (Healthy), **50** (Warning), or **0** (Critical).
-
-**Grades:**
-- **90-100**: Excellent
-- **70-89**: Good
-- **50-69**: Needs Attention
-- **0-49**: Critical
+All authentication flows use the VBA OAuth2 endpoint (`POST /api/oauth2/token`). Tokens are automatically refreshed during long-running assessments.
 
 ## Output Files
 
-| File | Description |
-|------|-------------|
-| `VBA-HealthCheck-Report.html` | Professional HTML report with executive summary |
-| `health_check_findings.csv` | All findings with status, category, and recommendations |
-| `health_score_summary.csv` | Overall and per-category scores with grades |
-| `protection_coverage.csv` | Protected vs total resources by type |
-| `unprotected_vms.csv` | List of VMs without backup configured |
-| `backup_job_health.csv` | Per-item backup status and RPO compliance |
-| `appliance_health.csv` | VBA appliance VM inventory and status |
-| `snapshot_health.csv` | Snapshot age analysis and orphan detection |
-| `security_posture.csv` | Vault security settings audit |
-| `repository_health.csv` | Backup storage account configuration |
-| `backup_policies.csv` | Backup policy inventory |
-| `execution_log.csv` | Timestamped execution log |
+| File | Content |
+|------|---------|
+| `VBA-HealthCheck-Report.html` | Executive-grade HTML report (Fluent Design) |
+| `health_check_findings.csv` | All findings with severity and recommendations |
+| `health_score_summary.csv` | Overall + per-category scores and grades |
+| `protection_coverage.csv` | Workload protection statistics |
+| `unprotected_vms.csv` | Unprotected VM inventory |
+| `unprotected_sql.csv` | Unprotected SQL database inventory |
+| `unprotected_fileshares.csv` | Unprotected file share inventory |
+| `unprotected_cosmosdb.csv` | Unprotected Cosmos DB inventory |
+| `policy_status.csv` | All policies with status |
+| `sla_compliance.csv` | SLA compliance per policy |
+| `session_failures.csv` | Recent failed sessions |
+| `repository_health.csv` | Repository configuration details |
+| `worker_health.csv` | Worker instance details |
+| `license_resources.csv` | Per-resource license state |
+| `configuration_check.csv` | VBA configuration check results |
+| `system_info.csv` | Appliance system information |
+| `health_check_data.json` | Machine-readable health score bundle |
+| `execution_log.csv` | Full execution log |
 
-## Examples
+All files are packaged into a ZIP archive by default.
 
-### Production Environment Health Check
-```powershell
-.\Get-VBAHealthCheck.ps1 `
-  -Subscriptions "Prod-Sub-1","Prod-Sub-2" `
-  -Region "eastus" `
-  -RPOThresholdHours 12 `
-  -IncludeSnapshots `
-  -SnapshotAgeWarningDays 14 `
-  -SnapshotAgeCriticalDays 45
-```
+## Health Score
 
-### Automated Weekly Health Check (Service Principal)
-```powershell
-.\Get-VBAHealthCheck.ps1 `
-  -ServicePrincipalId $env:AZURE_CLIENT_ID `
-  -CertificateThumbprint $env:AZURE_CERT_THUMB `
-  -TenantId $env:AZURE_TENANT_ID `
-  -IncludeSnapshots `
-  -OutputPath "C:\Reports\VBAHealthCheck"
-```
+The overall health score (0-100) is a weighted average across all 9 categories. Each finding scores:
+- **Healthy**: 100 points
+- **Warning**: 50 points
+- **Critical**: 0 points
 
-### Quick Check (Minimal Scope)
-```powershell
-.\Get-VBAHealthCheck.ps1 -Subscriptions "Dev-Sub" -Region "westus2"
-```
+Grades: **Excellent** (>=90), **Good** (>=70), **Needs Attention** (>=50), **Critical** (<50).
+
+## Prerequisites
+
+- PowerShell 5.1 or later (7.x recommended)
+- Network access to VBA appliance on port 443 (or custom port)
+- VBA console user credentials with read access
 
 ## Troubleshooting
 
-| Issue | Solution |
-|-------|----------|
-| No VBA appliances found | Ensure VBA VM names contain "veeam" or use `-ApplianceNamePattern` to match your naming convention |
-| Missing modules error | Run `Install-Module Az -Scope CurrentUser` or remove `-SkipModuleInstall` to auto-install |
-| Permission denied | Ensure your account has Reader role on target subscriptions |
-| Slow snapshot analysis | Snapshot enumeration scales with count — use `-Region` to limit scope |
-| No backup items found | Verify Recovery Services Vaults exist and contain protected items |
+**Connection refused**: Verify the server address and port. The VBA API runs on port 443 by default.
 
-## Best Practices
+**Certificate errors**: Use `-SkipCertificateCheck` for appliances with self-signed certificates.
 
-1. **Schedule weekly health checks** using Azure Automation or CI/CD pipelines
-2. **Use service principal auth** with certificate for automated runs
-3. **Enable `-IncludeSnapshots`** for comprehensive snapshot hygiene analysis
-4. **Set strict RPO thresholds** (`-RPOThresholdHours 12`) for production workloads
-5. **Review unprotected VMs** from the CSV export after each run
-6. **Address Critical findings** before Warning findings for maximum impact
-7. **Archive HTML reports** for trend analysis and compliance auditing
+**Authentication failed**: Verify credentials. The tool uses OAuth2 Password grant - MFA-enabled accounts are not yet supported.
+
+**403 Forbidden**: The API user may lack required permissions. Ensure the user has console access.
+
+**Configuration check timeout**: The built-in check has a 120-second timeout. Large environments may need more time - the tool will still report partial results.
+
+## Architecture
+
+```
+Get-VBAHealthCheck/
+  Get-VBAHealthCheck.ps1       # Main entry point
+  lib/
+    Helpers.ps1                # String/format utilities
+    Logging.ps1                # Console logging, progress tracking
+    ApiClient.ps1              # OAuth2 auth, retry, pagination
+    DataCollection.ps1         # API data retrieval
+    HealthChecks.ps1           # Findings engine, scoring
+    Charts.ps1                 # SVG chart generators
+    HtmlReport.ps1             # HTML report (Fluent Design)
+    Exports.ps1                # CSV, JSON, ZIP export
+  README.md
+```
+
+## Disclaimer
+
+This is a community-maintained tool, not an official Veeam product. All API operations are read-only with the exception of triggering the built-in configuration check.
