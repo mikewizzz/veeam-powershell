@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">
+<title>Veeam Backup for Azure - Health Check Report</title>
+<style>
+:root {
+  --ms-blue: #0078D4;
+  --ms-blue-dark: #106EBE;
+  --ms-blue-light: #50E6FF;
+  --ms-gray-10: #FAF9F8;
+  --ms-gray-20: #F3F2F1;
+  --ms-gray-30: #EDEBE9;
+  --ms-gray-50: #D2D0CE;
+  --ms-gray-90: #605E5C;
+  --ms-gray-130: #323130;
+  --ms-gray-160: #201F1E;
+  --veeam-green: #0A7B2E;
+  --color-success: #0A7B2E;
+  --color-warning: #B45309;
+  --color-danger: #D13438;
+  --color-info: #0078D4;
+  --header-dark: #1B1B2F;
+  --header-mid: #1F4068;
+  --header-deep: #162447;
+  --shadow-4: 0 1.6px 3.6px 0 rgba(0,0,0,.132), 0 0.3px 0.9px 0 rgba(0,0,0,.108);
+  --shadow-8: 0 3.2px 7.2px 0 rgba(0,0,0,.132), 0 0.6px 1.8px 0 rgba(0,0,0,.108);
+  --shadow-16: 0 6.4px 14.4px 0 rgba(0,0,0,.132), 0 1.2px 3.6px 0 rgba(0,0,0,.108);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+body { font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Roboto', 'Helvetica Neue', sans-serif; background: var(--ms-gray-10); color: var(--ms-gray-160); line-height: 1.6; font-size: 14px; -webkit-font-smoothing: antialiased; counter-reset: section-counter; }
+.container { max-width: 1440px; margin: 0 auto; padding: 0 32px 40px; }
+
+header.header, .header { background: linear-gradient(135deg, var(--header-dark) 0%, var(--header-mid) 50%, var(--header-deep) 100%); padding: 48px 32px 40px; margin-bottom: 32px; position: relative; overflow: hidden; }
+.header-orb { position: absolute; top: -50%; right: -10%; width: 400px; height: 400px; background: radial-gradient(circle, rgba(255,255,255,0.04) 0%, transparent 70%); border-radius: 50%; }
+.header-content { max-width: 1440px; margin: 0 auto; position: relative; z-index: 1; }
+.header-badge { display: inline-block; padding: 4px 14px; background: rgba(255,255,255,0.10); color: #FFFFFF; border: 1px solid rgba(255,255,255,0.20); border-radius: 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; backdrop-filter: blur(12px); margin-bottom: 16px; }
+h1.header-title, .header-title { font-size: 36px; font-weight: 700; color: #FFFFFF; letter-spacing: -0.02em; margin-bottom: 6px; }
+.header-subtitle { font-size: 16px; font-weight: 400; color: rgba(255,255,255,0.75); margin-bottom: 20px; }
+.header-meta { display: flex; flex-wrap: wrap; gap: 24px; }
+.header-meta span { font-size: 13px; color: rgba(255,255,255,0.6); }
+.header-meta span strong { color: rgba(255,255,255,0.9); font-weight: 600; }
+
+.score-banner { background: white; padding: 40px; margin-bottom: 32px; border-radius: 4px; box-shadow: var(--shadow-8); text-align: center; border-top: 4px solid #B45309; }
+.score-grade { font-size: 24px; font-weight: 600; color: #B45309; margin-top: 8px; }
+.score-summary { display: flex; justify-content: center; gap: 32px; margin-top: 24px; font-size: 14px; }
+.score-stat { display: flex; align-items: center; gap: 8px; }
+.dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+.dot-green { background: #0A7B2E; }
+.dot-orange { background: #B45309; }
+.dot-red { background: #D13438; }
+
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.kpi-card { background: white; padding: 20px; border-radius: 4px; box-shadow: var(--shadow-4); border-top: 3px solid var(--veeam-green); }
+.kpi-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ms-gray-90); margin-bottom: 8px; }
+.kpi-value { font-size: 28px; font-weight: 300; color: var(--ms-gray-160); margin-bottom: 4px; }
+.kpi-subtext { font-size: 12px; color: var(--ms-gray-90); }
+
+details.section { background: white; margin-bottom: 24px; border-radius: 4px; box-shadow: var(--shadow-4); }
+details.section > summary { padding: 24px 32px; font-size: 18px; font-weight: 600; color: var(--ms-gray-160); cursor: pointer; list-style: none; border-bottom: 1px solid var(--ms-gray-30); counter-increment: section-counter; }
+details.section > summary::before { content: counter(section-counter, decimal-leading-zero) " "; color: var(--ms-blue); font-weight: 700; margin-right: 8px; }
+details.section > summary::-webkit-details-marker { display: none; }
+details.section > summary::after { content: '\276F'; float: right; color: var(--ms-gray-90); transition: transform 0.2s ease; }
+details.section[open] > summary::after { transform: rotate(90deg); }
+details.section[open] > summary { border-bottom: 1px solid var(--ms-gray-30); }
+summary:focus-visible { outline: 2px solid var(--ms-blue); outline-offset: 2px; border-radius: 4px; }
+details.section > :not(summary) { padding: 0 32px; }
+details.section > :last-child { padding-bottom: 24px; }
+details.section table { margin: 0; }
+details.section .table-wrap { padding: 0 32px; }
+details.section > table td, details.section > table th, details.section .table-wrap td, details.section .table-wrap th { padding-left: 12px; }
+details.section > table td:last-child, details.section > table th:last-child, details.section .table-wrap td:last-child, details.section .table-wrap th:last-child { padding-right: 12px; }
+details.section > div, details.section > p, details.section > h3 { padding-left: 32px; padding-right: 32px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 16px; }
+thead { background: var(--ms-gray-20); }
+th { padding: 10px 14px; text-align: left; font-weight: 600; color: var(--ms-gray-130); font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; border-bottom: 2px solid var(--ms-gray-50); }
+td { padding: 12px 14px; border-bottom: 1px solid var(--ms-gray-30); color: var(--ms-gray-160); }
+tbody tr:nth-child(even) { background: var(--ms-gray-10); }
+tbody tr:hover { background: var(--ms-gray-20); }
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+.info-card { background: var(--ms-gray-10); border-left: 4px solid var(--ms-blue); padding: 20px 24px; margin: 16px 0; border-radius: 2px; }
+.info-card-title { font-weight: 600; color: var(--ms-gray-130); margin-bottom: 8px; font-size: 14px; }
+.info-card-text { color: var(--ms-gray-90); font-size: 13px; line-height: 1.6; }
+
+.footer { text-align: center; padding: 32px; color: var(--ms-gray-90); font-size: 12px; }
+
+@media print {
+  body { background: white; }
+  .section, .kpi-card, .score-banner { box-shadow: none; border: 1px solid var(--ms-gray-30); }
+  details.section { break-inside: avoid; }
+}
+@media (max-width: 768px) {
+  .container { padding: 0 16px 20px; }
+  .kpi-grid { grid-template-columns: 1fr 1fr; }
+  .header-title { font-size: 24px; }
+  .toc-nav { flex-direction: column; gap: 4px; }
+}
+@media (max-width: 480px) {
+  .kpi-grid { grid-template-columns: 1fr; }
+  .score-summary { flex-direction: column; gap: 8px; align-items: center; }
+  .header-meta { flex-direction: column; gap: 8px; }
+  details.section > summary { padding: 16px 20px; font-size: 16px; }
+  details.section > :not(summary) { padding: 0 20px; }
+  details.section > table td, details.section > table th { padding-left: 20px; }
+  details.section > table td:last-child, details.section > table th:last-child { padding-right: 20px; }
+  details.section > div, details.section > p, details.section > h3 { padding-left: 20px; padding-right: 20px; }
+}
+.toc-nav { display: flex; flex-wrap: wrap; gap: 8px; padding: 20px 24px; background: white; border-radius: 4px; box-shadow: var(--shadow-4); margin-bottom: 24px; }
+.toc-nav a { font-size: 12px; color: var(--ms-blue); text-decoration: none; padding: 4px 10px; border-radius: 3px; background: var(--ms-gray-10); white-space: nowrap; }
+.toc-nav a:hover { background: var(--ms-gray-20); }
+.toc-nav a:focus-visible { outline: 2px solid var(--ms-blue); outline-offset: 1px; }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-orb"></div>
+  <div class="header-content">
+    <div class="header-badge">VBA Appliance Health Assessment</div>
+    <h1 class="header-title">Veeam Backup for Azure</h1>
+    <div class="header-subtitle">Health Check &amp; Compliance Report</div>
+    <div class="header-meta">
+      <span><strong>Generated:</strong> 2026-04-01 12:23:08</span>
+      <span><strong>Duration:</strong> 0m 0s</span>
+      <span><strong>Appliance:</strong> vba-prod-01</span>
+      <span><strong>Version:</strong> 8.1.0.234</span>
+      <span><strong>Region:</strong> East US 2</span>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <div class="score-banner">
+        <svg viewBox="0 0 220 160" width="220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Gauge showing score 63 out of 100">
+      <path d="M 30,100 A 80,80 0 0,1 190,100" fill="none" stroke="#EDEBE9" stroke-width="14" stroke-linecap="round" pathLength="100" />
+      <path d="M 30,100 A 80,80 0 0,1 190,100" fill="none" stroke="#B45309" stroke-width="14" stroke-linecap="round" pathLength="100" stroke-dasharray="63, 100" />
+      <line x1="36" y1="100" x2="28" y2="100" stroke="#D2D0CE" stroke-width="1.5"/>
+      <line x1="57.7" y1="47.7" x2="52" y2="42" stroke="#D2D0CE" stroke-width="1.5"/>
+      <line x1="110" y1="26" x2="110" y2="18" stroke="#D2D0CE" stroke-width="1.5"/>
+      <line x1="162.3" y1="47.7" x2="168" y2="42" stroke="#D2D0CE" stroke-width="1.5"/>
+      <line x1="184" y1="100" x2="192" y2="100" stroke="#D2D0CE" stroke-width="1.5"/>
+
+      <text x="14" y="100" text-anchor="middle" dominant-baseline="middle" fill="#605E5C" font-size="10" font-family="'Segoe UI',sans-serif">0</text>
+      <text x="42.1" y="32.1" text-anchor="middle" dominant-baseline="middle" fill="#605E5C" font-size="10" font-family="'Segoe UI',sans-serif">25</text>
+      <text x="110" y="4" text-anchor="middle" dominant-baseline="middle" fill="#605E5C" font-size="10" font-family="'Segoe UI',sans-serif">50</text>
+      <text x="177.9" y="32.1" text-anchor="middle" dominant-baseline="middle" fill="#605E5C" font-size="10" font-family="'Segoe UI',sans-serif">75</text>
+      <text x="206" y="100" text-anchor="middle" dominant-baseline="middle" fill="#605E5C" font-size="10" font-family="'Segoe UI',sans-serif">100</text>
+
+      <circle cx="110" cy="100" r="6" fill="#B45309" />
+      <line x1="110" y1="100" x2="134.6" y2="43.1" stroke="#B45309" stroke-width="2.5" stroke-linecap="round" />
+      <text x="110" y="122" text-anchor="middle" dominant-baseline="middle" fill="#B45309" font-size="32" font-weight="700" font-family="'Cascadia Code','Consolas','Courier New',monospace">63</text>
+      <text x="110" y="138" text-anchor="middle" fill="#605E5C" font-size="11" font-family="'Segoe UI',sans-serif">/ 100</text>
+      <text x="110" y="154" text-anchor="middle" fill="#323130" font-size="12" font-weight="600" font-family="'Segoe UI',sans-serif">Health Score</text>
+    </svg>
+    <div class="score-grade">Needs Attention</div>
+    <div class="score-summary">
+      <div class="score-stat"><span class="dot dot-green"></span> 13 Healthy</div>
+      <div class="score-stat"><span class="dot dot-orange"></span> 20 Warnings</div>
+      <div class="score-stat"><span class="dot dot-red"></span> 4 Critical</div>
+    </div>
+  </div>
+
+  <div class="kpi-grid">
+          <div class="kpi-card" style="border-top-color:#B45309;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="kpi-label">Protection Coverage</div>
+          <svg viewBox="0 0 48 48" width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(-90deg)">
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#EDEBE9" stroke-width="5" />
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#B45309" stroke-width="5" pathLength="100" stroke-dasharray="58.3, 100" stroke-linecap="round" />
+</svg>
+        </div>
+        <div class="kpi-value" style="color:#B45309;">58.3</div>
+        <div class="kpi-subtext">Needs Attention (Weight: 20%)</div>
+      </div>      <div class="kpi-card" style="border-top-color:#D13438;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="kpi-label">Policy Health</div>
+          <svg viewBox="0 0 48 48" width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(-90deg)">
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#EDEBE9" stroke-width="5" />
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#D13438" stroke-width="5" pathLength="100" stroke-dasharray="41.7, 100" stroke-linecap="round" />
+</svg>
+        </div>
+        <div class="kpi-value" style="color:#D13438;">41.7</div>
+        <div class="kpi-subtext">Critical (Weight: 15%)</div>
+      </div>      <div class="kpi-card" style="border-top-color:#D13438;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="kpi-label">Configuration Check</div>
+          <svg viewBox="0 0 48 48" width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(-90deg)">
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#EDEBE9" stroke-width="5" />
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#D13438" stroke-width="5" pathLength="100" stroke-dasharray="40, 100" stroke-linecap="round" />
+</svg>
+        </div>
+        <div class="kpi-value" style="color:#D13438;">40</div>
+        <div class="kpi-subtext">Critical (Weight: 15%)</div>
+      </div>      <div class="kpi-card" style="border-top-color:#0078D4;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="kpi-label">License Health</div>
+          <svg viewBox="0 0 48 48" width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(-90deg)">
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#EDEBE9" stroke-width="5" />
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#0078D4" stroke-width="5" pathLength="100" stroke-dasharray="83.3, 100" stroke-linecap="round" />
+</svg>
+        </div>
+        <div class="kpi-value" style="color:#0078D4;">83.3</div>
+        <div class="kpi-subtext">Good (Weight: 10%)</div>
+      </div>      <div class="kpi-card" style="border-top-color:#0A7B2E;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="kpi-label">System Health</div>
+          <svg viewBox="0 0 48 48" width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(-90deg)">
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#EDEBE9" stroke-width="5" />
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#0A7B2E" stroke-width="5" pathLength="100" stroke-dasharray="100, 100" stroke-linecap="round" />
+</svg>
+        </div>
+        <div class="kpi-value" style="color:#0A7B2E;">100</div>
+        <div class="kpi-subtext">Excellent (Weight: 10%)</div>
+      </div>      <div class="kpi-card" style="border-top-color:#B45309;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="kpi-label">Repository Health</div>
+          <svg viewBox="0 0 48 48" width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(-90deg)">
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#EDEBE9" stroke-width="5" />
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#B45309" stroke-width="5" pathLength="100" stroke-dasharray="60, 100" stroke-linecap="round" />
+</svg>
+        </div>
+        <div class="kpi-value" style="color:#B45309;">60</div>
+        <div class="kpi-subtext">Needs Attention (Weight: 10%)</div>
+      </div>      <div class="kpi-card" style="border-top-color:#B45309;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="kpi-label">Session Health</div>
+          <svg viewBox="0 0 48 48" width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(-90deg)">
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#EDEBE9" stroke-width="5" />
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#B45309" stroke-width="5" pathLength="100" stroke-dasharray="66.7, 100" stroke-linecap="round" />
+</svg>
+        </div>
+        <div class="kpi-value" style="color:#B45309;">66.7</div>
+        <div class="kpi-subtext">Needs Attention (Weight: 10%)</div>
+      </div>      <div class="kpi-card" style="border-top-color:#0A7B2E;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="kpi-label">Configuration Backup</div>
+          <svg viewBox="0 0 48 48" width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(-90deg)">
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#EDEBE9" stroke-width="5" />
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#0A7B2E" stroke-width="5" pathLength="100" stroke-dasharray="100, 100" stroke-linecap="round" />
+</svg>
+        </div>
+        <div class="kpi-value" style="color:#0A7B2E;">100</div>
+        <div class="kpi-subtext">Excellent (Weight: 5%)</div>
+      </div>      <div class="kpi-card" style="border-top-color:#B45309;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="kpi-label">Worker Health</div>
+          <svg viewBox="0 0 48 48" width="40" height="40" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(-90deg)">
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#EDEBE9" stroke-width="5" />
+  <circle cx="24" cy="24" r="18" fill="none" stroke="#B45309" stroke-width="5" pathLength="100" stroke-dasharray="62.5, 100" stroke-linecap="round" />
+</svg>
+        </div>
+        <div class="kpi-value" style="color:#B45309;">62.5</div>
+        <div class="kpi-subtext">Needs Attention (Weight: 5%)</div>
+      </div>
+  </div>
+
+  <nav class="toc-nav" aria-label="Report sections">
+    <a href="#section-system">System</a>
+    <a href="#section-license">License</a>
+    <a href="#section-config">Configuration</a>
+    <a href="#section-protection">Protection</a>
+    <a href="#section-unprotected">Unprotected</a>
+    <a href="#section-inventory">Inventory</a>
+    <a href="#section-storage">Storage</a>
+    <a href="#section-policy">Policy</a>
+    <a href="#section-sla">SLA</a>
+    <a href="#section-sessions">Sessions</a>
+    <a href="#section-repos">Repositories</a>
+    <a href="#section-workers">Workers</a>
+    <a href="#section-configbkp">Config Backup</a>
+    <a href="#section-findings">Findings</a>
+    <a href="#section-recs">Recommendations</a>
+    <a href="#section-methodology">Methodology</a>
+  </nav>
+
+  <details class="section" open id="section-system">
+    <summary class="section-title">System Information</summary>
+    <div class="kpi-grid" style="margin-top:16px;">
+      <div class="kpi-card"><div class="kpi-label">Server Version</div><div class="kpi-value" style="font-size:16px;">8.1.0.234</div></div>
+      <div class="kpi-card"><div class="kpi-label">Worker Version</div><div class="kpi-value" style="font-size:16px;">8.1.0.234</div></div>
+      <div class="kpi-card"><div class="kpi-label">FLR Version</div><div class="kpi-value" style="font-size:16px;">8.1.0.234</div></div>
+      <div class="kpi-card"><div class="kpi-label">Region</div><div class="kpi-value" style="font-size:16px;">East US 2</div></div>
+      <div class="kpi-card"><div class="kpi-label">Resource Group</div><div class="kpi-value" style="font-size:16px;">rg-veeam-backup</div></div>
+      <div class="kpi-card"><div class="kpi-label">System State</div><div class="kpi-value" style="font-size:16px;">Ready</div></div>
+    </div>
+  </details>
+
+    <details class="section" id="section-license">
+    <summary class="section-title">License Information</summary>
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="kpi-label">License Type</div><div class="kpi-value" style="font-size:18px;">Enterprise Plus</div><div class="kpi-subtext">Contoso Corporation</div></div>
+      <div class="kpi-card"><div class="kpi-label">Expiry Date</div><div class="kpi-value" style="font-size:18px;">2026-10-04</div></div>
+      <div class="kpi-card"><div class="kpi-label">Instance Usage</div><div class="kpi-value" style="font-size:18px;">47 / 100</div></div>
+      <div class="kpi-card"><div class="kpi-label">By Type</div><div class="kpi-value" style="font-size:14px;">VM: 32 | SQL: 10 | FS: 5</div></div>
+    </div>
+  </details>
+
+    <details class="section" open id="section-config">
+    <summary class="section-title">Configuration Check</summary>
+    <p style="margin-bottom:16px;">Overall Status: <span style='display:inline-block;padding:4px 12px;background:#FF8C00;color:white;border-radius:12px;font-size:12px;font-weight:600;'>Warning</span></p>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Check</th><th scope="col">Status</th><th scope="col">Result</th></tr></thead>
+      <tbody><tr><td>Azure Role Assignments</td><td><span style='color:#00B336;font-weight:600;'>&#10004; Success</span></td><td>All service accounts have required roles</td></tr>
+<tr><td>Worker Configuration</td><td><span style='color:#00B336;font-weight:600;'>&#10004; Success</span></td><td>Worker profiles configured for all regions</td></tr>
+<tr><td>Repository Access</td><td><span style='color:#00B336;font-weight:600;'>&#10004; Success</span></td><td>All repositories accessible</td></tr>
+<tr><td>Repository Encryption</td><td><span style='color:#FF8C00;font-weight:600;'>&#9888; Warning</span></td><td>1 repository without encryption enabled</td></tr>
+<tr><td>MFA Configuration</td><td><span style='color:#FF8C00;font-weight:600;'>&#9888; Warning</span></td><td>2 users without MFA enabled</td></tr>
+<tr><td>SSO Configuration</td><td><span style='color:#00B336;font-weight:600;'>&#10004; Success</span></td><td>SAML2 SSO configured with Entra ID</td></tr>
+</tbody>
+    </table>
+    </div>
+  </details>
+
+    <details class="section" open id="section-protection">
+    <summary class="section-title">Protection Coverage</summary>
+    <div style="display:flex;align-items:flex-start;gap:32px;flex-wrap:wrap;margin-bottom:20px;">
+          <div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">
+      <svg viewBox="0 0 200 200" width="180" height="180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Donut chart">
+        <circle cx="100" cy="100" r="70" fill="none" stroke="#EDEBE9" stroke-width="24" />
+      <circle cx="100" cy="100" r="70" fill="none" stroke="#00B336" stroke-width="24" pathLength="100" stroke-dasharray="83.33, 16.67" stroke-dashoffset="-25" />
+      <circle cx="100" cy="100" r="70" fill="none" stroke="#D13438" stroke-width="24" pathLength="100" stroke-dasharray="16.67, 83.33" stroke-dashoffset="-108.33" />
+
+        <text x="100" y="96" text-anchor="middle" dominant-baseline="middle" fill="#323130" font-size="22" font-weight="700" font-family="'Cascadia Code','Consolas',monospace">83%</text>
+        <text x="100" y="116" text-anchor="middle" fill="#605E5C" font-size="11" font-family="'Segoe UI',sans-serif">Coverage</text>
+      </svg>
+      <div style="display:flex;flex-direction:column;gap:6px">
+      <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#605E5C"><span style="width:10px;height:10px;border-radius:2px;background:#00B336;flex-shrink:0"></span>Protected (83%)</div>
+      <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#605E5C"><span style="width:10px;height:10px;border-radius:2px;background:#D13438;flex-shrink:0"></span>Unprotected (17%)</div>
+
+      </div>
+    </div>
+    </div>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Resource Type</th><th scope="col">Total</th><th scope="col">Protected</th><th scope="col">Unprotected</th><th scope="col">Coverage</th></tr></thead>
+      <tbody><tr><td><strong>Virtual Machines</strong></td><td>156</td><td>128</td><td>28</td><td style='color:#FF8C00;font-weight:600;'>82.1%</td></tr>
+<tr><td><strong>SQL Databases</strong></td><td>42</td><td>38</td><td>4</td><td style='color:#00B336;font-weight:600;'>90.5%</td></tr>
+<tr><td><strong>File Shares</strong></td><td>18</td><td>14</td><td>4</td><td style='color:#FF8C00;font-weight:600;'>77.8%</td></tr>
+</tbody>
+    </table>
+    </div>
+  </details>
+
+    <details class="section" id="section-unprotected">
+    <summary class="section-title">Unprotected Resources</summary>
+        <h3 style="margin:16px 0 8px;font-size:15px;color:var(--ms-gray-130);">Unprotected Virtual Machines (7)</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">VM Name</th><th scope="col">VM SKU</th><th scope="col">Disk (GB)</th><th scope="col">OS</th><th scope="col">Region</th><th scope="col">Resource Group</th></tr></thead>
+      <tbody><tr><td>data-proc-gpu</td><td>Standard_NC6s_v3</td><td style='font-weight:600;'>1024</td><td>Linux</td><td>eastus</td><td>rg-ml</td></tr>
+<tr><td>legacy-app-srv</td><td>Standard_D8s_v4</td><td style='font-weight:600;'>512</td><td>Windows</td><td>westus2</td><td>rg-legacy</td></tr>
+<tr><td>dev-build-01</td><td>Standard_D4s_v5</td><td style='font-weight:600;'>256</td><td>Linux</td><td>eastus2</td><td>rg-dev</td></tr>
+<tr><td>staging-web-02</td><td>Standard_D2s_v5</td><td style='font-weight:600;'>128</td><td>Linux</td><td>eastus2</td><td>rg-staging</td></tr>
+<tr><td>monitoring-01</td><td>Standard_D2s_v5</td><td style='font-weight:600;'>128</td><td>Linux</td><td>eastus2</td><td>rg-ops</td></tr>
+<tr><td>test-runner-01</td><td>Standard_B2ms</td><td style='font-weight:600;'>64</td><td>Windows</td><td>eastus2</td><td>rg-test</td></tr>
+<tr><td>jump-box-01</td><td>Standard_B1ms</td><td style='font-weight:600;'>32</td><td>Linux</td><td>eastus2</td><td>rg-infra</td></tr>
+</tbody>
+    </table>
+    </div>    <h3 style="margin:16px 0 8px;font-size:15px;color:var(--ms-gray-130);">Unprotected SQL Databases (2)</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Database</th><th scope="col">Server</th><th scope="col">Size</th><th scope="col">Type</th><th scope="col">Region</th></tr></thead>
+      <tbody><tr><td>analytics-db</td><td>sql-analytics-prod</td><td style='font-weight:600;'>50.0 GB</td><td>Managed</td><td>eastus2</td></tr>
+<tr><td>staging-userdb</td><td>sql-staging-01</td><td style='font-weight:600;'>8.0 GB</td><td>Unmanaged</td><td>eastus2</td></tr>
+</tbody>
+    </table>
+    </div>    <h3 style="margin:16px 0 8px;font-size:15px;color:var(--ms-gray-130);">Unprotected File Shares (2)</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">File Share</th><th scope="col">Storage Account</th><th scope="col">Size</th><th scope="col">Access Tier</th><th scope="col">Region</th></tr></thead>
+      <tbody><tr><td>dept-finance</td><td>stcontososhared</td><td style='font-weight:600;'>100.0 GB</td><td>TransactionOptimized</td><td>eastus2</td></tr>
+<tr><td>dept-legal</td><td>stcontososhared</td><td style='font-weight:600;'>50.0 GB</td><td>Hot</td><td>eastus2</td></tr>
+</tbody>
+    </table>
+    </div>
+  </details>
+
+    <details class="section" id="section-inventory">
+    <summary class="section-title">Protected VM Inventory</summary>
+    <p style="margin:16px 0 8px;font-size:13px;color:var(--ms-gray-90);">Sorted by last backup time (oldest first) to highlight stale backups. 12 total protected VMs.</p>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">VM Name</th><th scope="col">VM Size</th><th scope="col">Disk (GB)</th><th scope="col">OS</th><th scope="col">Region</th><th scope="col">Last Backup</th><th scope="col">Restore Points</th></tr></thead>
+      <tbody><tr><td>batch-worker-01</td><td>Standard_D16s_v5</td><td>512</td><td>Linux</td><td>eastus2</td><td>2026-03-31T00:23:08.2227320-07:00</td><td>1</td></tr>
+<tr><td>k8s-node-01</td><td>Standard_D8s_v5</td><td>256</td><td>Linux</td><td>eastus2</td><td>2026-04-01T00:23:08.2227800-07:00</td><td>7</td></tr>
+<tr><td>k8s-node-02</td><td>Standard_D8s_v5</td><td>256</td><td>Linux</td><td>eastus2</td><td>2026-04-01T00:23:08.2228280-07:00</td><td>7</td></tr>
+<tr><td>redis-prod-01</td><td>Standard_E4s_v5</td><td>64</td><td>Linux</td><td>eastus2</td><td>2026-04-01T04:23:08.2226790-07:00</td><td>7</td></tr>
+<tr><td>dc-prod-01</td><td>Standard_D2s_v5</td><td>128</td><td>Windows</td><td>eastus2</td><td>2026-04-01T06:23:08.2225760-07:00</td><td>30</td></tr>
+<tr><td>dc-prod-02</td><td>Standard_D2s_v5</td><td>128</td><td>Windows</td><td>westus2</td><td>2026-04-01T06:23:08.2226300-07:00</td><td>30</td></tr>
+<tr><td>app-prod-01</td><td>Standard_D4s_v5</td><td>128</td><td>Linux</td><td>eastus2</td><td>2026-04-01T07:23:08.2225180-07:00</td><td>14</td></tr>
+<tr><td>web-prod-02</td><td>Standard_D4s_v5</td><td>256</td><td>Linux</td><td>eastus2</td><td>2026-04-01T08:23:08.2222610-07:00</td><td>14</td></tr>
+<tr><td>web-prod-01</td><td>Standard_D4s_v5</td><td>256</td><td>Linux</td><td>eastus2</td><td>2026-04-01T09:23:08.2210940-07:00</td><td>14</td></tr>
+<tr><td>api-prod-01</td><td>Standard_D8s_v5</td><td>512</td><td>Linux</td><td>eastus2</td><td>2026-04-01T10:23:08.2223440-07:00</td><td>21</td></tr>
+<tr><td>sql-prod-01</td><td>Standard_E8s_v5</td><td>2048</td><td>Windows</td><td>eastus2</td><td>2026-04-01T11:23:08.2224080-07:00</td><td>30</td></tr>
+<tr><td>sql-prod-02</td><td>Standard_E8s_v5</td><td>2048</td><td>Windows</td><td>eastus2</td><td>2026-04-01T11:23:08.2224640-07:00</td><td>30</td></tr>
+</tbody>
+    </table>
+    </div>
+  </details>
+
+    <details class="section" id="section-storage">
+    <summary class="section-title">Storage Usage</summary>
+    <div class="kpi-grid" style="margin-top:16px;">
+      <div class="kpi-card"><div class="kpi-label">Total Usage</div><div class="kpi-value" style="font-size:20px;">4280 GB</div></div>
+      <div class="kpi-card" style="border-top-color:#D13438;"><div class="kpi-label">Hot Tier</div><div class="kpi-value" style="font-size:20px;">320 GB</div></div>
+      <div class="kpi-card" style="border-top-color:#0078D4;"><div class="kpi-label">Cool Tier</div><div class="kpi-value" style="font-size:20px;">2860 GB</div></div>
+      <div class="kpi-card" style="border-top-color:#605E5C;"><div class="kpi-label">Archive Tier</div><div class="kpi-value" style="font-size:20px;">1100 GB</div></div>
+      <div class="kpi-card"><div class="kpi-label">Snapshots</div><div class="kpi-value">892</div></div>
+      <div class="kpi-card"><div class="kpi-label">Backups</div><div class="kpi-value">1247</div></div>
+      <div class="kpi-card"><div class="kpi-label">Archives</div><div class="kpi-value">341</div></div>
+    </div>
+  </details>
+
+    <details class="section" open id="section-policy">
+    <summary class="section-title">Policy Status</summary>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Policy Name</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col">Snapshot</th><th scope="col">Backup</th><th scope="col">Next Execution</th></tr></thead>
+      <tbody><tr><td>Prod-VMs-Daily</td><td>VM</td><td><span style='color:#00B336;'>Enabled</span></td><td><span style='color:#0A7B2E;'>&#10004; Success</span></td><td><span style='color:#0A7B2E;'>&#10004; Success</span></td><td>2026-04-01T18:23:08.2228850-07:00</td></tr>
+<tr><td>Prod-SQL-VMs-4h</td><td>VM</td><td><span style='color:#00B336;'>Enabled</span></td><td><span style='color:#0A7B2E;'>&#10004; Success</span></td><td><span style='color:#0A7B2E;'>&#10004; Success</span></td><td>2026-04-01T14:23:08.2229280-07:00</td></tr>
+<tr><td>DR-VMs-Weekly</td><td>VM</td><td><span style='color:#00B336;'>Enabled</span></td><td><span style='color:#0A7B2E;'>&#10004; Success</span></td><td><span style='color:#B45309;'>&#9888; Warning</span></td><td>2026-04-04T12:23:08.2229700-07:00</td></tr>
+<tr><td>Dev-VMs-Daily</td><td>VM</td><td><span style='color:#D13438;'>Disabled</span></td><td><span style='color:#605E5C;'>&#8226; NeverExecuted</span></td><td><span style='color:#605E5C;'>&#8226; NeverExecuted</span></td><td>—</td></tr>
+<tr><td>Batch-Workers</td><td>VM</td><td><span style='color:#00B336;'>Enabled</span></td><td><span style='color:#D13438;'>&#10006; Error</span></td><td><span style='color:#D13438;'>&#10006; Error</span></td><td>2026-04-01T13:23:08.2230220-07:00</td></tr>
+<tr><td>SQL-Prod-Hourly</td><td>SQL</td><td><span style='color:#00B336;'>Enabled</span></td><td><span style='color:#0A7B2E;'>&#10004; Success</span></td><td><span style='color:#0A7B2E;'>&#10004; Success</span></td><td>2026-04-01T13:08:08.2230700-07:00</td></tr>
+<tr><td>SQL-Prod-LogBackup</td><td>SQL</td><td><span style='color:#00B336;'>Enabled</span></td><td><span style='color:#0A7B2E;'>&#10004; Success</span></td><td><span style='color:#0A7B2E;'>&#10004; Success</span></td><td>2026-04-01T12:38:08.2240700-07:00</td></tr>
+<tr><td>FileShares-Daily</td><td>File Share</td><td><span style='color:#00B336;'>Enabled</span></td><td><span style='color:#0A7B2E;'>&#10004; Success</span></td><td><span style='color:#0A7B2E;'>&#10004; Success</span></td><td>2026-04-02T02:23:08.2241280-07:00</td></tr>
+</tbody>
+    </table>
+    </div>
+  </details>
+
+    <details class="section" id="section-sla">
+    <summary class="section-title">SLA Compliance</summary>
+        <svg viewBox="0 0 560 124" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Horizontal bar chart" style="max-width:560px">
+      <text x="172" y="19" text-anchor="end" dominant-baseline="middle" fill="#323130" font-size="11" font-family="'Segoe UI',sans-serif" textLength="164">Prod-Gold-SLA</text>
+      <rect x="180" y="5" width="320" height="26" rx="4" fill="#EDEBE9" />
+      <rect x="180" y="5" width="317.4" height="26" rx="4" fill="#00B336" opacity="0.85" />
+      <text x="508" y="19" dominant-baseline="middle" fill="#605E5C" font-size="11" font-weight="600" font-family="'Cascadia Code','Consolas',monospace">99%</text>
+      <text x="172" y="57" text-anchor="end" dominant-baseline="middle" fill="#323130" font-size="11" font-family="'Segoe UI',sans-serif" textLength="164">Prod-Silver-SLA</text>
+      <rect x="180" y="43" width="320" height="26" rx="4" fill="#EDEBE9" />
+      <rect x="180" y="43" width="304" height="26" rx="4" fill="#00B336" opacity="0.85" />
+      <text x="508" y="57" dominant-baseline="middle" fill="#605E5C" font-size="11" font-weight="600" font-family="'Cascadia Code','Consolas',monospace">95%</text>
+      <text x="172" y="95" text-anchor="end" dominant-baseline="middle" fill="#323130" font-size="11" font-family="'Segoe UI',sans-serif" textLength="164">DR-Bronze-SLA</text>
+      <rect x="180" y="81" width="320" height="26" rx="4" fill="#EDEBE9" />
+      <rect x="180" y="81" width="294.7" height="26" rx="4" fill="#FF8C00" opacity="0.85" />
+      <text x="508" y="95" dominant-baseline="middle" fill="#605E5C" font-size="11" font-weight="600" font-family="'Cascadia Code','Consolas',monospace">92%</text>
+
+    </svg>
+  </details>
+
+    <details class="section" open id="section-sessions">
+    <summary class="section-title">Session Health</summary>
+        <svg viewBox="0 0 500 80" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Session status breakdown" style="max-width:500px">
+      <rect x="10" y="10" width="403.2" height="32" rx="4" fill="#0A7B2E" />
+      <rect x="413.2" y="10" width="57.6" height="32" fill="#B45309" />
+      <rect x="470.8" y="10" width="19.2" height="32" rx="4" fill="#D13438" />
+      <text x="10" y="65" fill="#0A7B2E" font-size="11" font-weight="600" font-family="'Segoe UI',sans-serif">Success: 84</text>
+      <text x="250" y="65" text-anchor="middle" fill="#B45309" font-size="11" font-weight="600" font-family="'Segoe UI',sans-serif">Warning: 12</text>
+      <text x="490" y="65" text-anchor="end" fill="#D13438" font-size="11" font-weight="600" font-family="'Segoe UI',sans-serif">Error: 4</text>
+    </svg>
+    <div class="kpi-grid" style="margin-top:16px;">
+      <div class="kpi-card" style="border-top-color:#00B336;"><div class="kpi-label">Successful</div><div class="kpi-value" style="color:#00B336;">84</div></div>
+      <div class="kpi-card" style="border-top-color:#FF8C00;"><div class="kpi-label">Warnings</div><div class="kpi-value" style="color:#FF8C00;">12</div></div>
+      <div class="kpi-card" style="border-top-color:#D13438;"><div class="kpi-label">Errors</div><div class="kpi-value" style="color:#D13438;">4</div></div>
+      <div class="kpi-card"><div class="kpi-label">Running</div><div class="kpi-value">2</div></div>
+    </div>
+        <h3 style="margin:20px 0 8px;font-size:15px;color:var(--ms-gray-130);">Recent Failed Sessions</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Type</th><th scope="col">Policy</th><th scope="col">Start Time</th><th scope="col">Duration</th></tr></thead>
+      <tbody><tr><td>PolicyBackup</td><td>Batch-Workers</td><td>2026-04-01T09:23:08.2242660-07:00</td><td>00:12:34</td></tr>
+<tr><td>PolicyBackup</td><td>Batch-Workers</td><td>2026-04-01T06:23:08.2243140-07:00</td><td>00:45:12</td></tr>
+<tr><td>PolicySnapshot</td><td>DR-VMs-Weekly</td><td>2026-04-01T03:23:08.2243570-07:00</td><td>00:02:18</td></tr>
+<tr><td>HealthCheck</td><td>Prod-VMs-Daily</td><td>2026-03-31T22:23:08.2243980-07:00</td><td>00:08:45</td></tr>
+</tbody>
+    </table>
+    </div>
+  </details>
+
+    <details class="section" open id="section-repos">
+    <summary class="section-title">Repository Health</summary>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col">Region</th><th scope="col">Encryption</th><th scope="col">Immutability</th><th scope="col">Tier</th></tr></thead>
+      <tbody><tr><td>prod-backup-repo</td><td>Backup</td><td><span style='color:#00B336;font-weight:600;'>Ready</span></td><td>eastus2</td><td><span style='color:#00B336;'>&#10004; Yes</span></td><td><span style='color:#00B336;'>&#10004; Yes</span></td><td>Cool</td></tr>
+<tr><td>prod-archive-repo</td><td>Backup</td><td><span style='color:#00B336;font-weight:600;'>Ready</span></td><td>eastus2</td><td><span style='color:#00B336;'>&#10004; Yes</span></td><td><span style='color:#00B336;'>&#10004; Yes</span></td><td>Archive</td></tr>
+<tr><td>archive-repo-cold</td><td>Backup</td><td><span style='color:#00B336;font-weight:600;'>Ready</span></td><td>westus2</td><td><span style='color:#D13438;'>&#10006; No</span></td><td><span style='color:#D13438;'>&#10006; No</span></td><td>Cool</td></tr>
+<tr><td>veeam-vault-east</td><td>VeeamVault</td><td><span style='color:#00B336;font-weight:600;'>Ready</span></td><td>eastus2</td><td><span style='color:#00B336;'>&#10004; Yes</span></td><td><span style='color:#00B336;'>&#10004; Yes</span></td><td>Inferred</td></tr>
+<tr><td>dr-repo-west</td><td>Backup</td><td><span style='color:#FF8C00;font-weight:600;'>ReadOnly</span></td><td>westus2</td><td><span style='color:#00B336;'>&#10004; Yes</span></td><td><span style='color:#00B336;'>&#10004; Yes</span></td><td>Hot</td></tr>
+</tbody>
+    </table>
+    </div>
+  </details>
+
+    <details class="section" id="section-workers">
+    <summary class="section-title">Worker Health</summary>
+        <div class="kpi-grid">
+      <div class="kpi-card"><div class="kpi-label">Total Workers</div><div class="kpi-value">5</div></div>
+      <div class="kpi-card" style="border-top-color:#00B336;"><div class="kpi-label">Running</div><div class="kpi-value" style="color:#00B336;">4</div></div>
+      <div class="kpi-card"><div class="kpi-label">Deployed</div><div class="kpi-value">4</div></div>
+      <div class="kpi-card"><div class="kpi-label">Used</div><div class="kpi-value">1</div></div>
+    </div>
+        <div class="info-card" style="border-left-color:#D13438;">
+      <div class="info-card-title">Infrastructure Bottlenecks Detected</div>
+      <ul style="margin:8px 0 0 20px;font-size:13px;"><li style='color:#D13438;'>Storage throttling: stcontosobackup01 in eastus2</li></ul>
+    </div>
+        <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Name</th><th scope="col">Status</th><th scope="col">Region</th><th scope="col">Instance Type</th><th scope="col">Profile</th></tr></thead>
+      <tbody><tr><td>vba-worker-eus2-01</td><td><span style='color:#00B336;font-weight:600;'>Idle</span></td><td>eastus2</td><td>Standard_D4s_v5</td><td>Medium</td></tr>
+<tr><td>vba-worker-eus2-02</td><td><span style='color:#00B336;font-weight:600;'>Busy</span></td><td>eastus2</td><td>Standard_D4s_v5</td><td>Medium</td></tr>
+<tr><td>vba-worker-eus2-03</td><td><span style='color:#00B336;font-weight:600;'>Idle</span></td><td>eastus2</td><td>Standard_D8s_v5</td><td>Large</td></tr>
+<tr><td>vba-worker-wus2-01</td><td><span style='color:#00B336;font-weight:600;'>Idle</span></td><td>westus2</td><td>Standard_D4s_v5</td><td>Medium</td></tr>
+<tr><td>vba-worker-archive-01</td><td><span style='color:#FF8C00;font-weight:600;'>Deallocated</span></td><td>eastus2</td><td>Standard_D2s_v5</td><td>Archive</td></tr>
+</tbody>
+    </table>
+    </div>
+  </details>
+
+    <details class="section" id="section-configbkp">
+    <summary class="section-title">Configuration Backup</summary>
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="kpi-label">Status</div><div class="kpi-value" style="font-size:18px;"><span style='color:#00B336;font-weight:600;'>Enabled</span></div></div>
+      <div class="kpi-card"><div class="kpi-label">Repository</div><div class="kpi-value" style="font-size:18px;">prod-backup-repo</div></div>
+      <div class="kpi-card"><div class="kpi-label">Last Backup Status</div><div class="kpi-value" style="font-size:18px;">Success</div></div>
+      <div class="kpi-card"><div class="kpi-label">Last Backup Time</div><div class="kpi-value" style="font-size:14px;">2026-03-31T09:23:08.2246460-07:00</div></div>
+    </div>
+  </details>
+
+  <details class="section" open id="section-findings">
+    <summary class="section-title">All Findings</summary>
+    <div class="table-wrap">
+    <table>
+      <caption class="sr-only">All health check findings with status, category, and recommendations</caption>
+      <thead><tr><th scope="col">Status</th><th scope="col">Category</th><th scope="col">Check</th><th scope="col">Detail</th><th scope="col">Recommendation</th></tr></thead>
+      <tbody><tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>System Health</td><td>Service Availability</td><td>VBA appliance services are running</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>System Health</td><td>System State</td><td>System is in Ready state</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>System Health</td><td>Appliance Version</td><td>Server: 8.1.0.234, Worker: 8.1.0.234, FLR: 8.1.0.234</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>License Health</td><td>License Expiry</td><td>License valid until 2026-10-04 (185 days remaining)</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>License Health</td><td>Instance Usage</td><td>License instances: 47 of 100 used (47%)</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>License Health</td><td>Graced Resources</td><td>1 resources in Graced license state</td><td>Ensure graced resources are properly licensed before grace period ends</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Configuration Check</td><td>Overall Configuration</td><td>VBA configuration check completed with warnings</td><td>Review the configuration check details and address warnings</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Configuration Check</td><td>Repository Encryption</td><td>1 repository without encryption enabled</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Configuration Check</td><td>MFA Configuration</td><td>2 users without MFA enabled</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Configuration Check</td><td>Repository Encryption</td><td>1 repository(s) without encryption</td><td>Enable encryption on all backup repositories for data protection</td></tr>
+<tr><td><span style='color:#D13438;font-weight:600;'>&#10006; Critical</span></td><td>Configuration Check</td><td>MFA Configuration</td><td>2 user(s) without multi-factor authentication enabled</td><td>Enable MFA for all VBA console users to prevent unauthorized access</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Protection Coverage</td><td>VM Backup Coverage</td><td>128 of 156 VMs protected (82.1%)</td><td>Create backup policies for unprotected VMs to improve coverage</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>Protection Coverage</td><td>SQL Backup Coverage</td><td>38 of 42 SQL databases protected (90.5%)</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Protection Coverage</td><td>File Share Backup Coverage</td><td>14 of 18 file shares protected (77.8%)</td><td>Extend file share protection policies to unprotected shares</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Protection Coverage</td><td>Cosmos DB Backup Coverage</td><td>1 Cosmos DB account(s) without backup protection</td><td>Configure backup policies for unprotected Cosmos DB accounts</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Protection Coverage</td><td>Stale VM Backups</td><td>1 protected VM(s) have not been backed up in the last 24h: batch-worker-01</td><td>Investigate backup schedules and session failures for these VMs</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Protection Coverage</td><td>Low Restore Points</td><td>1 protected VM(s) have 1 or fewer restore points</td><td>Review retention policies — limited restore points increase recovery risk</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>Policy Health</td><td>Backup Policies</td><td>Total policies configured: 8 schedule-based, 0 SLA-based</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#D13438;font-weight:600;'>&#10006; Critical</span></td><td>Policy Health</td><td>Policy Errors</td><td>1 policy(s) in error state: Batch-Workers</td><td>Investigate and resolve policy errors to restore backup protection</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Policy Health</td><td>Policy Warnings</td><td>1 policy(s) completed with warnings</td><td>Review policy execution logs for warning details</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Policy Health</td><td>Disabled Policies</td><td>1 policy(s) are disabled: Dev-VMs-Daily</td><td>Enable disabled policies or remove them if no longer needed</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Policy Health</td><td>Unexecuted Policies</td><td>1 policy(s) have never been executed</td><td>Verify policy schedules and trigger a manual run to validate configuration</td></tr>
+<tr><td><span style='color:#D13438;font-weight:600;'>&#10006; Critical</span></td><td>Policy Health</td><td>SLA Compliance</td><td>1 of 3 SLA policies missed their targets (66.7% compliance)</td><td>Investigate SLA failures and adjust policy schedules or worker capacity</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Session Health</td><td>Session Success Rate</td><td>Session success rate: 84% (84 success, 12 warnings, 4 errors)</td><td>Investigate session warnings and errors to improve reliability</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Session Health</td><td>Recent Failures</td><td>4 failed session(s) detected</td><td>Review failed session logs for root cause analysis</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>Session Health</td><td>Active Sessions</td><td>2 session(s) currently running</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>Repository Health</td><td>Repository Count</td><td>5 backup repository(s) configured</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Repository Health</td><td>Repository Encryption</td><td>Repository &#39;archive-repo-cold&#39; does not have encryption enabled</td><td>Enable encryption to protect backup data at rest</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Repository Health</td><td>Repository Immutability</td><td>Repository &#39;archive-repo-cold&#39; does not have immutability enabled</td><td>Enable immutability to protect against ransomware and accidental deletion</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Repository Health</td><td>Repository Status</td><td>Repository &#39;dr-repo-west&#39; is in ReadOnly state</td><td>Check repository permissions and storage account access</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Repository Health</td><td>Storage Tier</td><td>Repository &#39;dr-repo-west&#39; uses Hot storage tier</td><td>Consider Cool or Archive tier for cost optimization on infrequently accessed backups</td></tr>
+<tr><td><span style='color:#D13438;font-weight:600;'>&#10006; Critical</span></td><td>Worker Health</td><td>Worker Status</td><td>1 worker(s) in stopped/removed/deallocated state</td><td>Investigate stopped workers and redeploy if needed</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>Worker Health</td><td>Worker Availability</td><td>4 of 5 worker(s) available (Idle or Busy)</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>Worker Health</td><td>Worker Pool</td><td>Total: 5, Running: 4, Deployed: 4</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#B45309;font-weight:600;'>&#9888; Warning</span></td><td>Worker Health</td><td>Storage Throttling</td><td>Storage account throttling detected: stcontosobackup01 in eastus2</td><td>Consider splitting data across multiple storage accounts or upgrading the account type</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>Configuration Backup</td><td>Config Backup Status</td><td>Configuration backup is enabled (repository: prod-backup-repo)</td><td>&#8212;</td></tr>
+<tr><td><span style='color:#0A7B2E;font-weight:600;'>&#10004; Healthy</span></td><td>Configuration Backup</td><td>Last Config Backup</td><td>Last configuration backup completed successfully</td><td>&#8212;</td></tr></tbody>
+    </table>
+    </div>
+  </details>
+
+    <details class="section" open id="section-recs">
+    <summary class="section-title">Recommendations</summary>
+        <div class="info-card" style="border-left-color:#D13438;">
+      <div class="info-card-title" style="color:#D13438;">Immediate Actions</div>
+      <ul style="margin:8px 0 0 20px;font-size:13px;line-height:1.8;"><li>Enable MFA for all VBA console users to prevent unauthorized access</li>
+<li>Investigate and resolve policy errors to restore backup protection</li>
+<li>Investigate SLA failures and adjust policy schedules or worker capacity</li>
+<li>Investigate stopped workers and redeploy if needed</li>
+</ul>
+    </div>
+        <div class="info-card" style="border-left-color:#FF8C00;">
+      <div class="info-card-title" style="color:#FF8C00;">Short-Term Improvements</div>
+      <ul style="margin:8px 0 0 20px;font-size:13px;line-height:1.8;"><li>Ensure graced resources are properly licensed before grace period ends</li>
+<li>Review the configuration check details and address warnings</li>
+<li>Enable encryption on all backup repositories for data protection</li>
+<li>Create backup policies for unprotected VMs to improve coverage</li>
+<li>Extend file share protection policies to unprotected shares</li>
+<li>Configure backup policies for unprotected Cosmos DB accounts</li>
+<li>Investigate backup schedules and session failures for these VMs</li>
+<li>Review retention policies — limited restore points increase recovery risk</li>
+<li>Review policy execution logs for warning details</li>
+<li>Enable disabled policies or remove them if no longer needed</li>
+<li>Verify policy schedules and trigger a manual run to validate configuration</li>
+<li>Investigate session warnings and errors to improve reliability</li>
+<li>Review failed session logs for root cause analysis</li>
+<li>Enable encryption to protect backup data at rest</li>
+<li>Enable immutability to protect against ransomware and accidental deletion</li>
+<li>Check repository permissions and storage account access</li>
+<li>Consider Cool or Archive tier for cost optimization on infrequently accessed backups</li>
+<li>Consider splitting data across multiple storage accounts or upgrading the account type</li>
+</ul>
+    </div>
+  </details>
+
+  <details class="section" id="section-methodology">
+    <summary class="section-title">Methodology</summary>
+    <div class="info-card" style="margin-top:16px;">
+      <div class="info-card-title">Data Collection</div>
+      <div class="info-card-text">
+        This health check connects directly to the Veeam Backup for Azure appliance REST API (v8.1) to assess system health, license compliance, protection coverage, policy status, session success rates, repository configuration, worker health, and configuration backup. All operations are read-only with the exception of triggering the built-in configuration check.
+      </div>
+    </div>
+    <div class="info-card">
+      <div class="info-card-title">Health Score Calculation</div>
+      <div class="info-card-text">
+        The overall health score (0-100) is a weighted average across categories: Protection Coverage (20%), Policy Health (15%), Configuration Check (15%), License Health (10%), System Health (10%), Repository Health (10%), Session Health (10%), Configuration Backup (5%), Worker Health (5%). Each finding scores 100 (Healthy), 50 (Warning), or 0 (Critical). Categories with no findings default to 100.
+      </div>
+    </div>
+  </details>
+
+  <footer class="footer">
+    <p>Veeam Backup for Azure &mdash; Health Check &amp; Compliance Report</p>
+    <p>Generated by Get-VBAHealthCheck &mdash; open-source community tool</p>
+    <p>Data source: VBA appliance REST API v8.1</p>
+  </footer>
+
+</main>
+</body>
+</html>
