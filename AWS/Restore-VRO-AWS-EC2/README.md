@@ -33,6 +33,26 @@ PowerShell script that bridges Veeam Recovery Orchestrator (VRO) and AWS by enab
 | **AZ-Level Validation** | Validates instance type availability in target Availability Zone |
 | **Private IP Check** | Detects IP collisions before restore |
 
+## File Structure
+
+```
+Restore-VRO-AWS-EC2/
+├── Restore-VRO-AWS-EC2.ps1        # Main script (params, init, orchestration)
+├── Restore-VRO-AWS-EC2.Tests.ps1  # Pester 5.x test suite
+├── README.md
+└── lib/                            # Dot-sourced libraries (share script scope)
+    ├── Logging.ps1                 # Write-Log, Write-VROOutput, Write-AuditEvent
+    ├── Helpers.ps1                 # Invoke-WithRetry, Measure-RTOCompliance
+    ├── Preflight.ps1               # Test-Prerequisites (module validation)
+    ├── Auth.ps1                    # Connect-VBRSession, Connect-AWSSession, credential refresh
+    ├── Restore.ps1                 # Backup discovery, EC2 target config, restore execution
+    ├── Validation.ps1              # Instance health, TCP port, HTTP, SSM checks
+    ├── AWSIntegrations.ps1         # Tagging, CloudWatch, Route53, SSM docs, cleanup, DR drill
+    └── Reporting.ps1               # HTML restore report generation
+```
+
+All `lib/` files are dot-sourced by the main script at startup and share script-level scope (parameters, `$script:` variables). The load order matters — each file may depend on functions defined in files loaded before it.
+
 ## Prerequisites
 
 - PowerShell 5.1+ (7.x recommended)

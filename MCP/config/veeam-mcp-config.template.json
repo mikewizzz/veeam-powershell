@@ -1,0 +1,255 @@
+# Veeam VBR MCP - Configuration Template
+# Copy this file to 'veeam-mcp-config.json' and customize for your environment
+
+{
+  "VBRServer": {
+    "HostName": "localhost",
+    "Port": 9392,
+    "UseSSL": true,
+    "ConnectionTimeout": 30
+  },
+  
+  "Credentials": {
+    "UseCurrentUser": true,
+    "Username": "",
+    "PasswordEncrypted": "",
+    "Comment": "Leave Username blank to use current user context"
+  },
+  
+  "Execution": {
+    "DefaultAction": "Health",
+    "AutoConnect": true,
+    "AutoDisconnect": true,
+    "ParallelQueries": true,
+    "MaxRetries": 3,
+    "RetryDelaySeconds": 5
+  },
+  
+  "Output": {
+    "BasePath": "./VeeamMCPOutput",
+    "CreateTimestampFolders": true,
+    "DefaultFormat": "JSON",
+    "Formats": {
+      "JSON": {
+        "Enabled": true,
+        "PrettyPrint": true,
+        "Depth": 10
+      },
+      "CSV": {
+        "Enabled": false,
+        "Delimiter": ",",
+        "Encoding": "UTF8"
+      },
+      "HTML": {
+        "Enabled": false,
+        "Template": "default"
+      }
+    },
+    "Compression": {
+      "Enabled": false,
+      "Format": "zip",
+      "Level": "Optimal"
+    }
+  },
+  
+  "Monitoring": {
+    "Thresholds": {
+      "RepositorySpace": {
+        "WarningPercent": 80,
+        "CriticalPercent": 90
+      },
+      "BackupAge": {
+        "WarningDays": 7,
+        "CriticalDays": 30
+      },
+      "JobFailures": {
+        "ConsecutiveFailuresWarning": 2,
+        "ConsecutiveFailuresCritical": 3
+      },
+      "SessionDuration": {
+        "WarningMultiplier": 1.5,
+        "Comment": "Alert if job takes 1.5x longer than average"
+      }
+    },
+    
+    "Sessions": {
+      "LookbackHours": 24,
+      "MaxSessionsToAnalyze": 1000
+    },
+    
+    "RestorePoints": {
+      "MinimumRetentionPoints": 7,
+      "MaxAgeForComplianceDays": 1
+    }
+  },
+  
+  "Filters": {
+    "Jobs": {
+      "IncludeDisabled": true,
+      "Types": ["Backup", "BackupCopy", "Replication"],
+      "ExcludeNames": [],
+      "Comment": "Empty array means include all"
+    },
+    
+    "VMs": {
+      "IncludePattern": "*",
+      "ExcludePattern": "test-*,dev-*",
+      "Comment": "Wildcards supported"
+    },
+    
+    "Repositories": {
+      "IncludeTypes": ["Windows", "Linux", "ScaleOut"],
+      "ExcludeUnavailable": false
+    }
+  },
+  
+  "Integrations": {
+    "Email": {
+      "Enabled": false,
+      "SMTPServer": "smtp.company.com",
+      "Port": 25,
+      "UseSSL": false,
+      "From": "veeam-mcp@company.com",
+      "To": ["veeam-admins@company.com"],
+      "SendOnHealth": ["Warning", "Critical"],
+      "IncludeAttachments": true
+    },
+    
+    "Webhooks": {
+      "Enabled": false,
+      "Endpoints": [
+        {
+          "Name": "Slack",
+          "URL": "https://hooks.slack.com/services/YOUR/WEBHOOK/URL",
+          "Method": "POST",
+          "SendOn": ["Critical"],
+          "Enabled": false
+        },
+        {
+          "Name": "Teams",
+          "URL": "https://company.webhook.office.com/webhookb2/YOUR/URL",
+          "Method": "POST",
+          "SendOn": ["Warning", "Critical"],
+          "Enabled": false
+        },
+        {
+          "Name": "Custom_API",
+          "URL": "https://api.company.com/veeam/events",
+          "Method": "POST",
+          "Headers": {
+            "Authorization": "Bearer YOUR_TOKEN",
+            "Content-Type": "application/json"
+          },
+          "SendOn": ["Info", "Warning", "Critical"],
+          "Enabled": false
+        }
+      ]
+    },
+    
+    "SIEM": {
+      "Enabled": false,
+      "Type": "Splunk",
+      "Endpoint": "https://splunk.company.com:8088/services/collector",
+      "Token": "YOUR_HEC_TOKEN",
+      "SourceType": "veeam:mcp",
+      "Index": "veeam"
+    },
+    
+    "Database": {
+      "Enabled": false,
+      "Type": "SQL",
+      "ConnectionString": "Server=sql.company.com;Database=VeeamMCP;Integrated Security=true;",
+      "TablePrefix": "MCP_"
+    },
+    
+    "API": {
+      "Enabled": false,
+      "ListenPort": 8080,
+      "AuthenticationRequired": true,
+      "AllowedIPs": ["127.0.0.1", "10.0.0.0/8"]
+    }
+  },
+  
+  "Performance": {
+    "CachingEnabled": true,
+    "CacheDurationMinutes": 5,
+    "MaxConcurrentOperations": 10,
+    "QueryTimeout": 300,
+    "LargeDatasetThreshold": 10000
+  },
+  
+  "Logging": {
+    "Enabled": true,
+    "Level": "Info",
+    "Levels": ["Error", "Warning", "Info", "Verbose", "Debug"],
+    "FilePath": "./Logs/veeam-mcp.log",
+    "MaxSizeMB": 100,
+    "RetentionDays": 30,
+    "RotateOnSize": true,
+    "IncludeTimestamp": true,
+    "IncludeLevel": true,
+    "SeparateErrorLog": true
+  },
+  
+  "Advanced": {
+    "EnableExperimentalFeatures": false,
+    "DebugMode": false,
+    "VerboseOutput": false,
+    "CollectPerformanceMetrics": true,
+    "EnablePredictiveAnalytics": false,
+    "MachineLearning": {
+      "Enabled": false,
+      "ModelPath": "./Models/veeam-ml-model.json",
+      "TrainingDataPath": "./Training/",
+      "AutoRetrain": false
+    }
+  },
+  
+  "Scheduling": {
+    "Enabled": false,
+    "Tasks": [
+      {
+        "Name": "Daily_Health_Check",
+        "Action": "Health",
+        "Schedule": "0 6 * * *",
+        "Comment": "Cron format: Run at 6 AM daily",
+        "Enabled": true
+      },
+      {
+        "Name": "Weekly_Full_Report",
+        "Action": "All",
+        "Schedule": "0 0 * * 0",
+        "Comment": "Run every Sunday at midnight",
+        "Enabled": true
+      },
+      {
+        "Name": "Hourly_Capacity_Check",
+        "Action": "Capacity",
+        "Schedule": "0 * * * *",
+        "Comment": "Run every hour",
+        "Enabled": false
+      }
+    ]
+  },
+  
+  "Compliance": {
+    "Enabled": false,
+    "Standards": ["GDPR", "HIPAA", "SOX"],
+    "RequireEncryption": true,
+    "AuditAllOperations": true,
+    "RetentionPolicyEnforcement": true,
+    "DataClassification": {
+      "Enabled": false,
+      "Levels": ["Public", "Internal", "Confidential", "Restricted"]
+    }
+  },
+  
+  "Metadata": {
+    "Version": "1.0",
+    "LastModified": "2026-01-16",
+    "Environment": "Production",
+    "Owner": "Veeam Team",
+    "Contact": "veeam-admins@company.com",
+    "Description": "MCP configuration for Veeam B&R v13 monitoring and automation"
+  }
+}

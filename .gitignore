@@ -1,0 +1,17 @@
+# Private/sensitive config
+.claude/rules/competitive.md
+.claude/rules/execution.md
+.claude/rules/velocity.md
+.claude/rules/product.md
+.claude/settings.local.json
+.claude/worktrees/
+
+# Scratch/planning files
+TEST_PLAN.md
+
+# Script output folders
+AZURE/Get-VeeamAzureSizing/VeeamAzureSizing_*/
+
+# OS files
+.DS_Store
+Thumbs.db

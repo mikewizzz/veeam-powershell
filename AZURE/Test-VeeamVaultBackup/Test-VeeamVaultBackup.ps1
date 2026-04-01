@@ -115,7 +115,7 @@
   # Custom verification script, keep VMs for manual inspection
 
 .NOTES
-  Version: 1.0.0
+  Version: 1.1.0
   Author: Community Contributors
   Requires: PowerShell 7.x (recommended) or 5.1
   Modules: Az.Accounts, Az.Resources, Az.Compute, Az.Network
@@ -177,11 +177,25 @@ $script:TotalSteps = 9
 $script:CurrentStep = 0
 $script:VBRToken = $null
 $script:VBRBaseUrl = "https://${VBRServer}:${VBRPort}/api/v1"
-$script:TestResources = New-Object System.Collections.Generic.List[string]
+$script:UseSkipCertificateCheck = $false
+
+#region Constants
+
+$MAX_RETRIES           = 3
+$MAX_BACKOFF_SECONDS   = 30
+$POLL_INTERVAL_SECONDS = 30
+$AGENT_WAIT_SECONDS    = 60
+$VM_NAME_MAX_LENGTH    = 64
+
+#endregion
 
 #region Logging & Progress
 
 function Write-Log {
+  <#
+  .SYNOPSIS
+    Logs a message to the console and internal log buffer.
+  #>
   param(
     [Parameter(Mandatory=$true)][string]$Message,
     [ValidateSet("INFO","WARNING","ERROR","SUCCESS")]
@@ -207,6 +221,10 @@ function Write-Log {
 }
 
 function Write-ProgressStep {
+  <#
+  .SYNOPSIS
+    Advances the progress bar by one step.
+  #>
   param(
     [Parameter(Mandatory=$true)][string]$Activity,
     [string]$Status = "Processing..."
@@ -216,6 +234,170 @@ function Write-ProgressStep {
   $percentComplete = [math]::Round(($script:CurrentStep / $script:TotalSteps) * 100)
   Write-Progress -Activity "Veeam Vault Backup Test" -Status "$Activity - $Status" -PercentComplete $percentComplete
   Write-Log "STEP $($script:CurrentStep)/$($script:TotalSteps): $Activity" -Level "INFO"
+}
+
+function Escape-Html([string]$s) {
+  <#
+  .SYNOPSIS
+    HTML-encodes a string to prevent XSS in report output.
+  #>
+  if ([string]::IsNullOrWhiteSpace($s)) { return $s }
+  return [System.Net.WebUtility]::HtmlEncode($s)
+}
+
+#endregion
+
+#region Utility Functions
+
+function Invoke-WithRetry {
+  <#
+  .SYNOPSIS
+    Executes a scriptblock with exponential backoff retry logic.
+  .PARAMETER ScriptBlock
+    The code to execute.
+  .PARAMETER MaxRetries
+    Maximum number of retry attempts.
+  .PARAMETER MaxBackoffSeconds
+    Maximum seconds between retries.
+  .PARAMETER OperationName
+    Label for log messages.
+  #>
+  param(
+    [Parameter(Mandatory=$true)][scriptblock]$ScriptBlock,
+    [int]$MaxRetries = $MAX_RETRIES,
+    [int]$MaxBackoffSeconds = $MAX_BACKOFF_SECONDS,
+    [string]$OperationName = "operation"
+  )
+
+  $attempt = 0
+  do {
+    try {
+      return (& $ScriptBlock)
+    } catch {
+      $attempt++
+      if ($attempt -gt $MaxRetries) {
+        Write-Log "$OperationName failed after $MaxRetries retries: $($_.Exception.Message)" -Level "ERROR"
+        throw
+      }
+      $sleep = [Math]::Min([int]([Math]::Pow(2, $attempt)), $MaxBackoffSeconds)
+      Write-Log "$OperationName retry $attempt/$MaxRetries in ${sleep}s..." -Level "WARNING"
+      Start-Sleep -Seconds $sleep
+    }
+  } while ($attempt -le $MaxRetries)
+}
+
+function _NewFailedResult {
+  <#
+  .SYNOPSIS
+    Factory for a failed verification result object.
+  #>
+  param(
+    [string]$VmName,
+    [string]$TestVmName,
+    [string]$BackupName = "",
+    $RestorePointTime = $null,
+    [string]$RestoreStatus = "Failed",
+    [string]$RestoreError = "",
+    [string]$RestoreDuration = "",
+    [string]$Details = ""
+  )
+
+  return [PSCustomObject]@{
+    VmName            = $VmName
+    TestVmName        = $TestVmName
+    BackupName        = $BackupName
+    RestorePointTime  = $RestorePointTime
+    RestoreStatus     = $RestoreStatus
+    RestoreError      = $RestoreError
+    RestoreDuration   = $RestoreDuration
+    BootVerified      = $false
+    HeartbeatVerified = $false
+    PortsVerified     = $false
+    PortDetails       = ""
+    ScriptVerified    = $false
+    ScriptOutput      = ""
+    OverallResult     = "FAIL"
+    Details           = $Details
+    VerificationTime  = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+  }
+}
+
+function _NewRestorePointInfo {
+  <#
+  .SYNOPSIS
+    Factory for a restore point info object.
+  #>
+  param(
+    [string]$BackupName,
+    [string]$BackupId,
+    [string]$RestorePointId,
+    [string]$VmName,
+    [datetime]$CreationTime,
+    [string]$Type,
+    [string]$PlatformType,
+    [string]$JobName = ""
+  )
+
+  return [PSCustomObject]@{
+    BackupName     = $BackupName
+    BackupId       = $BackupId
+    RestorePointId = $RestorePointId
+    VmName         = $VmName
+    CreationTime   = $CreationTime
+    Type           = $Type
+    PlatformType   = $PlatformType
+    JobName        = $JobName
+  }
+}
+
+function _GetVMPowerState($vm) {
+  <#
+  .SYNOPSIS
+    Extracts the power state display string from an Azure VM status object.
+  #>
+  return ($vm.Statuses | Where-Object { $_.Code -like "PowerState/*" }).DisplayStatus
+}
+
+function _NewSecurePassword {
+  <#
+  .SYNOPSIS
+    Generates a cryptographically random password.
+  .PARAMETER Length
+    Password length (default: 24).
+  #>
+  param([int]$Length = 24)
+
+  $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#%^&*"
+  $rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
+  $bytes = New-Object byte[] $Length
+  $rng.GetBytes($bytes)
+  $password = -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
+  $rng.Dispose()
+  return $password
+}
+
+function _InitializeTlsPolicy {
+  <#
+  .SYNOPSIS
+    Configures TLS certificate handling for VBR self-signed certificates.
+    PS 7+ uses -SkipCertificateCheck; PS 5.1 uses TrustAllCertsPolicy.
+  #>
+  if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $script:UseSkipCertificateCheck = $true
+  } else {
+    $script:UseSkipCertificateCheck = $false
+    if (-not ([System.Management.Automation.PSTypeName]"TrustAllCertsPolicy").Type) {
+      Add-Type @"
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+public class TrustAllCertsPolicy : ICertificatePolicy {
+    public bool CheckValidationResult(ServicePoint sp, X509Certificate cert, WebRequest req, int problem) { return true; }
+}
+"@
+    }
+    [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+  }
 }
 
 #endregion
@@ -239,28 +421,23 @@ function Connect-VBRServer {
     password   = $password
   }
 
-  $attempt = 0
-  $maxRetries = 3
-  do {
-    try {
-      # VBR uses a self-signed certificate by default
-      $tokenResponse = Invoke-RestMethod -Uri $loginUrl -Method Post -Body $body `
-        -ContentType "application/x-www-form-urlencoded" -SkipCertificateCheck -ErrorAction Stop
+  $invokeParams = @{
+    Uri         = $loginUrl
+    Method      = "Post"
+    Body        = $body
+    ContentType = "application/x-www-form-urlencoded"
+    ErrorAction = "Stop"
+  }
+  if ($script:UseSkipCertificateCheck) {
+    $invokeParams.SkipCertificateCheck = $true
+  }
 
-      $script:VBRToken = $tokenResponse.access_token
-      Write-Log "Authenticated to VBR server $VBRServer" -Level "SUCCESS"
-      return
-    } catch {
-      $attempt++
-      if ($attempt -gt $maxRetries) {
-        Write-Log "Failed to authenticate to VBR after $maxRetries attempts: $($_.Exception.Message)" -Level "ERROR"
-        throw "VBR authentication failed: $($_.Exception.Message)"
-      }
-      $sleep = [Math]::Min([int]([Math]::Pow(2, $attempt)), 30)
-      Write-Log "VBR auth attempt $attempt failed, retrying in ${sleep}s..." -Level "WARNING"
-      Start-Sleep -Seconds $sleep
-    }
-  } while ($attempt -le $maxRetries)
+  $tokenResponse = Invoke-WithRetry -OperationName "VBR authentication" -ScriptBlock {
+    Invoke-RestMethod @invokeParams
+  }.GetNewClosure()
+
+  $script:VBRToken = $tokenResponse.access_token
+  Write-Log "Authenticated to VBR server $VBRServer" -Level "SUCCESS"
 }
 
 function Invoke-VBRApi {
@@ -271,8 +448,7 @@ function Invoke-VBRApi {
   param(
     [Parameter(Mandatory=$true)][string]$Endpoint,
     [string]$Method = "GET",
-    [hashtable]$Body,
-    [int]$MaxRetries = 3
+    [hashtable]$Body
   )
 
   $uri = "$($script:VBRBaseUrl)/$($Endpoint.TrimStart('/'))"
@@ -282,33 +458,52 @@ function Invoke-VBRApi {
   }
 
   $invokeParams = @{
-    Uri                  = $uri
-    Method               = $Method
-    Headers              = $headers
-    ContentType          = "application/json"
-    SkipCertificateCheck = $true
-    ErrorAction          = "Stop"
+    Uri         = $uri
+    Method      = $Method
+    Headers     = $headers
+    ContentType = "application/json"
+    ErrorAction = "Stop"
+  }
+  if ($script:UseSkipCertificateCheck) {
+    $invokeParams.SkipCertificateCheck = $true
   }
 
   if ($Body) {
     $invokeParams.Body = ($Body | ConvertTo-Json -Depth 10)
   }
 
-  $attempt = 0
-  do {
-    try {
-      return Invoke-RestMethod @invokeParams
-    } catch {
-      $attempt++
-      if ($attempt -gt $MaxRetries) {
-        Write-Log "VBR API call failed after $MaxRetries retries: $Method $Endpoint - $($_.Exception.Message)" -Level "ERROR"
-        throw
-      }
-      $sleep = [Math]::Min([int]([Math]::Pow(2, $attempt)), 30)
-      Write-Log "VBR API retry $attempt/${MaxRetries} for $Endpoint in ${sleep}s..." -Level "WARNING"
-      Start-Sleep -Seconds $sleep
-    }
-  } while ($attempt -le $MaxRetries)
+  return Invoke-WithRetry -OperationName "VBR API $Method $Endpoint" -ScriptBlock {
+    Invoke-RestMethod @invokeParams
+  }.GetNewClosure()
+}
+
+function _Get-BackupRestorePoints {
+  <#
+  .SYNOPSIS
+    Queries restore points for a single backup, filtered by cutoff date.
+  #>
+  param(
+    [Parameter(Mandatory=$true)]$Backup,
+    [Parameter(Mandatory=$true)][datetime]$CutoffDate,
+    [string]$JobName = ""
+  )
+
+  $points = New-Object System.Collections.Generic.List[object]
+  $rpResponse = Invoke-VBRApi -Endpoint "/backups/$($Backup.id)/restorePoints"
+  $filtered = $rpResponse.data | Where-Object {
+    [datetime]$_.creationTime -ge $CutoffDate
+  } | Sort-Object { [datetime]$_.creationTime } -Descending
+
+  foreach ($rp in $filtered) {
+    $points.Add((_NewRestorePointInfo `
+      -BackupName $Backup.name -BackupId $Backup.id `
+      -RestorePointId $rp.id -VmName $rp.name `
+      -CreationTime ([datetime]$rp.creationTime) `
+      -Type $rp.type -PlatformType $rp.platformType `
+      -JobName $JobName))
+  }
+
+  return ,$points
 }
 
 function Get-VaultRestorePoints {
@@ -331,7 +526,7 @@ function Get-VaultRestorePoints {
     $azureJobs = $azureJobs | Where-Object { $BackupJobNames -contains $_.name }
   }
 
-  if (-not $azureJobs -or $azureJobs.Count -eq 0) {
+  if (-not $azureJobs -or @($azureJobs).Count -eq 0) {
     Write-Log "No Azure backup jobs found on VBR server" -Level "WARNING"
     # Fall back to querying all backups and filtering by repository type
     $backups = Invoke-VBRApi -Endpoint "/backups"
@@ -341,52 +536,22 @@ function Get-VaultRestorePoints {
 
     foreach ($backup in $azureBackups) {
       try {
-        $rpResponse = Invoke-VBRApi -Endpoint "/backups/$($backup.id)/restorePoints"
-        $points = $rpResponse.data | Where-Object {
-          [datetime]$_.creationTime -ge $cutoffDate
-        } | Sort-Object { [datetime]$_.creationTime } -Descending
-
-        foreach ($rp in $points) {
-          $restorePoints.Add([PSCustomObject]@{
-            BackupName     = $backup.name
-            BackupId       = $backup.id
-            RestorePointId = $rp.id
-            VmName         = $rp.name
-            CreationTime   = [datetime]$rp.creationTime
-            Type           = $rp.type
-            PlatformType   = $rp.platformType
-          })
-        }
+        $points = _Get-BackupRestorePoints -Backup $backup -CutoffDate $cutoffDate
+        foreach ($p in $points) { $restorePoints.Add($p) }
       } catch {
         Write-Log "Failed to query restore points for backup $($backup.name): $($_.Exception.Message)" -Level "WARNING"
       }
     }
   } else {
-    Write-Log "Found $($azureJobs.Count) Azure backup job(s)" -Level "INFO"
+    Write-Log "Found $(@($azureJobs).Count) Azure backup job(s)" -Level "INFO"
 
     foreach ($job in $azureJobs) {
       Write-Log "Querying restore points for job: $($job.name)" -Level "INFO"
       try {
-        # Get backups associated with this job
         $backups = Invoke-VBRApi -Endpoint "/backups?jobIdFilter=$($job.id)"
         foreach ($backup in $backups.data) {
-          $rpResponse = Invoke-VBRApi -Endpoint "/backups/$($backup.id)/restorePoints"
-          $points = $rpResponse.data | Where-Object {
-            [datetime]$_.creationTime -ge $cutoffDate
-          } | Sort-Object { [datetime]$_.creationTime } -Descending
-
-          foreach ($rp in $points) {
-            $restorePoints.Add([PSCustomObject]@{
-              BackupName     = $backup.name
-              BackupId       = $backup.id
-              RestorePointId = $rp.id
-              VmName         = $rp.name
-              CreationTime   = [datetime]$rp.creationTime
-              Type           = $rp.type
-              PlatformType   = $rp.platformType
-              JobName        = $job.name
-            })
-          }
+          $points = _Get-BackupRestorePoints -Backup $backup -CutoffDate $cutoffDate -JobName $job.name
+          foreach ($p in $points) { $restorePoints.Add($p) }
         }
       } catch {
         Write-Log "Failed to query job $($job.name): $($_.Exception.Message)" -Level "WARNING"
@@ -402,7 +567,7 @@ function Get-VaultRestorePoints {
   # Apply MaxVMsToTest limit
   $selected = $uniqueVMs | Select-Object -First $MaxVMsToTest
 
-  Write-Log "Discovered $($restorePoints.Count) restore point(s) across $($uniqueVMs.Count) VM(s), selected $($selected.Count) for testing" -Level "SUCCESS"
+  Write-Log "Discovered $($restorePoints.Count) restore point(s) across $(@($uniqueVMs).Count) VM(s), selected $(@($selected).Count) for testing" -Level "SUCCESS"
   return $selected
 }
 
@@ -411,6 +576,10 @@ function Get-VaultRestorePoints {
 #region Azure Authentication
 
 function Test-AzSession {
+  <#
+  .SYNOPSIS
+    Checks for an existing valid Azure session.
+  #>
   try {
     $ctx = Get-AzContext -ErrorAction SilentlyContinue
     if (-not $ctx) { return $false }
@@ -424,6 +593,10 @@ function Test-AzSession {
 }
 
 function Connect-AzureModern {
+  <#
+  .SYNOPSIS
+    Authenticates to Azure using the configured method.
+  #>
   Write-ProgressStep -Activity "Authenticating to Azure" -Status "Checking session..."
 
   if (Test-AzSession) { return }
@@ -487,7 +660,6 @@ function New-IsolatedTestEnvironment {
     CreatedAt = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
     AutoClean = "true"
   } -Force | Out-Null
-  $script:TestResources.Add("ResourceGroup:$TestResourceGroup")
 
   # Create NSG - block all inbound/outbound except Azure infrastructure
   Write-Log "Creating network security group with isolation rules..." -Level "INFO"
@@ -565,8 +737,7 @@ function Start-TestRestore {
   )
 
   $vmName = "test-$($RestorePoint.VmName -replace '[^a-zA-Z0-9-]','' | Select-Object -First 1)".ToLower()
-  # Azure VM names max 64 chars
-  if ($vmName.Length -gt 64) { $vmName = $vmName.Substring(0, 64) }
+  if ($vmName.Length -gt $VM_NAME_MAX_LENGTH) { $vmName = $vmName.Substring(0, $VM_NAME_MAX_LENGTH) }
 
   Write-Log "Starting test restore for $($RestorePoint.VmName) as $vmName..." -Level "INFO"
 
@@ -601,20 +772,12 @@ function Start-TestRestore {
       $vmName = New-FallbackTestVM -VmName $vmName -TestEnvironment $TestEnvironment
       $sessionId = "fallback-$vmName"
     } catch {
-      return [PSCustomObject]@{
-        VmName            = $RestorePoint.VmName
-        TestVmName        = $vmName
-        RestorePointTime  = $RestorePoint.CreationTime
-        RestoreStatus     = "Failed"
-        RestoreError      = $_.Exception.Message
-        RestoreDuration   = "{0:mm\:ss}" -f ((Get-Date) - $restoreStartTime)
-        BootVerified      = $false
-        HeartbeatVerified = $false
-        PortsVerified     = $false
-        ScriptVerified    = $false
-        OverallResult     = "FAIL"
-        Details           = "Restore failed: $($_.Exception.Message)"
-      }
+      return (_NewFailedResult `
+        -VmName $RestorePoint.VmName -TestVmName $vmName `
+        -RestorePointTime $RestorePoint.CreationTime `
+        -RestoreError $_.Exception.Message `
+        -RestoreDuration ("{0:mm\:ss}" -f ((Get-Date) - $restoreStartTime)) `
+        -Details "Restore failed: $($_.Exception.Message)")
     }
   }
 
@@ -641,10 +804,12 @@ function New-FallbackTestVM {
     -ResourceGroupName $TestEnvironment.ResourceGroup `
     -Location $TestRegion -SubnetId $TestEnvironment.Subnet.Id -Force
 
+  $password = _NewSecurePassword
+  $credential = New-Object PSCredential("veeamtest", (ConvertTo-SecureString $password -AsPlainText -Force))
+
   $vmConfig = New-AzVMConfig -VMName $VmName -VMSize $TestVmSize
   $vmConfig = Set-AzVMOperatingSystem -VM $vmConfig -Windows -ComputerName $VmName `
-    -Credential (New-Object PSCredential("veeamtest", (ConvertTo-SecureString "V33am!Test$(Get-Random -Max 9999)" -AsPlainText -Force))) `
-    -ProvisionVMAgent -EnableAutoUpdate
+    -Credential $credential -ProvisionVMAgent -EnableAutoUpdate
   $vmConfig = Set-AzVMSourceImage -VM $vmConfig -PublisherName "MicrosoftWindowsServer" `
     -Offer "WindowsServer" -Skus "2022-datacenter-smalldisk" -Version "latest"
   $vmConfig = Add-AzVMNetworkInterface -VM $vmConfig -Id $nic.Id
@@ -670,7 +835,6 @@ function Wait-RestoreCompletion {
   )
 
   $timeoutAt = $StartTime.AddMinutes($BootTimeoutMinutes)
-  $pollInterval = 30  # seconds
 
   Write-Log "Waiting for VM '$VmName' to appear and boot (timeout: $BootTimeoutMinutes min)..." -Level "INFO"
 
@@ -686,20 +850,11 @@ function Wait-RestoreCompletion {
         if ($state -eq "Stopped" -or $state -eq "Completed" -or $state -eq "Success") {
           $sessionComplete = $true
           if ($session.result -eq "Failed") {
-            return [PSCustomObject]@{
-              VmName            = $VmName
-              TestVmName        = $VmName
-              RestorePointTime  = $null
-              RestoreStatus     = "Failed"
-              RestoreError      = "VBR restore session failed"
-              RestoreDuration   = "{0:mm\:ss}" -f ((Get-Date) - $StartTime)
-              BootVerified      = $false
-              HeartbeatVerified = $false
-              PortsVerified     = $false
-              ScriptVerified    = $false
-              OverallResult     = "FAIL"
-              Details           = "VBR restore session completed with failure"
-            }
+            return (_NewFailedResult `
+              -VmName $VmName -TestVmName $VmName `
+              -RestoreDuration ("{0:mm\:ss}" -f ((Get-Date) - $StartTime)) `
+              -RestoreError "VBR restore session failed" `
+              -Details "VBR restore session completed with failure")
           }
         }
       } catch {
@@ -707,7 +862,7 @@ function Wait-RestoreCompletion {
       }
 
       if (-not $sessionComplete) {
-        Start-Sleep -Seconds $pollInterval
+        Start-Sleep -Seconds $POLL_INTERVAL_SECONDS
       }
     }
   }
@@ -718,7 +873,7 @@ function Wait-RestoreCompletion {
     try {
       $vm = Get-AzVM -ResourceGroupName $ResourceGroup -Name $VmName -Status -ErrorAction SilentlyContinue
       if ($vm) {
-        $powerState = ($vm.Statuses | Where-Object { $_.Code -like "PowerState/*" }).DisplayStatus
+        $powerState = _GetVMPowerState $vm
         $provState = ($vm.Statuses | Where-Object { $_.Code -like "ProvisioningState/*" }).DisplayStatus
 
         Write-Log "  VM '$VmName': Provisioning=$provState, Power=$powerState" -Level "INFO"
@@ -732,7 +887,7 @@ function Wait-RestoreCompletion {
     }
 
     if (-not $vmReady) {
-      Start-Sleep -Seconds $pollInterval
+      Start-Sleep -Seconds $POLL_INTERVAL_SECONDS
     }
   }
 
@@ -765,92 +920,88 @@ function Wait-RestoreCompletion {
 
 #region Verification Tests
 
-function Test-VMVerification {
+function _Test-BootState {
   <#
   .SYNOPSIS
-    Runs verification checks against a restored VM: boot, heartbeat, ports, custom script.
+    Checks VM provisioning and power state.
   #>
   param(
-    [Parameter(Mandatory=$true)]$RestoreResult,
-    [Parameter(Mandatory=$true)]$RestorePoint
+    [Parameter(Mandatory=$true)][string]$ResourceGroup,
+    [Parameter(Mandatory=$true)][string]$VmName
   )
 
-  Write-Log "Running verification checks on $($RestoreResult.TestVmName)..." -Level "INFO"
-
-  $result = [PSCustomObject]@{
-    VmName            = $RestorePoint.VmName
-    TestVmName        = $RestoreResult.TestVmName
-    BackupName        = $RestorePoint.BackupName
-    RestorePointTime  = $RestorePoint.CreationTime
-    RestoreStatus     = $RestoreResult.RestoreStatus
-    RestoreError      = $RestoreResult.RestoreError
-    RestoreDuration   = $RestoreResult.RestoreDuration
-    BootVerified      = $false
-    HeartbeatVerified = $false
-    PortsVerified     = $false
-    PortDetails       = ""
-    ScriptVerified    = $false
-    ScriptOutput      = ""
-    OverallResult     = "FAIL"
-    Details           = ""
-    VerificationTime  = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-  }
-
-  if ($RestoreResult.RestoreStatus -ne "Success") {
-    $result.Details = "Restore failed: $($RestoreResult.RestoreError)"
-    return $result
-  }
-
-  $rg = $RestoreResult.ResourceGroup
-  $vmName = $RestoreResult.TestVmName
-
-  # 1. Boot verification - check provisioning and power state
   try {
-    $vm = Get-AzVM -ResourceGroupName $rg -Name $vmName -Status -ErrorAction Stop
-    $powerState = ($vm.Statuses | Where-Object { $_.Code -like "PowerState/*" }).DisplayStatus
-    $provState = $vm.Statuses | Where-Object { $_.Code -like "ProvisioningState/*" }
+    $vm = Get-AzVM -ResourceGroupName $ResourceGroup -Name $VmName -Status -ErrorAction Stop
+    $powerState = _GetVMPowerState $vm
 
     if ($powerState -eq "VM running") {
-      $result.BootVerified = $true
       Write-Log "  PASS: Boot verification - VM is running" -Level "SUCCESS"
+      return $true
     } else {
       Write-Log "  FAIL: Boot verification - Power state: $powerState" -Level "ERROR"
+      return $false
     }
   } catch {
     Write-Log "  FAIL: Boot verification - $($_.Exception.Message)" -Level "ERROR"
+    return $false
   }
+}
 
-  # 2. Heartbeat / VM Agent check
+function _Test-Heartbeat {
+  <#
+  .SYNOPSIS
+    Checks VM agent readiness with a retry wait.
+  #>
+  param(
+    [Parameter(Mandatory=$true)][string]$ResourceGroup,
+    [Parameter(Mandatory=$true)][string]$VmName
+  )
+
   try {
-    $vm = Get-AzVM -ResourceGroupName $rg -Name $vmName -Status -ErrorAction Stop
+    $vm = Get-AzVM -ResourceGroupName $ResourceGroup -Name $VmName -Status -ErrorAction Stop
     $agentStatus = ($vm.VMAgent.Statuses | Where-Object { $_.Code -like "ProvisioningState/*" }).DisplayStatus
 
     # Allow time for agent to initialize
     if (-not $agentStatus -or $agentStatus -ne "Ready") {
-      Write-Log "  VM agent not ready yet, waiting 60s for initialization..." -Level "INFO"
-      Start-Sleep -Seconds 60
-      $vm = Get-AzVM -ResourceGroupName $rg -Name $vmName -Status -ErrorAction Stop
+      Write-Log "  VM agent not ready yet, waiting ${AGENT_WAIT_SECONDS}s for initialization..." -Level "INFO"
+      Start-Sleep -Seconds $AGENT_WAIT_SECONDS
+      $vm = Get-AzVM -ResourceGroupName $ResourceGroup -Name $VmName -Status -ErrorAction Stop
       $agentStatus = ($vm.VMAgent.Statuses | Where-Object { $_.Code -like "ProvisioningState/*" }).DisplayStatus
     }
 
     if ($agentStatus -eq "Ready") {
-      $result.HeartbeatVerified = $true
       Write-Log "  PASS: Heartbeat verification - VM agent is Ready" -Level "SUCCESS"
+      return $true
     } else {
       Write-Log "  WARN: Heartbeat verification - VM agent status: $agentStatus" -Level "WARNING"
       # Not a hard failure; agent may still be initializing
-      $result.HeartbeatVerified = $true
+      return $true
     }
   } catch {
     Write-Log "  WARN: Heartbeat check inconclusive - $($_.Exception.Message)" -Level "WARNING"
+    return $false
+  }
+}
+
+function _Test-TCPPorts {
+  <#
+  .SYNOPSIS
+    Verifies TCP ports are listening inside the VM via Azure Run Command.
+  #>
+  param(
+    [Parameter(Mandatory=$true)][string]$ResourceGroup,
+    [Parameter(Mandatory=$true)][string]$VmName,
+    [int[]]$Ports
+  )
+
+  if (-not $Ports -or $Ports.Count -eq 0) {
+    return @{ Verified = $true; Details = "" }
   }
 
-  # 3. TCP Port verification via Azure Run Command
-  if ($VerificationPorts -and $VerificationPorts.Count -gt 0) {
-    try {
-      $portCheckScript = @"
+  try {
+    $portCheckScript = @"
 `$results = @()
-foreach (`$port in @($($VerificationPorts -join ','))) {
+foreach (`$port in @($($Ports -join ','))) {
   try {
     `$listener = Get-NetTCPConnection -LocalPort `$port -State Listen -ErrorAction SilentlyContinue
     if (`$listener) {
@@ -865,86 +1016,139 @@ foreach (`$port in @($($VerificationPorts -join ','))) {
 `$results -join '; '
 "@
 
-      Write-Log "  Checking TCP ports ($($VerificationPorts -join ', ')) via Run Command..." -Level "INFO"
+    Write-Log "  Checking TCP ports ($($Ports -join ', ')) via Run Command..." -Level "INFO"
 
-      $runResult = Invoke-AzVMRunCommand -ResourceGroupName $rg -VMName $vmName `
-        -CommandId "RunPowerShellScript" -ScriptString $portCheckScript -ErrorAction Stop
+    $runResult = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroup -VMName $VmName `
+      -CommandId "RunPowerShellScript" -ScriptString $portCheckScript -ErrorAction Stop
 
-      $portOutput = $runResult.Value[0].Message
-      $result.PortDetails = $portOutput
-      Write-Log "  Port check output: $portOutput" -Level "INFO"
+    $portOutput = $runResult.Value[0].Message
+    Write-Log "  Port check output: $portOutput" -Level "INFO"
 
-      # Consider ports verified if any port is listening
-      $listeningCount = ($portOutput -split ';' | Where-Object { $_ -like "*LISTENING*" -and $_ -notlike "*NOT*" }).Count
-      if ($listeningCount -gt 0) {
-        $result.PortsVerified = $true
-        Write-Log "  PASS: Port verification - $listeningCount/$($VerificationPorts.Count) ports listening" -Level "SUCCESS"
-      } else {
-        Write-Log "  WARN: Port verification - no monitored ports are listening (services may need time)" -Level "WARNING"
-        # Ports not listening isn't necessarily a failure for a freshly restored VM
-        $result.PortsVerified = $true
-      }
-    } catch {
-      Write-Log "  WARN: Port verification via Run Command failed - $($_.Exception.Message)" -Level "WARNING"
-      $result.PortDetails = "Run Command failed: $($_.Exception.Message)"
+    # Consider ports verified if any port is listening
+    $listeningCount = ($portOutput -split ';' | Where-Object { $_ -like "*LISTENING*" -and $_ -notlike "*NOT*" }).Count
+    if ($listeningCount -gt 0) {
+      Write-Log "  PASS: Port verification - $listeningCount/$($Ports.Count) ports listening" -Level "SUCCESS"
+    } else {
+      Write-Log "  WARN: Port verification - no monitored ports are listening (services may need time)" -Level "WARNING"
     }
-  } else {
-    $result.PortsVerified = $true  # No ports to check
+    # Ports not listening isn't necessarily a failure for a freshly restored VM
+    return @{ Verified = $true; Details = $portOutput }
+  } catch {
+    Write-Log "  WARN: Port verification via Run Command failed - $($_.Exception.Message)" -Level "WARNING"
+    return @{ Verified = $false; Details = "Run Command failed: $($_.Exception.Message)" }
+  }
+}
+
+function _Test-CustomScript {
+  <#
+  .SYNOPSIS
+    Executes a user-defined verification script inside the VM via Azure Run Command.
+  #>
+  param(
+    [Parameter(Mandatory=$true)][string]$ResourceGroup,
+    [Parameter(Mandatory=$true)][string]$VmName,
+    [string]$ScriptPath
+  )
+
+  if (-not $ScriptPath) {
+    return @{ Verified = $true; Output = "" }
   }
 
-  # 4. Custom verification script
-  if ($VerificationScript) {
-    try {
-      if (-not (Test-Path $VerificationScript)) {
-        Write-Log "  FAIL: Custom script not found at $VerificationScript" -Level "ERROR"
-        $result.ScriptOutput = "Script file not found"
-      } else {
-        $scriptContent = Get-Content -Path $VerificationScript -Raw
-        Write-Log "  Running custom verification script via Run Command..." -Level "INFO"
-
-        $runResult = Invoke-AzVMRunCommand -ResourceGroupName $rg -VMName $vmName `
-          -CommandId "RunPowerShellScript" -ScriptString $scriptContent -ErrorAction Stop
-
-        $scriptOutput = $runResult.Value[0].Message
-        $scriptError = $runResult.Value[1].Message
-        $result.ScriptOutput = $scriptOutput
-
-        if (-not $scriptError) {
-          $result.ScriptVerified = $true
-          Write-Log "  PASS: Custom script verification succeeded" -Level "SUCCESS"
-          Write-Log "  Script output: $scriptOutput" -Level "INFO"
-        } else {
-          Write-Log "  FAIL: Custom script returned errors: $scriptError" -Level "ERROR"
-        }
-      }
-    } catch {
-      Write-Log "  FAIL: Custom script execution failed - $($_.Exception.Message)" -Level "ERROR"
-      $result.ScriptOutput = "Execution failed: $($_.Exception.Message)"
+  try {
+    if (-not (Test-Path $ScriptPath)) {
+      Write-Log "  FAIL: Custom script not found at $ScriptPath" -Level "ERROR"
+      return @{ Verified = $false; Output = "Script file not found" }
     }
-  } else {
-    $result.ScriptVerified = $true  # No script to check
+
+    $scriptContent = Get-Content -Path $ScriptPath -Raw
+    Write-Log "  Running custom verification script via Run Command..." -Level "INFO"
+
+    $runResult = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroup -VMName $VmName `
+      -CommandId "RunPowerShellScript" -ScriptString $scriptContent -ErrorAction Stop
+
+    $scriptOutput = $runResult.Value[0].Message
+    $scriptError = $runResult.Value[1].Message
+
+    if (-not $scriptError) {
+      Write-Log "  PASS: Custom script verification succeeded" -Level "SUCCESS"
+      Write-Log "  Script output: $scriptOutput" -Level "INFO"
+      return @{ Verified = $true; Output = $scriptOutput }
+    } else {
+      Write-Log "  FAIL: Custom script returned errors: $scriptError" -Level "ERROR"
+      return @{ Verified = $false; Output = $scriptOutput }
+    }
+  } catch {
+    Write-Log "  FAIL: Custom script execution failed - $($_.Exception.Message)" -Level "ERROR"
+    return @{ Verified = $false; Output = "Execution failed: $($_.Exception.Message)" }
+  }
+}
+
+function Test-VMVerification {
+  <#
+  .SYNOPSIS
+    Orchestrates all verification checks against a restored VM.
+  #>
+  param(
+    [Parameter(Mandatory=$true)]$RestoreResult,
+    [Parameter(Mandatory=$true)]$RestorePoint
+  )
+
+  Write-Log "Running verification checks on $($RestoreResult.TestVmName)..." -Level "INFO"
+
+  if ($RestoreResult.RestoreStatus -ne "Success") {
+    return (_NewFailedResult `
+      -VmName $RestorePoint.VmName -TestVmName $RestoreResult.TestVmName `
+      -BackupName $RestorePoint.BackupName -RestorePointTime $RestorePoint.CreationTime `
+      -RestoreStatus $RestoreResult.RestoreStatus -RestoreError $RestoreResult.RestoreError `
+      -RestoreDuration $RestoreResult.RestoreDuration `
+      -Details "Restore failed: $($RestoreResult.RestoreError)")
   }
 
-  # Overall result
-  $checks = @($result.BootVerified, $result.HeartbeatVerified, $result.PortsVerified, $result.ScriptVerified)
+  $rg = $RestoreResult.ResourceGroup
+  $vmName = $RestoreResult.TestVmName
+
+  $bootOk      = _Test-BootState -ResourceGroup $rg -VmName $vmName
+  $heartbeatOk = _Test-Heartbeat -ResourceGroup $rg -VmName $vmName
+  $portResult  = _Test-TCPPorts -ResourceGroup $rg -VmName $vmName -Ports $VerificationPorts
+  $scriptResult = _Test-CustomScript -ResourceGroup $rg -VmName $vmName -ScriptPath $VerificationScript
+
+  # Calculate overall result
+  $checks = @($bootOk, $heartbeatOk, $portResult.Verified, $scriptResult.Verified)
   $passed = ($checks | Where-Object { $_ -eq $true }).Count
   $total = $checks.Count
 
-  if ($result.BootVerified -and $passed -eq $total) {
-    $result.OverallResult = "PASS"
-    $result.Details = "All $total verification checks passed"
+  if ($bootOk -and $passed -eq $total) {
+    $overallResult = "PASS"
+    $details = "All $total verification checks passed"
     Write-Log "RESULT: $($RestorePoint.VmName) - PASS ($passed/$total checks)" -Level "SUCCESS"
-  } elseif ($result.BootVerified) {
-    $result.OverallResult = "PARTIAL"
-    $result.Details = "$passed/$total verification checks passed"
+  } elseif ($bootOk) {
+    $overallResult = "PARTIAL"
+    $details = "$passed/$total verification checks passed"
     Write-Log "RESULT: $($RestorePoint.VmName) - PARTIAL ($passed/$total checks)" -Level "WARNING"
   } else {
-    $result.OverallResult = "FAIL"
-    $result.Details = "Boot verification failed - $passed/$total checks passed"
+    $overallResult = "FAIL"
+    $details = "Boot verification failed - $passed/$total checks passed"
     Write-Log "RESULT: $($RestorePoint.VmName) - FAIL ($passed/$total checks)" -Level "ERROR"
   }
 
-  return $result
+  return [PSCustomObject]@{
+    VmName            = $RestorePoint.VmName
+    TestVmName        = $RestoreResult.TestVmName
+    BackupName        = $RestorePoint.BackupName
+    RestorePointTime  = $RestorePoint.CreationTime
+    RestoreStatus     = $RestoreResult.RestoreStatus
+    RestoreError      = $RestoreResult.RestoreError
+    RestoreDuration   = $RestoreResult.RestoreDuration
+    BootVerified      = $bootOk
+    HeartbeatVerified = $heartbeatOk
+    PortsVerified     = $portResult.Verified
+    PortDetails       = $portResult.Details
+    ScriptVerified    = $scriptResult.Verified
+    ScriptOutput      = $scriptResult.Output
+    OverallResult     = $overallResult
+    Details           = $details
+    VerificationTime  = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+  }
 }
 
 #endregion
@@ -978,79 +1182,14 @@ function Remove-TestEnvironment {
 
 #region HTML Report Generation
 
-function Generate-HTMLReport {
-  param(
-    [Parameter(Mandatory=$true)]$VerificationResults,
-    [Parameter(Mandatory=$true)]$RestorePoints,
-    [Parameter(Mandatory=$true)][string]$OutputPath
-  )
+function _Get-ReportCSS {
+  <#
+  .SYNOPSIS
+    Returns the CSS stylesheet for the verification report.
+  #>
+  param([Parameter(Mandatory=$true)][string]$OverallColor)
 
-  Write-ProgressStep -Activity "Generating HTML Report" -Status "Creating professional verification report..."
-
-  $reportDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-  $duration = (Get-Date) - $script:StartTime
-  $durationStr = "$([math]::Floor($duration.TotalMinutes))m $($duration.Seconds)s"
-
-  $totalTests = $VerificationResults.Count
-  $passed = ($VerificationResults | Where-Object { $_.OverallResult -eq "PASS" }).Count
-  $partial = ($VerificationResults | Where-Object { $_.OverallResult -eq "PARTIAL" }).Count
-  $failed = ($VerificationResults | Where-Object { $_.OverallResult -eq "FAIL" }).Count
-  $successRate = if ($totalTests -gt 0) { [math]::Round(($passed / $totalTests) * 100, 0) } else { 0 }
-
-  $overallStatus = if ($failed -eq 0 -and $totalTests -gt 0) { "PASSED" } elseif ($passed -gt 0) { "PARTIAL" } else { "FAILED" }
-  $overallColor = switch ($overallStatus) {
-    "PASSED"  { "#00B336" }
-    "PARTIAL" { "#F59E0B" }
-    "FAILED"  { "#DC2626" }
-  }
-
-  # Build results table rows
-  $resultRows = $VerificationResults | ForEach-Object {
-    $statusIcon = switch ($_.OverallResult) {
-      "PASS"    { "<span style='color:#00B336;font-weight:600;'>PASS</span>" }
-      "PARTIAL" { "<span style='color:#F59E0B;font-weight:600;'>PARTIAL</span>" }
-      "FAIL"    { "<span style='color:#DC2626;font-weight:600;'>FAIL</span>" }
-    }
-    $bootIcon      = if ($_.BootVerified)      { "<span style='color:#00B336;'>Yes</span>" } else { "<span style='color:#DC2626;'>No</span>" }
-    $heartbeatIcon = if ($_.HeartbeatVerified)  { "<span style='color:#00B336;'>Yes</span>" } else { "<span style='color:#DC2626;'>No</span>" }
-    $portsIcon     = if ($_.PortsVerified)      { "<span style='color:#00B336;'>Yes</span>" } else { "<span style='color:#DC2626;'>No</span>" }
-    $scriptIcon    = if ($_.ScriptVerified)     { "<span style='color:#00B336;'>Yes</span>" } else { "<span style='color:#DC2626;'>No</span>" }
-    $rpTime = if ($_.RestorePointTime) { ([datetime]$_.RestorePointTime).ToString("yyyy-MM-dd HH:mm") } else { "N/A" }
-
-    @"
-        <tr>
-          <td><strong>$($_.VmName)</strong></td>
-          <td>$rpTime</td>
-          <td>$($_.RestoreDuration)</td>
-          <td>$bootIcon</td>
-          <td>$heartbeatIcon</td>
-          <td>$portsIcon</td>
-          <td>$scriptIcon</td>
-          <td>$statusIcon</td>
-          <td>$($_.Details)</td>
-        </tr>
-"@
-  } -join "`n"
-
-  # Build log entries for report
-  $logRows = $script:LogEntries | ForEach-Object {
-    $levelColor = switch ($_.Level) {
-      "ERROR"   { "#DC2626" }
-      "WARNING" { "#F59E0B" }
-      "SUCCESS" { "#00B336" }
-      default   { "#605E5C" }
-    }
-    "<tr><td style='white-space:nowrap;'>$($_.Timestamp)</td><td style='color:$levelColor;font-weight:600;'>$($_.Level)</td><td>$($_.Message)</td></tr>"
-  } -join "`n"
-
-  $html = @"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Veeam Vault Backup Verification Report</title>
-<style>
+  return @"
 :root {
   --ms-blue: #0078D4;
   --ms-blue-dark: #106EBE;
@@ -1085,7 +1224,7 @@ body {
 
 .header {
   background: white;
-  border-left: 4px solid $overallColor;
+  border-left: 4px solid $OverallColor;
   padding: 32px;
   margin-bottom: 32px;
   border-radius: 2px;
@@ -1107,7 +1246,7 @@ body {
   font-size: 18px;
   font-weight: 600;
   color: white;
-  background: $overallColor;
+  background: $OverallColor;
   margin-bottom: 20px;
 }
 
@@ -1180,41 +1319,67 @@ tbody tr:hover { background: var(--ms-gray-10); }
   body { background: white; }
   .section { box-shadow: none; border: 1px solid var(--ms-gray-30); }
 }
-</style>
-</head>
-<body>
+"@
+}
+
+function _Get-ReportBody {
+  <#
+  .SYNOPSIS
+    Builds the HTML body content for the verification report.
+  .PARAMETER Data
+    Hashtable with all pre-escaped values and computed statistics.
+  #>
+  param([Parameter(Mandatory=$true)][hashtable]$Data)
+
+  # Determine KPI card classes and summary card class
+  $failedCardClass = if ($Data.Failed -gt 0) { ' fail' } else { ' pass' }
+  $rateCardClass = if ($Data.SuccessRate -ge 80) { ' pass' } elseif ($Data.SuccessRate -ge 50) { ' warn' } else { ' fail' }
+  $summaryCardClass = if ($Data.OverallStatus -eq 'PASSED') { 'success-card' } elseif ($Data.OverallStatus -eq 'PARTIAL') { 'warning-card' } else { 'error-card' }
+  $failedSubtext = if ($Data.Failed -gt 0) { 'Requires investigation' } else { 'No failures detected' }
+
+  # Build executive summary text
+  $summaryText = ""
+  if ($Data.OverallStatus -eq 'PASSED') {
+    $summaryText = "All <strong>$($Data.TotalTests) VM(s)</strong> were successfully restored from Veeam Vault and passed all verification checks. Your Azure backups are confirmed recoverable and DR-ready."
+  } elseif ($Data.OverallStatus -eq 'PARTIAL') {
+    $summaryText = "<strong>$($Data.Passed) of $($Data.TotalTests) VM(s)</strong> passed all verification checks. <strong>$($Data.Partial) VM(s)</strong> passed with warnings and <strong>$($Data.Failed) VM(s)</strong> failed. Review the detailed results above for specific issues."
+  } else {
+    $summaryText = "<strong>$($Data.Failed) of $($Data.TotalTests) VM(s)</strong> failed verification. Backup recoverability cannot be confirmed. Immediate investigation is recommended."
+  }
+
+  return @"
 <div class="container">
   <div class="header">
-    <div class="overall-status">$overallStatus</div>
+    <div class="overall-status">$($Data.OverallStatus)</div>
     <div class="header-title">Veeam Vault Backup Verification</div>
     <div class="header-subtitle">Automated Recoverability Test - SureBackup for Azure</div>
     <div class="header-meta">
-      <span><strong>VBR Server:</strong> $VBRServer</span>
-      <span><strong>Test Region:</strong> $TestRegion</span>
-      <span><strong>Generated:</strong> $reportDate</span>
-      <span><strong>Duration:</strong> $durationStr</span>
+      <span><strong>VBR Server:</strong> $($Data.SafeVBRServer)</span>
+      <span><strong>Test Region:</strong> $($Data.SafeTestRegion)</span>
+      <span><strong>Generated:</strong> $($Data.SafeReportDate)</span>
+      <span><strong>Duration:</strong> $($Data.DurationStr)</span>
     </div>
   </div>
 
   <div class="kpi-grid">
     <div class="kpi-card info">
       <div class="kpi-label">VMs Tested</div>
-      <div class="kpi-value">$totalTests</div>
+      <div class="kpi-value">$($Data.TotalTests)</div>
       <div class="kpi-subtext">From Veeam Vault restore points</div>
     </div>
     <div class="kpi-card pass">
       <div class="kpi-label">Passed</div>
-      <div class="kpi-value">$passed</div>
+      <div class="kpi-value">$($Data.Passed)</div>
       <div class="kpi-subtext">All checks verified</div>
     </div>
-    <div class="kpi-card$(if ($failed -gt 0) {' fail'} else {' pass'})">
+    <div class="kpi-card$failedCardClass">
       <div class="kpi-label">Failed</div>
-      <div class="kpi-value">$failed</div>
-      <div class="kpi-subtext">$(if ($failed -gt 0) {'Requires investigation'} else {'No failures detected'})</div>
+      <div class="kpi-value">$($Data.Failed)</div>
+      <div class="kpi-subtext">$failedSubtext</div>
     </div>
-    <div class="kpi-card$(if ($successRate -ge 80) {' pass'} elseif ($successRate -ge 50) {' warn'} else {' fail'})">
+    <div class="kpi-card$rateCardClass">
       <div class="kpi-label">Success Rate</div>
-      <div class="kpi-value">${successRate}%</div>
+      <div class="kpi-value">$($Data.SuccessRate)%</div>
       <div class="kpi-subtext">Recovery confidence score</div>
     </div>
   </div>
@@ -1236,39 +1401,31 @@ tbody tr:hover { background: var(--ms-gray-10); }
         </tr>
       </thead>
       <tbody>
-        $resultRows
+        $($Data.ResultRows)
       </tbody>
     </table>
   </div>
 
   <div class="section">
     <h2 class="section-title">Executive Summary</h2>
-    <div class="info-card $(if ($overallStatus -eq 'PASSED') {'success-card'} elseif ($overallStatus -eq 'PARTIAL') {'warning-card'} else {'error-card'})">
+    <div class="info-card $summaryCardClass">
       <div class="info-card-title">Backup Recoverability Assessment</div>
-      <div class="info-card-text">
-        $(if ($overallStatus -eq 'PASSED') {
-          "All <strong>$totalTests VM(s)</strong> were successfully restored from Veeam Vault and passed all verification checks. Your Azure backups are confirmed recoverable and DR-ready."
-        } elseif ($overallStatus -eq 'PARTIAL') {
-          "<strong>$passed of $totalTests VM(s)</strong> passed all verification checks. <strong>$partial VM(s)</strong> passed with warnings and <strong>$failed VM(s)</strong> failed. Review the detailed results above for specific issues."
-        } else {
-          "<strong>$failed of $totalTests VM(s)</strong> failed verification. Backup recoverability cannot be confirmed. Immediate investigation is recommended."
-        })
-      </div>
+      <div class="info-card-text">$summaryText</div>
     </div>
 
     <div class="info-card">
       <div class="info-card-title">Test Configuration</div>
       <div class="info-card-text">
         <ul style="margin: 8px 0 0 20px;">
-          <li><strong>VBR Server:</strong> $VBRServer (port $VBRPort)</li>
-          <li><strong>Restore Point Window:</strong> Last $MaxRestorePointAgeDays day(s)</li>
-          <li><strong>Test Region:</strong> $TestRegion</li>
-          <li><strong>Test VM Size:</strong> $TestVmSize</li>
-          <li><strong>Isolated Network:</strong> $TestVNetCIDR (NSG: deny all external)</li>
-          <li><strong>Verification Ports:</strong> $($VerificationPorts -join ', ')</li>
-          <li><strong>Boot Timeout:</strong> $BootTimeoutMinutes minutes</li>
-          <li><strong>Custom Script:</strong> $(if ($VerificationScript) { $VerificationScript } else { 'None' })</li>
-          <li><strong>Cleanup:</strong> $(if ($KeepTestEnvironment) { 'Disabled (manual cleanup required)' } else { 'Automatic' })</li>
+          <li><strong>VBR Server:</strong> $($Data.SafeVBRServer) (port $($Data.SafeVBRPort))</li>
+          <li><strong>Restore Point Window:</strong> Last $($Data.SafeMaxRPDays) day(s)</li>
+          <li><strong>Test Region:</strong> $($Data.SafeTestRegion)</li>
+          <li><strong>Test VM Size:</strong> $($Data.SafeTestVmSize)</li>
+          <li><strong>Isolated Network:</strong> $($Data.SafeTestVNetCIDR) (NSG: deny all external)</li>
+          <li><strong>Verification Ports:</strong> $($Data.SafeVerifPorts)</li>
+          <li><strong>Boot Timeout:</strong> $($Data.SafeBootTimeout) minutes</li>
+          <li><strong>Custom Script:</strong> $($Data.SafeVerifScript)</li>
+          <li><strong>Cleanup:</strong> $($Data.SafeCleanup)</li>
         </ul>
       </div>
     </div>
@@ -1311,7 +1468,7 @@ tbody tr:hover { background: var(--ms-gray-10); }
           <tr><th>Timestamp</th><th>Level</th><th>Message</th></tr>
         </thead>
         <tbody>
-          $logRows
+          $($Data.LogRows)
         </tbody>
       </table>
     </div>
@@ -1319,14 +1476,147 @@ tbody tr:hover { background: var(--ms-gray-10); }
 
   <div class="footer">
     <p>Automated Backup Verification Report</p>
-    <p>Generated by Test-VeeamVaultBackup.ps1 v1.0.0 | SureBackup for Azure</p>
+    <p>Test-VeeamVaultBackup.ps1 v1.1.0 | SureBackup for Azure</p>
   </div>
 </div>
+"@
+}
+
+function New-HTMLReport {
+  <#
+  .SYNOPSIS
+    Generates a professional HTML verification report with all values XSS-escaped.
+  #>
+  param(
+    [Parameter(Mandatory=$true)]$VerificationResults,
+    [Parameter(Mandatory=$true)]$RestorePoints,
+    [Parameter(Mandatory=$true)][string]$ReportOutputPath
+  )
+
+  Write-ProgressStep -Activity "Generating HTML Report" -Status "Creating professional verification report..."
+
+  # Pre-escape all user/API-sourced config values
+  $safeVBRServer    = Escape-Html $VBRServer
+  $safeTestRegion   = Escape-Html $TestRegion
+  $safeTestVmSize   = Escape-Html $TestVmSize
+  $safeTestVNetCIDR = Escape-Html $TestVNetCIDR
+  $safeVBRPort      = Escape-Html ([string]$VBRPort)
+  $safeMaxRPDays    = Escape-Html ([string]$MaxRestorePointAgeDays)
+  $safeBootTimeout  = Escape-Html ([string]$BootTimeoutMinutes)
+  $safeVerifScript  = if ($VerificationScript) { Escape-Html $VerificationScript } else { 'None' }
+  $safeVerifPorts   = Escape-Html ($VerificationPorts -join ', ')
+  $safeCleanup      = if ($KeepTestEnvironment) { 'Disabled (manual cleanup required)' } else { 'Automatic' }
+  $safeReportDate   = Escape-Html (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+
+  # Compute statistics
+  $duration = (Get-Date) - $script:StartTime
+  $durationStr = "$([math]::Floor($duration.TotalMinutes))m $($duration.Seconds)s"
+  $totalTests = @($VerificationResults).Count
+  $passed = @($VerificationResults | Where-Object { $_.OverallResult -eq "PASS" }).Count
+  $partial = @($VerificationResults | Where-Object { $_.OverallResult -eq "PARTIAL" }).Count
+  $failed = @($VerificationResults | Where-Object { $_.OverallResult -eq "FAIL" }).Count
+  $successRate = if ($totalTests -gt 0) { [math]::Round(($passed / $totalTests) * 100, 0) } else { 0 }
+
+  $overallStatus = if ($failed -eq 0 -and $totalTests -gt 0) { "PASSED" } elseif ($passed -gt 0) { "PARTIAL" } else { "FAILED" }
+  $overallColor = switch ($overallStatus) {
+    "PASSED"  { "#00B336" }
+    "PARTIAL" { "#F59E0B" }
+    "FAILED"  { "#DC2626" }
+  }
+
+  # Build result rows with escaping
+  $resultRows = $VerificationResults | ForEach-Object {
+    $safeVmName    = Escape-Html $_.VmName
+    $safeDetails   = Escape-Html $_.Details
+    $safeDuration  = Escape-Html $_.RestoreDuration
+
+    $statusIcon = switch ($_.OverallResult) {
+      "PASS"    { "<span style='color:#00B336;font-weight:600;'>PASS</span>" }
+      "PARTIAL" { "<span style='color:#F59E0B;font-weight:600;'>PARTIAL</span>" }
+      "FAIL"    { "<span style='color:#DC2626;font-weight:600;'>FAIL</span>" }
+    }
+    $bootIcon      = if ($_.BootVerified)      { "<span style='color:#00B336;'>Yes</span>" } else { "<span style='color:#DC2626;'>No</span>" }
+    $heartbeatIcon = if ($_.HeartbeatVerified)  { "<span style='color:#00B336;'>Yes</span>" } else { "<span style='color:#DC2626;'>No</span>" }
+    $portsIcon     = if ($_.PortsVerified)      { "<span style='color:#00B336;'>Yes</span>" } else { "<span style='color:#DC2626;'>No</span>" }
+    $scriptIcon    = if ($_.ScriptVerified)     { "<span style='color:#00B336;'>Yes</span>" } else { "<span style='color:#DC2626;'>No</span>" }
+    $rpTime = if ($_.RestorePointTime) { Escape-Html (([datetime]$_.RestorePointTime).ToString("yyyy-MM-dd HH:mm")) } else { "N/A" }
+
+    @"
+        <tr>
+          <td><strong>$safeVmName</strong></td>
+          <td>$rpTime</td>
+          <td>$safeDuration</td>
+          <td>$bootIcon</td>
+          <td>$heartbeatIcon</td>
+          <td>$portsIcon</td>
+          <td>$scriptIcon</td>
+          <td>$statusIcon</td>
+          <td>$safeDetails</td>
+        </tr>
+"@
+  }
+  $resultRowsHtml = $resultRows -join "`n"
+
+  # Build log rows with escaping
+  $logRows = $script:LogEntries | ForEach-Object {
+    $safeTimestamp = Escape-Html $_.Timestamp
+    $safeLevel    = Escape-Html $_.Level
+    $safeMessage  = Escape-Html $_.Message
+
+    $levelColor = switch ($_.Level) {
+      "ERROR"   { "#DC2626" }
+      "WARNING" { "#F59E0B" }
+      "SUCCESS" { "#00B336" }
+      default   { "#605E5C" }
+    }
+    "<tr><td style='white-space:nowrap;'>$safeTimestamp</td><td style='color:$levelColor;font-weight:600;'>$safeLevel</td><td>$safeMessage</td></tr>"
+  }
+  $logRowsHtml = $logRows -join "`n"
+
+  # Assemble CSS, body, and full document
+  $css = _Get-ReportCSS -OverallColor $overallColor
+  $body = _Get-ReportBody -Data @{
+    OverallStatus   = $overallStatus
+    OverallColor    = $overallColor
+    SafeVBRServer   = $safeVBRServer
+    SafeTestRegion  = $safeTestRegion
+    SafeReportDate  = $safeReportDate
+    DurationStr     = $durationStr
+    TotalTests      = $totalTests
+    Passed          = $passed
+    Partial         = $partial
+    Failed          = $failed
+    SuccessRate     = $successRate
+    ResultRows      = $resultRowsHtml
+    LogRows         = $logRowsHtml
+    SafeVBRPort     = $safeVBRPort
+    SafeMaxRPDays   = $safeMaxRPDays
+    SafeTestVmSize  = $safeTestVmSize
+    SafeTestVNetCIDR = $safeTestVNetCIDR
+    SafeVerifPorts  = $safeVerifPorts
+    SafeBootTimeout = $safeBootTimeout
+    SafeVerifScript = $safeVerifScript
+    SafeCleanup     = $safeCleanup
+  }
+
+  $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Veeam Vault Backup Verification Report</title>
+<style>
+$css
+</style>
+</head>
+<body>
+$body
 </body>
 </html>
 "@
 
-  $htmlPath = Join-Path $OutputPath "Veeam-Vault-Verification-Report.html"
+  $htmlPath = Join-Path $ReportOutputPath "Veeam-Vault-Verification-Report.html"
   $html | Out-File -FilePath $htmlPath -Encoding UTF8
 
   Write-Log "Generated HTML report: $htmlPath" -Level "SUCCESS"
@@ -1388,6 +1678,9 @@ try {
     throw "Verification script path does not exist: $VerificationScript"
   }
 
+  # Initialize TLS policy for VBR self-signed certificates
+  _InitializeTlsPolicy
+
   # Step 1: Connect to VBR
   Connect-VBRServer
 
@@ -1404,7 +1697,7 @@ try {
 
     # Generate empty report
     $emptyResults = @()
-    $htmlPath = Generate-HTMLReport -VerificationResults $emptyResults -RestorePoints @() -OutputPath $OutputPath
+    $htmlPath = New-HTMLReport -VerificationResults $emptyResults -RestorePoints @() -ReportOutputPath $OutputPath
     exit 0
   }
 
@@ -1434,25 +1727,12 @@ try {
     if ($restoreResult.RestoreStatus -eq "Success") {
       $verification = Test-VMVerification -RestoreResult $restoreResult -RestorePoint $rp
     } else {
-      # Build failed result
-      $verification = [PSCustomObject]@{
-        VmName            = $rp.VmName
-        TestVmName        = $restoreResult.TestVmName
-        BackupName        = $rp.BackupName
-        RestorePointTime  = $rp.CreationTime
-        RestoreStatus     = $restoreResult.RestoreStatus
-        RestoreError      = $restoreResult.RestoreError
-        RestoreDuration   = $restoreResult.RestoreDuration
-        BootVerified      = $false
-        HeartbeatVerified = $false
-        PortsVerified     = $false
-        PortDetails       = ""
-        ScriptVerified    = $false
-        ScriptOutput      = ""
-        OverallResult     = "FAIL"
-        Details           = "Restore failed: $($restoreResult.RestoreError)"
-        VerificationTime  = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-      }
+      $verification = _NewFailedResult `
+        -VmName $rp.VmName -TestVmName $restoreResult.TestVmName `
+        -BackupName $rp.BackupName -RestorePointTime $rp.CreationTime `
+        -RestoreStatus $restoreResult.RestoreStatus -RestoreError $restoreResult.RestoreError `
+        -RestoreDuration $restoreResult.RestoreDuration `
+        -Details "Restore failed: $($restoreResult.RestoreError)"
     }
 
     $verificationResults.Add($verification)
@@ -1470,8 +1750,8 @@ try {
   Write-Log "Exported restore point details to: $rpCsvPath" -Level "SUCCESS"
 
   # Step 7: Generate HTML report
-  $htmlPath = Generate-HTMLReport -VerificationResults $verificationResults `
-    -RestorePoints $restorePoints -OutputPath $OutputPath
+  $htmlPath = New-HTMLReport -VerificationResults $verificationResults `
+    -RestorePoints $restorePoints -ReportOutputPath $OutputPath
 
   # Step 8: Cleanup
   Remove-TestEnvironment

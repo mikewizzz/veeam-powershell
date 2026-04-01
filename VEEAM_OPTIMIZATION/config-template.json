@@ -1,0 +1,154 @@
+{
+  "description": "Configuration template for Veeam Optimization & Recommendation Tool",
+  "version": "1.0.0",
+  
+  "veeamConnection": {
+    "server": "localhost",
+    "port": 9392,
+    "description": "Veeam Backup & Replication server connection settings"
+  },
+  
+  "analysisSettings": {
+    "days": 30,
+    "description": "Number of days of historical data to analyze (1-365)"
+  },
+  
+  "thresholds": {
+    "description": "Performance and capacity thresholds for generating recommendations",
+    "cpu": {
+      "value": 80,
+      "unit": "percent",
+      "description": "CPU utilization threshold for data movers and gateways"
+    },
+    "memory": {
+      "value": 85,
+      "unit": "percent",
+      "description": "Memory utilization threshold for proxy and gateway servers"
+    },
+    "storage": {
+      "value": 80,
+      "unit": "percent",
+      "description": "Repository capacity threshold for storage warnings"
+    },
+    "throughput": {
+      "value": 100,
+      "unit": "mbps",
+      "description": "Minimum acceptable backup throughput in MB/s"
+    },
+    "jobSuccessRate": {
+      "value": 90,
+      "unit": "percent",
+      "description": "Minimum acceptable job success rate"
+    },
+    "storageWarningDays": {
+      "value": 30,
+      "unit": "days",
+      "description": "Days until full threshold for capacity warnings"
+    }
+  },
+  
+  "outputSettings": {
+    "description": "Report output configuration",
+    "outputPath": "./VeeamOptimizationOutput",
+    "formats": {
+      "html": true,
+      "csv": false,
+      "json": false
+    },
+    "retentionDays": 90,
+    "description_retention": "Number of days to keep old reports"
+  },
+  
+  "reportCustomization": {
+    "description": "Customize what appears in reports",
+    "includeSections": {
+      "proxies": true,
+      "repositories": true,
+      "jobs": true,
+      "storageGrowth": true,
+      "recommendations": true
+    },
+    "severityLevels": ["Critical", "High", "Warning", "Info"],
+    "topRecommendationsCount": 5
+  },
+  
+  "automationSettings": {
+    "description": "Settings for automated execution and notifications",
+    "enabled": false,
+    "schedule": {
+      "frequency": "Weekly",
+      "dayOfWeek": "Monday",
+      "time": "06:00"
+    },
+    "emailNotification": {
+      "enabled": false,
+      "smtpServer": "smtp.company.com",
+      "from": "veeam@company.com",
+      "to": ["admin@company.com"],
+      "onlyIfCritical": true,
+      "attachReport": true
+    }
+  },
+  
+  "advanced": {
+    "description": "Advanced configuration options",
+    "parallelProcessing": true,
+    "maxConcurrentQueries": 5,
+    "cacheResults": false,
+    "verboseLogging": false,
+    "customMetrics": {
+      "description": "Add custom metrics to track",
+      "enabled": false,
+      "metrics": []
+    }
+  },
+  
+  "presetProfiles": {
+    "description": "Pre-configured threshold profiles for different use cases",
+    "conservative": {
+      "description": "Early warning, lower thresholds",
+      "cpu": 70,
+      "memory": 75,
+      "storage": 75,
+      "throughput": 150
+    },
+    "standard": {
+      "description": "Balanced approach (default)",
+      "cpu": 80,
+      "memory": 85,
+      "storage": 80,
+      "throughput": 100
+    },
+    "aggressive": {
+      "description": "Only critical issues",
+      "cpu": 90,
+      "memory": 90,
+      "storage": 90,
+      "throughput": 50
+    }
+  },
+  
+  "exclusions": {
+    "description": "Resources to exclude from analysis",
+    "proxies": [],
+    "repositories": [],
+    "jobs": [],
+    "description_usage": "Add names of resources to exclude, e.g., ['Test-Proxy', 'Dev-Repository']"
+  },
+  
+  "customRecommendations": {
+    "description": "Define custom recommendation rules",
+    "enabled": false,
+    "rules": [
+      {
+        "name": "Example Rule",
+        "description": "Example of a custom recommendation rule",
+        "enabled": false,
+        "condition": "proxy.AvgSpeedMBps < 50",
+        "category": "Performance",
+        "severity": "Warning",
+        "recommendation": "Custom recommendation text here"
+      }
+    ]
+  }
+}

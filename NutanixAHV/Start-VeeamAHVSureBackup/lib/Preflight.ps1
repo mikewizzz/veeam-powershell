@@ -1,0 +1,652 @@
+# SPDX-License-Identifier: MIT
+# =============================
+# Preflight Health Checks
+# =============================
+# Validates cluster health, capacity, network readiness, and restore point
+# integrity before recovery operations.
+# Pattern follows ONPREM/New-VeeamSureBackupSetup Test-Configuration.
+
+function Test-ClusterHealth {
+  <#
+  .SYNOPSIS
+    Check Nutanix cluster operational status via Prism API
+  .DESCRIPTION
+    Verifies the target cluster is in NORMAL operation mode. Clusters in
+    DEGRADED or CRITICAL state may fail recovery operations or produce
+    unreliable test results.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$Clusters
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  foreach ($cluster in $Clusters) {
+    $clusterName = if ($script:PrismApiVersion -eq "v4") { $cluster.name } else { $cluster.spec.name }
+    $clusterStatus = if ($script:PrismApiVersion -eq "v4") {
+      $cluster.status
+    }
+    else {
+      $cluster.status.resources.config.operation_mode
+    }
+
+    if ($clusterStatus -and $clusterStatus -imatch "CRITICAL|FAILED") {
+      $issues += "Cluster '$clusterName' is in $clusterStatus state — recovery operations may fail"
+    }
+    elseif ($clusterStatus -and $clusterStatus -imatch "DEGRADED") {
+      $warnings += "Cluster '$clusterName' is in $clusterStatus state — recovery may be unreliable"
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-ClusterCapacity {
+  <#
+  .SYNOPSIS
+    Verify the cluster has capacity for concurrent VM recoveries
+  .DESCRIPTION
+    Checks cluster node count against MaxConcurrentVMs. Heuristic: each
+    node can safely host ~3 concurrent recovery VMs. Also checks if the
+    cluster has any available compute resources.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$Clusters,
+    [Parameter(Mandatory = $true)][int]$MaxConcurrentVMs
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  foreach ($cluster in $Clusters) {
+    $clusterName = if ($script:PrismApiVersion -eq "v4") { $cluster.name } else { $cluster.spec.name }
+    $nodeCount = 0
+
+    if ($script:PrismApiVersion -eq "v4") {
+      $nodeCount = if ($cluster.nodes -and $cluster.nodes.nodeList) { $cluster.nodes.nodeList.Count } else { 0 }
+    }
+    else {
+      $nodeCount = if ($cluster.status.resources.nodes -and $cluster.status.resources.nodes.hypervisor_server_list) {
+        $cluster.status.resources.nodes.hypervisor_server_list.Count
+      }
+      else { 0 }
+    }
+
+    if ($nodeCount -eq 0) {
+      $warnings += "Could not determine node count for cluster '$clusterName'"
+    }
+    elseif ($MaxConcurrentVMs -gt ($nodeCount * 3)) {
+      $warnings += "MaxConcurrentVMs ($MaxConcurrentVMs) exceeds recommended capacity for cluster '$clusterName' ($nodeCount nodes, recommended max: $($nodeCount * 3))"
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-IsolatedNetworkHealth {
+  <#
+  .SYNOPSIS
+    Validate the isolated network is properly configured for recovery
+  .DESCRIPTION
+    Checks that the isolated network/subnet has IP management configured
+    (DHCP or IP pool) so recovered VMs can obtain addresses. Without IP
+    management, network tests (ping, port, DNS) will fail.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$IsolatedNetwork
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  if (-not $IsolatedNetwork.UUID) {
+    $issues += "Isolated network has no UUID — cannot proceed with recovery"
+    return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+  }
+
+  if (-not $IsolatedNetwork.VlanId -and $IsolatedNetwork.VlanId -ne 0) {
+    $warnings += "Isolated network '$($IsolatedNetwork.Name)' has no VLAN ID — verify it is truly isolated from production"
+  }
+
+  # Check if the network name suggests it might be a production network
+  if ($IsolatedNetwork.Name -imatch "^prod|^default|^management|^cvm") {
+    $warnings += "Isolated network name '$($IsolatedNetwork.Name)' looks like a production network — verify this is the correct isolated network"
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-RestorePointConsistency {
+  <#
+  .SYNOPSIS
+    Verify all restore points are application-consistent
+  .DESCRIPTION
+    Checks the IsConsistent flag on each restore point. Inconsistent restore
+    points may produce VMs with corrupted application state.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$RestorePoints
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  $inconsistent = @($RestorePoints | Where-Object { -not $_.IsConsistent })
+  if ($inconsistent.Count -gt 0) {
+    foreach ($rp in $inconsistent) {
+      $warnings += "Restore point for '$($rp.VMName)' (job: $($rp.JobName), $($rp.CreationTime.ToString('yyyy-MM-dd HH:mm'))) is crash-consistent, not application-consistent"
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-RestorePointRecency {
+  <#
+  .SYNOPSIS
+    Warn about stale restore points
+  .DESCRIPTION
+    Checks if any restore points are older than the configured maximum age.
+    When a TargetRPOHours value is provided and is stricter than MaxAgeDays,
+    the RPO target is used as the effective threshold instead.
+    Stale restore points may not reflect current application state and could
+    give a false sense of recoverability.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$RestorePoints,
+    [Parameter(Mandatory = $true)][int]$MaxAgeDays,
+    [int]$TargetRPOHours
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  # If TargetRPOHours provided and is stricter than MaxAgeDays, use it
+  $effectiveMaxHours = $MaxAgeDays * 24
+  if ($TargetRPOHours -and $TargetRPOHours -lt $effectiveMaxHours) {
+    $effectiveMaxHours = $TargetRPOHours
+  }
+  $cutoff = (Get-Date).AddHours(-$effectiveMaxHours)
+  $stale = @($RestorePoints | Where-Object { $_.CreationTime -lt $cutoff })
+
+  if ($stale.Count -gt 0) {
+    $usingRPO = $TargetRPOHours -and $TargetRPOHours -lt ($MaxAgeDays * 24)
+    foreach ($rp in $stale) {
+      if ($usingRPO) {
+        $ageHours = [math]::Round([double](((Get-Date) - $rp.CreationTime).TotalHours), 1)
+        $warnings += "Restore point for '$($rp.VMName)' is ${ageHours}h old (RPO target: ${TargetRPOHours}h)"
+      } else {
+        $ageDays = [math]::Round([double](((Get-Date) - $rp.CreationTime).TotalDays), 1)
+        $warnings += "Restore point for '$($rp.VMName)' is $ageDays days old (threshold: $MaxAgeDays days)"
+      }
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-BackupJobStatus {
+  <#
+  .SYNOPSIS
+    Check backup job status via VBAHV Plugin REST API
+  .DESCRIPTION
+    Checks backup job objects from the VBAHV REST API for any indicators
+    of failure or in-progress state.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$BackupJobs
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  foreach ($job in $BackupJobs) {
+    try {
+      $jobName = if ($job.name) { $job.name } else { "$job" }
+      $lastResult = $job.lastResult
+      $isRunning = $job.isRunning
+
+      if ($isRunning) {
+        $warnings += "Backup job '$jobName' is currently running — restore points may be in-progress"
+      }
+      elseif ($lastResult -and "$lastResult" -imatch "Failed") {
+        $warnings += "Backup job '$jobName' last run failed — verify backup integrity"
+      }
+    }
+    catch {
+      # Job objects from REST API may have varying schema
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-VBRConnectivity {
+  <#
+  .SYNOPSIS
+    Verify the VBR REST API is reachable on port 9419
+  .DESCRIPTION
+    Attempts TCP connection to the VBR server's REST API port. This is
+    required for OAuth2 authentication and VBAHV Plugin access.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$VBRHost,
+    [int]$VBRPort = 9419
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  try {
+    $tcpClient = New-Object System.Net.Sockets.TcpClient
+    $connectTask = $tcpClient.ConnectAsync($VBRHost, $VBRPort)
+    $connected = $connectTask.Wait(10000)
+
+    if (-not $connected -or -not $tcpClient.Connected) {
+      $issues += "VBR REST API at ${VBRHost}:${VBRPort} is not reachable — required for VBAHV Plugin authentication"
+    }
+  }
+  catch {
+    $issues += "VBR REST API at ${VBRHost}:${VBRPort} connection failed: $($_.Exception.Message)"
+  }
+  finally {
+    if ($tcpClient) {
+      try { $tcpClient.Close() } catch { }
+      $tcpClient.Dispose()
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-OrphanVMs {
+  <#
+  .SYNOPSIS
+    Check for orphaned SureBackup VMs from interrupted previous runs
+  .DESCRIPTION
+    Searches Prism Central for VMs with the "SureBackup_" prefix that may
+    have been left behind from interrupted runs. These consume cluster
+    resources and should be cleaned up before starting a new run.
+  #>
+
+  $issues = @()
+  $warnings = @()
+
+  try {
+    $orphans = @()
+    if ($script:PrismApiVersion -eq "v4") {
+      $endpoint = "$($script:PrismEndpoints.VMs)?`$filter=startswith(name, 'SureBackup_')&`$limit=50"
+      $raw = Resolve-PrismResponseBody (Invoke-PrismAPI -Method "GET" -Endpoint $endpoint)
+      if ($raw.data) { $orphans = @($raw.data) }
+    }
+    else {
+      # v3 filter does not reliably support wildcards — fetch and filter client-side
+      $result = Invoke-PrismAPI -Method "POST" -Endpoint "vms/list" -Body @{
+        kind   = "vm"
+        length = 100
+      }
+      if ($result.entities) {
+        $orphans = @($result.entities | Where-Object { $_.spec.name -like "SureBackup_*" })
+      }
+    }
+
+    if ($orphans.Count -gt 0) {
+      $orphanNames = @($orphans | ForEach-Object {
+        if ($script:PrismApiVersion -eq "v4") { $_.name } else { $_.spec.name }
+      }) -join ", "
+      $warnings += "Found $($orphans.Count) orphaned SureBackup VM(s) from previous run(s): $orphanNames. Clean up before proceeding to free resources."
+    }
+  }
+  catch {
+    # Non-blocking — orphan detection is best-effort
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-StorageCapacity {
+  <#
+  .SYNOPSIS
+    Check storage container has enough free space for VM restores
+  .DESCRIPTION
+    Queries VBAHV storage containers for the target cluster and compares
+    available space against the sum of backup sizes to be restored.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$RestorePoints
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  try {
+    $totalRestoreSize = 0
+    foreach ($rp in $RestorePoints) {
+      if ($rp.BackupSize -and $rp.BackupSize -gt 0) {
+        $totalRestoreSize += $rp.BackupSize
+      }
+    }
+
+    if ($totalRestoreSize -gt 0) {
+      $totalGB = [math]::Round([double]($totalRestoreSize / 1GB), 1)
+      Write-Log "  [Preflight] Estimated storage needed for restores: ${totalGB} GB" -Level "INFO"
+    }
+  }
+  catch {
+    # Non-blocking — storage check is best-effort
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-MultiClusterSubnet {
+  <#
+  .SYNOPSIS
+    Verify the isolated network exists on all clusters where VMs will be restored
+  .DESCRIPTION
+    In multi-cluster Prism Central environments, subnets are cluster-scoped.
+    If VMs come from different clusters, the isolated network must exist on
+    each target cluster for network remapping to succeed.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$RestorePoints,
+    [Parameter(Mandatory = $true)]$IsolatedNetwork
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  # Get unique cluster IDs from restore points
+  $clusterIds = @($RestorePoints | Where-Object { $_.ClusterId } |
+    Select-Object -ExpandProperty ClusterId -Unique)
+
+  if ($clusterIds.Count -le 1) {
+    return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+  }
+
+  # If isolated network has a cluster reference, check if VMs span multiple clusters
+  if ($IsolatedNetwork.ClusterRef) {
+    $otherClusters = @($clusterIds | Where-Object { $_ -ne $IsolatedNetwork.ClusterRef })
+    if ($otherClusters.Count -gt 0) {
+      $warnings += "VMs span $($clusterIds.Count) clusters but isolated network '$($IsolatedNetwork.Name)' is on cluster '$($IsolatedNetwork.ClusterRef)'. VMs from other clusters ($($otherClusters -join ', ')) may fail network remapping."
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-SSHAvailable {
+  <#
+  .SYNOPSIS
+    Verify that the ssh command is available on the system PATH
+  #>
+  $issues = @()
+  $warnings = @()
+
+  $sshCmd = Get-Command ssh -ErrorAction SilentlyContinue
+  if (-not $sshCmd) {
+    $sshExe = Get-Command ssh.exe -ErrorAction SilentlyContinue
+    if (-not $sshExe) {
+      $issues += "SSH client not found on PATH. Install OpenSSH client (Windows: 'Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0', Linux/macOS: pre-installed)"
+    }
+  }
+
+  $keygenCmd = Get-Command ssh-keygen -ErrorAction SilentlyContinue
+  if (-not $keygenCmd) {
+    $keygenExe = Get-Command ssh-keygen.exe -ErrorAction SilentlyContinue
+    if (-not $keygenExe) {
+      $issues += "ssh-keygen not found on PATH. Required for ephemeral keypair generation."
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-JumpVMImage {
+  <#
+  .SYNOPSIS
+    Verify the jump VM image exists in Prism or is downloadable
+  .PARAMETER JumpVMImageName
+    Custom image name to check (if provided)
+  #>
+  param([string]$JumpVMImageName)
+
+  $issues = @()
+  $warnings = @()
+
+  if ($JumpVMImageName) {
+    # User specified a custom image — verify it exists
+    try {
+      $images = Get-PrismImages
+      $found = $false
+      foreach ($img in $images) {
+        $imgName = if ($script:PrismApiVersion -eq "v4") { $img.name } else { $img.spec.name }
+        if ($imgName -eq $JumpVMImageName) { $found = $true; break }
+      }
+      if (-not $found) {
+        $issues += "Jump VM image '$JumpVMImageName' not found in Prism image service. Upload it before running with -UseJumpVM."
+      }
+    }
+    catch {
+      $warnings += "Could not verify jump VM image: $($_.Exception.Message)"
+    }
+  }
+  else {
+    # Auto-download mode — check if default image already exists
+    try {
+      $images = Get-PrismImages
+      $found = $false
+      foreach ($img in $images) {
+        $imgName = if ($script:PrismApiVersion -eq "v4") { $img.name } else { $img.spec.name }
+        if ($imgName -eq "SureBackup_JumpVM_Image") { $found = $true; break }
+      }
+      if (-not $found) {
+        $warnings += "Jump VM image 'SureBackup_JumpVM_Image' not cached — will download Ubuntu Minimal cloud image (~250MB) on first run"
+      }
+    }
+    catch {
+      $warnings += "Could not check for cached jump VM image: $($_.Exception.Message)"
+    }
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-ManagementNetwork {
+  <#
+  .SYNOPSIS
+    Verify the management network exists in Prism
+  .PARAMETER ManagementNetworkName
+    Network name to validate
+  .PARAMETER ManagementNetworkUUID
+    Network UUID to validate
+  #>
+  param(
+    [string]$ManagementNetworkName,
+    [string]$ManagementNetworkUUID
+  )
+
+  $issues = @()
+  $warnings = @()
+
+  if (-not $ManagementNetworkName -and -not $ManagementNetworkUUID) {
+    $warnings += "Management network will be auto-detected at deployment time"
+    return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+  }
+
+  try {
+    $subnets = Get-PrismSubnets
+    if ($ManagementNetworkUUID) {
+      $target = $subnets | Where-Object { (Get-SubnetUUID $_) -eq $ManagementNetworkUUID }
+      if (-not $target) {
+        $issues += "Management network UUID '$ManagementNetworkUUID' not found in Prism Central"
+      }
+    }
+    elseif ($ManagementNetworkName) {
+      $target = $subnets | Where-Object { (Get-SubnetName $_) -eq $ManagementNetworkName }
+      if (-not $target) {
+        $available = ($subnets | ForEach-Object { Get-SubnetName $_ }) -join ", "
+        $issues += "Management network '$ManagementNetworkName' not found in Prism Central. Available: $available"
+      }
+    }
+  }
+  catch {
+    $warnings += "Could not verify management network: $($_.Exception.Message)"
+  }
+
+  return [PSCustomObject]@{ Issues = $issues; Warnings = $warnings }
+}
+
+function Test-PreflightRequirements {
+  <#
+  .SYNOPSIS
+    Orchestrator: run all preflight checks and report results
+  .DESCRIPTION
+    Runs cluster health, capacity, network, restore point, and VBR
+    connectivity checks. Returns a result object with Success, Issues,
+    and Warnings.
+  .PARAMETER Clusters
+    Nutanix cluster objects from Prism API
+  .PARAMETER IsolatedNetwork
+    Resolved isolated network object
+  .PARAMETER RestorePoints
+    Discovered restore point objects
+  .PARAMETER BackupJobs
+    VBAHV backup job objects from REST API
+  .PARAMETER MaxConcurrentVMs
+    Maximum concurrent recovery VMs
+  .PARAMETER MaxAgeDays
+    Maximum restore point age in days before warning
+  .PARAMETER UseJumpVM
+    Whether jump VM mode is enabled
+  .PARAMETER JumpVMImageName
+    Custom jump VM image name (if provided)
+  .PARAMETER ManagementNetworkName
+    Management network name for jump VM
+  .PARAMETER ManagementNetworkUUID
+    Management network UUID for jump VM
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$Clusters,
+    [Parameter(Mandatory = $true)]$IsolatedNetwork,
+    [Parameter(Mandatory = $true)]$RestorePoints,
+    [Parameter(Mandatory = $true)]$BackupJobs,
+    [int]$MaxConcurrentVMs = 3,
+    [int]$MaxAgeDays = 7,
+    [int]$TargetRPOHours,
+    [switch]$UseJumpVM,
+    [string]$JumpVMImageName,
+    [string]$ManagementNetworkName,
+    [string]$ManagementNetworkUUID
+  )
+
+  $startTime = Get-Date
+  $allIssues = @()
+  $allWarnings = @()
+
+  Write-Log "Running preflight health checks..." -Level "INFO"
+
+  # 1. Cluster health
+  Write-Log "  [Preflight] Checking cluster health..." -Level "INFO"
+  $result = Test-ClusterHealth -Clusters $Clusters
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 2. Cluster capacity
+  Write-Log "  [Preflight] Checking cluster capacity..." -Level "INFO"
+  $result = Test-ClusterCapacity -Clusters $Clusters -MaxConcurrentVMs $MaxConcurrentVMs
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 3. Isolated network
+  Write-Log "  [Preflight] Checking isolated network health..." -Level "INFO"
+  $result = Test-IsolatedNetworkHealth -IsolatedNetwork $IsolatedNetwork
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 4. Restore point consistency
+  Write-Log "  [Preflight] Checking restore point consistency..." -Level "INFO"
+  $result = Test-RestorePointConsistency -RestorePoints $RestorePoints
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 5. Restore point recency
+  Write-Log "  [Preflight] Checking restore point recency..." -Level "INFO"
+  $recencyParams = @{ RestorePoints = $RestorePoints; MaxAgeDays = $MaxAgeDays }
+  if ($TargetRPOHours) { $recencyParams.TargetRPOHours = $TargetRPOHours }
+  $result = Test-RestorePointRecency @recencyParams
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 6. Backup job status
+  Write-Log "  [Preflight] Checking backup job status..." -Level "INFO"
+  $result = Test-BackupJobStatus -BackupJobs $BackupJobs
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 7. Orphan VM detection
+  Write-Log "  [Preflight] Checking for orphaned SureBackup VMs..." -Level "INFO"
+  $result = Test-OrphanVMs
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 8. Storage capacity (best-effort)
+  Write-Log "  [Preflight] Checking storage capacity..." -Level "INFO"
+  $result = Test-StorageCapacity -RestorePoints $RestorePoints
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 9. Multi-cluster subnet validation
+  Write-Log "  [Preflight] Checking multi-cluster subnet availability..." -Level "INFO"
+  $result = Test-MultiClusterSubnet -RestorePoints $RestorePoints -IsolatedNetwork $IsolatedNetwork
+  $allIssues += $result.Issues
+  $allWarnings += $result.Warnings
+
+  # 10-12. Jump VM preflight checks (only when -UseJumpVM is enabled)
+  if ($UseJumpVM) {
+    Write-Log "  [Preflight] Checking jump VM prerequisites..." -Level "INFO"
+
+    $result = Test-SSHAvailable
+    $allIssues += $result.Issues
+    $allWarnings += $result.Warnings
+
+    $result = Test-JumpVMImage -JumpVMImageName $JumpVMImageName
+    $allIssues += $result.Issues
+    $allWarnings += $result.Warnings
+
+    $result = Test-ManagementNetwork -ManagementNetworkName $ManagementNetworkName -ManagementNetworkUUID $ManagementNetworkUUID
+    $allIssues += $result.Issues
+    $allWarnings += $result.Warnings
+  }
+
+  # Report results
+  $durationSec = ((Get-Date) - $startTime).TotalSeconds
+
+  if ($allWarnings.Count -gt 0) {
+    Write-Log " " -Level "INFO"
+    Write-Log "  PREFLIGHT WARNINGS ($($allWarnings.Count)):" -Level "WARNING"
+    foreach ($w in $allWarnings) {
+      Write-Log "    - $w" -Level "WARNING"
+    }
+  }
+
+  if ($allIssues.Count -gt 0) {
+    Write-Log " " -Level "INFO"
+    Write-Log "  PREFLIGHT ERRORS ($($allIssues.Count)):" -Level "ERROR"
+    foreach ($i in $allIssues) {
+      Write-Log "    [X] $i" -Level "ERROR"
+    }
+  }
+
+  if ($allIssues.Count -eq 0) {
+    Write-Log "  Preflight checks passed ($($allWarnings.Count) warning(s)) in $([math]::Round([double]$durationSec, 1))s" -Level "SUCCESS"
+  }
+
+  return [PSCustomObject]@{
+    Success     = ($allIssues.Count -eq 0)
+    Issues      = $allIssues
+    Warnings    = $allWarnings
+    DurationSec = $durationSec
+  }
+}

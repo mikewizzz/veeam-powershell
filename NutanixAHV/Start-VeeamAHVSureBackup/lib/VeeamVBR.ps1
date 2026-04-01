@@ -1,0 +1,1126 @@
+# SPDX-License-Identifier: MIT
+# ============================================================================
+# Veeam Plug-in for Nutanix AHV REST API v9
+# ============================================================================
+# API Reference: https://helpcenter.veeam.com/references/vbahv/9/rest/
+# ============================================================================
+
+# Veeam Plug-in for Nutanix AHV extension GUID (constant across installations)
+$script:VBAHV_EXTENSION_GUID = "799a5a3e-ae1e-4eaf-86eb-8a9acc2670e2"
+
+function Initialize-VBAHVPluginConnection {
+  <#
+  .SYNOPSIS
+    Authenticate to the Veeam Plug-in for Nutanix AHV REST API via OAuth2
+  .DESCRIPTION
+    The plugin REST API runs as a VBR server extension. Authentication uses
+    the VBR server's OAuth2 token endpoint. Only the v9 REST API is supported.
+
+    Ref: https://helpcenter.veeam.com/references/vbahv/9/rest/tag/SectionOverview
+  #>
+  $vbrHost = $VBRServer
+  $vbrApiPort = 9419  # VBR REST API default port
+
+  Write-Log "Authenticating to Veeam AHV Plugin REST API on VBR: ${vbrHost}:${vbrApiPort}" -Level "INFO"
+
+  $tokenUrl = "https://${vbrHost}:${vbrApiPort}/api/oauth2/token"
+
+  # Use VBR credentials if provided, otherwise try current session
+  $tokenBody = @{ grant_type = "password" }
+  if ($VBRCredential) {
+    $networkCred = $VBRCredential.GetNetworkCredential()
+    $tokenBody.username = $VBRCredential.UserName
+    $tokenBody.password = $networkCred.Password
+    Remove-Variable -Name networkCred -ErrorAction SilentlyContinue
+  }
+  else {
+    throw "VBR credentials required for REST API authentication. Provide -VBRCredential parameter."
+  }
+
+  $tokenParams = @{
+    Method      = "POST"
+    Uri         = $tokenUrl
+    Headers     = @{ "x-api-version" = "1.3-rev1" }
+    Body        = $tokenBody
+    ContentType = "application/x-www-form-urlencoded"
+    TimeoutSec  = 30
+    ErrorAction = "Stop"
+  }
+
+  if ($SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 7) {
+    $tokenParams.SkipCertificateCheck = $true
+  }
+
+  try {
+    $tokenResponse = Invoke-RestMethod @tokenParams
+    $apiVersion = if ($VBAHVApiVersion) { $VBAHVApiVersion } else { "v9" }
+    # Extension API is served on port 443 (default HTTPS), not the VBR API port
+    $script:VBAHVBaseUrl = "https://${vbrHost}/extension/$($script:VBAHV_EXTENSION_GUID)/api/$apiVersion"
+    $script:VBAHVHeaders = @{
+      "Authorization" = "Bearer $($tokenResponse.access_token)"
+      "Content-Type"  = "application/json"
+      "Accept"        = "application/json"
+    }
+
+    # Store refresh token and expiry for proactive token renewal during long runs
+    $script:VBAHVTokenUrl = $tokenUrl
+    $script:VBAHVRefreshToken = $tokenResponse.refresh_token
+    $expiresIn = if ($tokenResponse.expires_in) { [int]$tokenResponse.expires_in } else { 900 }
+    $script:VBAHVTokenExpiry = (Get-Date).AddSeconds($expiresIn)
+
+    # VBR Core REST API shares port 9419 and the same OAuth2 token
+    $script:VBRCoreBaseUrl = "https://${vbrHost}:${vbrApiPort}/api/v1"
+
+    Write-Log "Veeam AHV Plugin REST API authenticated (API $apiVersion, token expires in ${expiresIn}s)" -Level "SUCCESS"
+
+    # Clear plaintext password from memory
+    $tokenBody.password = $null
+  }
+  catch {
+    throw "Veeam AHV Plugin authentication failed: $($_.Exception.Message). Verify VBR credentials and that the AHV plugin v9 is installed."
+  }
+}
+
+function Refresh-VBAHVToken {
+  <#
+  .SYNOPSIS
+    Refresh the OAuth2 bearer token using the stored refresh token
+  .DESCRIPTION
+    VBR OAuth2 tokens expire in 30-60 minutes. Long SureBackup runs (many VMs)
+    can exceed this window. This function uses the refresh_token grant to obtain
+    a new access token without re-authenticating with credentials.
+  #>
+  if (-not $script:VBAHVRefreshToken -or -not $script:VBAHVTokenUrl) {
+    Write-Log "No refresh token available — re-authenticating with credentials" -Level "WARNING"
+    Initialize-VBAHVPluginConnection
+    return
+  }
+
+  $refreshBody = @{
+    grant_type    = "refresh_token"
+    refresh_token = $script:VBAHVRefreshToken
+  }
+
+  $refreshParams = @{
+    Method      = "POST"
+    Uri         = $script:VBAHVTokenUrl
+    Headers     = @{ "x-api-version" = "1.3-rev1" }
+    Body        = $refreshBody
+    ContentType = "application/x-www-form-urlencoded"
+    TimeoutSec  = 30
+    ErrorAction = "Stop"
+  }
+
+  if ($SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 7) {
+    $refreshParams.SkipCertificateCheck = $true
+  }
+
+  try {
+    $tokenResponse = Invoke-RestMethod @refreshParams
+    $script:VBAHVHeaders["Authorization"] = "Bearer $($tokenResponse.access_token)"
+
+    if ($tokenResponse.refresh_token) {
+      $script:VBAHVRefreshToken = $tokenResponse.refresh_token
+    }
+
+    $expiresIn = if ($tokenResponse.expires_in) { [int]$tokenResponse.expires_in } else { 900 }
+    $script:VBAHVTokenExpiry = (Get-Date).AddSeconds($expiresIn)
+
+    Write-Log "OAuth2 token refreshed (expires in ${expiresIn}s)" -Level "INFO"
+  }
+  catch {
+    Write-Log "Token refresh failed: $($_.Exception.Message) — re-authenticating" -Level "WARNING"
+    Initialize-VBAHVPluginConnection
+  }
+}
+
+# ============================================================================
+# VBR Core REST API (port 9419) — Restore Point Resolution
+# ============================================================================
+
+function Invoke-VBRCoreAPI {
+  <#
+  .SYNOPSIS
+    Execute a VBR Core REST API call (port 9419) with retry logic
+  .DESCRIPTION
+    Calls the VBR server's built-in REST API to resolve real backup restore
+    points. Uses the same OAuth2 token obtained for the VBAHV Plugin.
+  .PARAMETER Method
+    HTTP method (GET, POST)
+  .PARAMETER Endpoint
+    API endpoint path appended to the VBR Core base URL
+  .PARAMETER Body
+    Request body hashtable (serialized to JSON)
+  .PARAMETER RetryCount
+    Max retries on transient failure (default: 3)
+  .PARAMETER TimeoutSec
+    Per-request timeout (default: 30s)
+  #>
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("GET", "POST")][string]$Method,
+    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$Endpoint,
+    [hashtable]$Body,
+    [ValidateRange(0, 10)][int]$RetryCount = 3,
+    [ValidateRange(1, 600)][int]$TimeoutSec = 30
+  )
+
+  if ($script:VBAHVTokenExpiry -and (Get-Date) -gt $script:VBAHVTokenExpiry.AddMinutes(-5)) {
+    Refresh-VBAHVToken
+  }
+
+  $url = "$($script:VBRCoreBaseUrl)/$Endpoint"
+  $attempt = 0
+
+  while ($attempt -le $RetryCount) {
+    try {
+      $params = @{
+        Method     = $Method
+        Uri        = $url
+        Headers    = @{
+          "Authorization" = $script:VBAHVHeaders["Authorization"]
+          "x-api-version" = "1.3-rev1"
+          "Accept"        = "application/json"
+        }
+        TimeoutSec = $TimeoutSec
+      }
+
+      if ($Body) {
+        $params.Body = ($Body | ConvertTo-Json -Depth 20)
+        $params.Headers["Content-Type"] = "application/json"
+      }
+
+      if ($SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 7) {
+        $params.SkipCertificateCheck = $true
+      }
+
+      return Invoke-RestMethod @params -ErrorAction Stop
+    }
+    catch {
+      $statusCode = $null
+      if ($_.Exception.Response) {
+        $statusCode = [int]$_.Exception.Response.StatusCode
+      }
+
+      if ($statusCode -and $statusCode -ge 400 -and $statusCode -lt 500 -and $statusCode -ne 429) {
+        throw
+      }
+
+      $attempt++
+      if ($attempt -gt $RetryCount) { throw }
+
+      $waitSec = [math]::Min([int]([math]::Pow(2, $attempt)), 30)
+      Start-Sleep -Seconds $waitSec
+    }
+  }
+}
+
+function Get-VBRObjectRestorePoints {
+  <#
+  .SYNOPSIS
+    Look up real restore points for a VM via VBR Core REST API
+  .DESCRIPTION
+    Two-step lookup via VBR Core REST API:
+    1. GET /api/v1/backupObjects?nameFilter={name} — find the backup object
+    2. GET /api/v1/backupObjects/{id}/restorePoints — get latest restore point
+    Returns real RestorePointId, CreationTime, and metadata from the VBR database.
+  .PARAMETER VMName
+    VM name to search for in backup restore points
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$VMName
+  )
+
+  try {
+    # Two-step lookup: find backup object by name, then get its restore points
+    # Step 1: GET /api/v1/backupObjects?nameFilter={name}
+    $encodedName = [System.Uri]::EscapeDataString($VMName)
+    $objectResult = Invoke-VBRCoreAPI -Method "GET" -Endpoint "backupObjects?nameFilter=$encodedName"
+
+    $objects = $objectResult.data
+    if ($null -eq $objectResult.data) { $objects = $objectResult }
+
+    if (-not $objects -or @($objects).Count -eq 0) { return $null }
+
+    # Find exact name match among backup objects
+    $backupObj = @($objects) | Where-Object { $_.name -eq $VMName } | Select-Object -First 1
+    if (-not $backupObj) { $backupObj = @($objects)[0] }
+
+    $objectId = $backupObj.id
+    if (-not $objectId) { return $null }
+
+    # Step 2: GET /api/v1/backupObjects/{id}/restorePoints?orderAsc=false&limit=1
+    $rpResult = Invoke-VBRCoreAPI -Method "GET" -Endpoint "backupObjects/$objectId/restorePoints?orderAsc=false&limit=1"
+
+    $points = $rpResult.data
+    if ($null -eq $rpResult.data) { $points = $rpResult }
+
+    if ($points -and @($points).Count -gt 0) {
+      $match = @($points)[0]
+
+      # Parse creation time with culture-invariant format (VBR returns ISO 8601)
+      $parsedTime = Get-Date
+      if ($match.creationTime) {
+        try { $parsedTime = [datetime]::Parse("$($match.creationTime)", [System.Globalization.CultureInfo]::InvariantCulture) }
+        catch { }
+      }
+
+      return [PSCustomObject]@{
+        Id           = $match.id
+        Name         = if ($match.name) { $match.name } else { $VMName }
+        CreationTime = $parsedTime
+        BackupId     = $match.backupId
+        BackupName   = if ($match.backupName) { $match.backupName } else { $null }
+        PlatformName = if ($match.platformName) { $match.platformName } else { $null }
+      }
+    }
+  }
+  catch {
+    Write-Log "  VBR Core API restore point lookup failed for '$VMName': $($_.Exception.Message)" -Level "WARNING"
+  }
+
+  return $null
+}
+
+# ============================================================================
+# VBAHV Plugin REST API — API Calls
+# ============================================================================
+
+function Invoke-VBAHVPluginAPI {
+  <#
+  .SYNOPSIS
+    Execute a REST API call to the Veeam Plug-in for Nutanix AHV with retry logic
+  .DESCRIPTION
+    Calls the plugin REST API via the VBR extension endpoint. Includes
+    exponential backoff retry for transient failures.
+  .PARAMETER Method
+    HTTP method (GET, POST, PUT, DELETE)
+  .PARAMETER Endpoint
+    API endpoint path appended to the plugin base URL
+  .PARAMETER Body
+    Request body hashtable (serialized to JSON)
+  .PARAMETER RetryCount
+    Max retries on transient failure (default: 3)
+  .PARAMETER TimeoutSec
+    Per-request timeout (default: 60s)
+  #>
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("GET", "POST", "PUT", "DELETE")][string]$Method,
+    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$Endpoint,
+    [hashtable]$Body,
+    [ValidateRange(0, 10)][int]$RetryCount = 3,
+    [ValidateRange(1, 600)][int]$TimeoutSec = 60
+  )
+
+  # Proactively refresh token if within 5 minutes of expiry
+  if ($script:VBAHVTokenExpiry -and (Get-Date) -gt $script:VBAHVTokenExpiry.AddMinutes(-5)) {
+    Refresh-VBAHVToken
+  }
+
+  $url = "$($script:VBAHVBaseUrl)/$Endpoint"
+  $attempt = 0
+  $refreshedFor401 = $false
+
+  while ($attempt -le $RetryCount) {
+    try {
+      $params = @{
+        Method     = $Method
+        Uri        = $url
+        Headers    = $script:VBAHVHeaders
+        TimeoutSec = $TimeoutSec
+      }
+
+      if ($Body) {
+        $params.Body = ($Body | ConvertTo-Json -Depth 20)
+      }
+
+      if ($SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 7) {
+        $params.SkipCertificateCheck = $true
+      }
+
+      return Invoke-RestMethod @params -ErrorAction Stop
+    }
+    catch {
+      $statusCode = $null
+      if ($_.Exception.Response) {
+        $statusCode = [int]$_.Exception.Response.StatusCode
+      }
+
+      # SSL/TLS errors are not transient — fail immediately with guidance
+      if ($_.Exception.Message -match 'SSL|TLS|certificate' -or
+          ($_.Exception.InnerException -and $_.Exception.InnerException.Message -match 'SSL|TLS|certificate')) {
+        Write-Log "VBAHV Plugin API SSL/TLS error: $($_.Exception.Message)" -Level "ERROR"
+        Write-Log "Pass -SkipCertificateCheck to bypass certificate validation for self-signed certs" -Level "ERROR"
+        throw
+      }
+
+      # 401 Unauthorized — token likely expired, refresh and retry once only
+      if ($statusCode -eq 401 -and -not $refreshedFor401) {
+        $refreshedFor401 = $true
+        Write-Log "VBAHV Plugin API returned 401 — refreshing OAuth2 token" -Level "WARNING"
+        Refresh-VBAHVToken
+        $attempt++
+        continue
+      }
+
+      # Non-retryable client errors (except 429 Too Many Requests)
+      if ($statusCode -and $statusCode -ge 400 -and $statusCode -lt 500 -and $statusCode -ne 429) {
+        Write-Log "VBAHV Plugin API error ($statusCode): $Method $Endpoint - $($_.Exception.Message)" -Level "ERROR"
+        throw
+      }
+
+      $attempt++
+      if ($attempt -gt $RetryCount) {
+        Write-Log "VBAHV Plugin API failed after $RetryCount retries: $Method $Endpoint - $($_.Exception.Message)" -Level "ERROR"
+        throw
+      }
+
+      $waitSec = [math]::Min([int]([math]::Pow(2, $attempt)), 30)
+      Write-Log "VBAHV Plugin API transient failure (attempt $attempt/$RetryCount), retrying in ${waitSec}s" -Level "WARNING"
+      Start-Sleep -Seconds $waitSec
+    }
+  }
+}
+
+# ============================================================================
+# VBAHV Plugin REST API — Prism Central & VM Discovery
+# ============================================================================
+
+function Get-VBAHVPrismCentrals {
+  <#
+  .SYNOPSIS
+    List Prism Centrals registered in the VBAHV Plugin
+  .DESCRIPTION
+    GET /prismCentrals — retrieves all Prism Centrals to which the AHV plugin has access.
+    Each Prism Central has an ID used to discover VMs via /prismCentrals/{id}/vms.
+  #>
+  Write-Log "Discovering Prism Centrals via VBAHV Plugin REST API..." -Level "INFO"
+  $result = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "prismCentrals"
+
+  if (-not $result -or @($result).Count -eq 0) {
+    throw "No Prism Centrals found in VBAHV Plugin. Ensure at least one Prism Central is registered."
+  }
+
+  $count = @($result).Count
+  Write-Log "Found $count Prism Central(s) in VBAHV Plugin" -Level "SUCCESS"
+  return $result
+}
+
+function Get-VBAHVPrismCentralVMs {
+  <#
+  .SYNOPSIS
+    List VMs from a Prism Central via the VBAHV Plugin with pagination
+  .DESCRIPTION
+    GET /prismCentrals/{id}/vms — retrieves all VMs known to the plugin from the
+    specified Prism Central. Supports pagination (offset/limit) and optional name filter.
+
+    Each VirtualMachine object has: id, name, clusterId, clusterName, disks,
+    networkAdapters, vmSize, protectionDomain, consistencyGroup, guestOsVersion.
+  .PARAMETER PrismCentralId
+    ID of the Prism Central (from Get-VBAHVPrismCentrals)
+  .PARAMETER VMNames
+    Optional filter: only return VMs matching these names
+  .PARAMETER PageSize
+    Number of VMs per page (default: 100)
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$PrismCentralId,
+    [string[]]$VMNames,
+    [ValidateRange(1, 500)][int]$PageSize = 100
+  )
+
+  $allVMs = New-Object System.Collections.Generic.List[object]
+  $offset = 0
+
+  do {
+    $endpoint = "prismCentrals/$PrismCentralId/vms?limit=$PageSize&offset=$offset"
+    $page = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint $endpoint
+
+    # PageOfVirtualMachine response: { results, totalCount, offset, limit }
+    $results = $page.results
+    if (-not $results -or @($results).Count -eq 0) { break }
+
+    foreach ($vm in $results) {
+      $allVMs.Add($vm)
+    }
+
+    $offset += @($results).Count
+    $totalCount = $offset
+    if ($null -ne $page.totalCount) {
+      $parsed = 0
+      if ([int]::TryParse("$($page.totalCount)", [ref]$parsed)) {
+        $totalCount = $parsed
+      }
+    }
+  } while ($offset -lt $totalCount)
+
+  # Apply VM name filter if specified
+  if ($VMNames -and $VMNames.Count -gt 0) {
+    $filtered = @($allVMs | Where-Object { $_.name -in $VMNames })
+
+    foreach ($vmName in $VMNames) {
+      if ($vmName -notin @($filtered | ForEach-Object { $_.name })) {
+        Write-Log "VM '$vmName' not found in Prism Central $PrismCentralId" -Level "WARNING"
+      }
+    }
+
+    return ,$filtered
+  }
+
+  return ,$allVMs.ToArray()
+}
+
+# ============================================================================
+# VBAHV Plugin REST API — Job Discovery
+# ============================================================================
+
+function Get-VBAHVJobs {
+  <#
+  .SYNOPSIS
+    List backup jobs from the VBAHV Plugin REST API
+  .DESCRIPTION
+    GET /jobs — retrieves all backup jobs managed by the AHV plugin.
+  .PARAMETER JobNames
+    Optional filter: only return jobs matching these names
+  #>
+  param(
+    [string[]]$JobNames
+  )
+
+  Write-Log "Discovering AHV backup jobs via VBAHV Plugin REST API..." -Level "INFO"
+  $response = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "jobs"
+  # GET /jobs returns PageOfJob { results[] }
+  $allJobs = @($response.results)
+
+  if ($JobNames -and $JobNames.Count -gt 0) {
+    $filtered = @($allJobs | Where-Object { $_.name -in $JobNames })
+
+    # Warn about jobs not found
+    foreach ($jobName in $JobNames) {
+      if ($jobName -notin $filtered.name) {
+        Write-Log "Backup job '$jobName' not found in VBAHV Plugin" -Level "WARNING"
+      }
+    }
+
+    $allJobs = $filtered
+  }
+
+  if (-not $allJobs -or @($allJobs).Count -eq 0) {
+    throw "No Nutanix AHV backup jobs found. Ensure AHV backup jobs exist and the VBAHV Plugin is configured."
+  }
+
+  $jobCount = @($allJobs).Count
+  $jobNames = @($allJobs | ForEach-Object { $_.name }) -join ", "
+  Write-Log "Found $jobCount AHV backup job(s): $jobNames" -Level "SUCCESS"
+  return $allJobs
+}
+
+function Get-VBAHVProtectedVMs {
+  <#
+  .SYNOPSIS
+    Discover protected VMs across all Prism Centrals via VBAHV Plugin REST API
+  .DESCRIPTION
+    The v9 API has no flat GET /restorePoints endpoint. VM discovery goes through:
+    1. GET /prismCentrals — list all registered Prism Centrals
+    2. GET /prismCentrals/{id}/vms — paginated VM list per Prism Central
+
+    Each VirtualMachine object includes id, name, clusterId, clusterName, disks,
+    networkAdapters. The VM id is the Nutanix environment UUID. For restore operations,
+    the restorePointId required by POST /restorePoints/restore comes from the VBR core
+    REST API (GET /api/v1/backupObjects/{id}/restorePoints), not from this endpoint.
+
+    NOTE: The VM id from this endpoint may work directly as restorePointId for
+    /restorePoints/{id}/metadata — verify against real infrastructure.
+  .PARAMETER VMNames
+    Optional filter: only return VMs matching these names
+  #>
+  param(
+    [string[]]$VMNames
+  )
+
+  Write-Log "Discovering protected VMs via VBAHV Plugin (prismCentrals -> VMs)..." -Level "INFO"
+
+  $prismCentrals = Get-VBAHVPrismCentrals
+  $allVMs = New-Object System.Collections.Generic.List[object]
+
+  foreach ($pc in @($prismCentrals)) {
+    # PrismCentral objects may expose id directly or via settings
+    $pcId = $pc.id
+    if (-not $pcId) {
+      # Some API versions nest the ID differently
+      $pcId = $pc.settings.id
+    }
+    if (-not $pcId) {
+      Write-Log "  Skipping Prism Central with no ID (address: $($pc.settings.address))" -Level "WARNING"
+      continue
+    }
+
+    $pcAddress = if ($pc.settings.address) { $pc.settings.address } else { $pcId }
+    Write-Log "  Querying Prism Central: $pcAddress ($pcId)" -Level "INFO"
+
+    try {
+      $vms = Get-VBAHVPrismCentralVMs -PrismCentralId $pcId -VMNames $VMNames
+      if ($vms -and @($vms).Count -gt 0) {
+        foreach ($vm in @($vms)) {
+          $allVMs.Add($vm)
+        }
+        Write-Log "    Found $(@($vms).Count) VM(s) from $pcAddress" -Level "INFO"
+      }
+      else {
+        Write-Log "    No VMs found in $pcAddress$(if ($VMNames) { " matching filter" })" -Level "WARNING"
+      }
+    }
+    catch {
+      Write-Log "    Failed to query VMs from $pcAddress`: $($_.Exception.Message)" -Level "WARNING"
+    }
+  }
+
+  $totalCount = $allVMs.Count
+  if ($totalCount -eq 0) {
+    Write-Log "No protected VMs found across any Prism Central" -Level "WARNING"
+    return @()
+  }
+
+  Write-Log "Discovered $totalCount protected VM(s) across $(@($prismCentrals).Count) Prism Central(s)" -Level "SUCCESS"
+  return ,$allVMs.ToArray()
+}
+
+function Get-VBAHVRestorePointMetadata {
+  <#
+  .SYNOPSIS
+    Get VM metadata from a restore point (NICs, disks, cluster info)
+  .DESCRIPTION
+    GET /restorePoints/{id}/metadata — retrieves the original VM's full
+    metadata from the backup. Includes network adapters, disks, cluster info.
+  .PARAMETER RestorePointId
+    The restore point ID from the plugin
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$RestorePointId
+  )
+
+  return Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "restorePoints/$RestorePointId/metadata"
+}
+
+# ============================================================================
+# VBAHV Plugin REST API — Cluster & Infrastructure Discovery
+# ============================================================================
+
+function Get-VBAHVClusters {
+  <#
+  .SYNOPSIS
+    List clusters from the VBAHV Plugin REST API
+  .DESCRIPTION
+    GET /clusters — retrieves all Nutanix clusters registered with the plugin.
+    Used for resolving targetVmClusterId for restore operations.
+  #>
+  return Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "clusters"
+}
+
+function Get-VBAHVStorageContainers {
+  <#
+  .SYNOPSIS
+    List storage containers for a cluster
+  .DESCRIPTION
+    GET /clusters/{id}/storageContainers — retrieves storage containers
+    available on the specified cluster. Used for resolving storageContainerId.
+  .PARAMETER ClusterId
+    The cluster ID from the plugin
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$ClusterId
+  )
+
+  # GET /clusters/{id}/storageContainers returns PageOfStorageContainer { results[] }
+  $response = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "clusters/$ClusterId/storageContainers"
+  $containers = @($response.results)
+  return $containers
+}
+
+function Get-VBAHVNetworks {
+  <#
+  .SYNOPSIS
+    List networks for a cluster via VBAHV Plugin API
+  .DESCRIPTION
+    GET /clusters/{id}/networks — retrieves networks available on the
+    specified cluster. Used for resolving networkId in restore operations.
+  .PARAMETER ClusterId
+    The cluster ID from the plugin
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$ClusterId
+  )
+
+  $response = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "clusters/$ClusterId/networks"
+  $networks = @($response)
+  return $networks
+}
+
+# ============================================================================
+# Full VM Restore via VBAHV Plugin REST API v9
+# ============================================================================
+
+function Start-AHVFullRestore {
+  <#
+  .SYNOPSIS
+    Full VM restore via Veeam AHV Plugin REST API with network selection
+  .DESCRIPTION
+    Performs a full VM restore using POST /restorePoints/restore on the
+    Veeam Plug-in for Nutanix AHV REST API (v9). This approach places the
+    VM directly on the isolated network during restore — zero production
+    network exposure.
+
+    The VM is created as an independent VM (not a vPower NFS mount). Cleanup
+    is performed by powering off and deleting via Nutanix Prism API.
+
+    Workflow:
+    1. Find matching restore point in plugin (from pre-discovered list)
+    2. GET /restorePoints/{id}/metadata — get source NIC/disk/cluster info
+    3. Resolve cluster ID and storage container ID
+    4. POST /restorePoints/restore — submit restore with networkAdapters
+       mapping each NIC to the isolated network
+    5. GET /sessions/{id} — poll async task until completion
+    6. Find restored VM in Prism, power on
+
+    API Reference: https://helpcenter.veeam.com/references/vbahv/9/rest/tag/RestorePoints
+  .PARAMETER RestorePointInfo
+    Restore point info object with VMName, RestorePointId, CreationTime
+  .PARAMETER IsolatedNetwork
+    Resolved isolated network object from Resolve-IsolatedNetwork
+  .PARAMETER RestoreToOriginal
+    Restore to original location (default: false for SureBackup)
+  .PARAMETER RestoreVmCategories
+    Restore VM categories/tags (default: false)
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$RestorePointInfo,
+    [Parameter(Mandatory = $true)]$IsolatedNetwork,
+    [switch]$RestoreToOriginal,
+    [switch]$RestoreVmCategories
+  )
+
+  $vmName = $RestorePointInfo.VMName
+  $uniqueId = [guid]::NewGuid().ToString().Substring(0, 8)
+  $recoveryName = "SureBackup_${vmName}_$(Get-Date -Format 'HHmmss')_${uniqueId}"
+
+  Write-Log "Starting Full VM Restore via VBAHV Plugin REST API: $vmName -> $recoveryName" -Level "INFO"
+
+  try {
+    # Step 1: Use the restore point ID from the pre-discovered VM/restore point info
+    # The RestorePointId comes from VM discovery via Get-VBAHVProtectedVMs (VM id from
+    # prismCentrals/{pcId}/vms) or from VBR core API backup object restore points.
+    $pluginRPId = $RestorePointInfo.RestorePointId
+    if (-not $pluginRPId) {
+      throw "No restore point ID available for '$vmName'. Ensure VM was discovered via Get-VBAHVProtectedVMs."
+    }
+    Write-Log "  Using restore point ID: $pluginRPId" -Level "INFO"
+
+    # Step 2: Get VM metadata (NICs, disks, cluster) via /metadata endpoint
+    Write-Log "  Retrieving restore point metadata..." -Level "INFO"
+    $metadata = Get-VBAHVRestorePointMetadata -RestorePointId $pluginRPId
+
+    # Dump raw metadata network adapters for field name verification
+    if ($metadata.networkAdapters) {
+      Write-Log "  Metadata networkAdapters (raw):" -Level "INFO"
+      foreach ($nic in @($metadata.networkAdapters)) {
+        $nicJson = $nic | ConvertTo-Json -Depth 5 -Compress
+        Write-Log "    $nicJson" -Level "INFO"
+      }
+    }
+
+    # Always resolve cluster through plugin's current cluster list
+    $targetClusterId = $null
+    $clusters = Get-VBAHVClusters
+
+    if ($TargetClusterName) {
+      # User-specified override takes priority
+      $targetCluster = $clusters | Where-Object { $_.name -imatch [regex]::Escape($TargetClusterName) } | Select-Object -First 1
+      if (-not $targetCluster) {
+        throw "Target cluster '$TargetClusterName' not found. Available: $(($clusters | ForEach-Object { $_.name }) -join ', ')"
+      }
+      $targetClusterId = $targetCluster.id
+    }
+    elseif ($metadata.clusterId) {
+      # Validate metadata cluster ID against current plugin clusters
+      $targetCluster = $clusters | Where-Object { $_.id -eq $metadata.clusterId } | Select-Object -First 1
+      if ($targetCluster) {
+        $targetClusterId = $targetCluster.id
+      }
+      elseif ($metadata.clusterName) {
+        # Stale ID — fall back to name match
+        $targetCluster = $clusters | Where-Object { $_.name -eq $metadata.clusterName } | Select-Object -First 1
+        if ($targetCluster) {
+          Write-Log "  Cluster ID '$($metadata.clusterId)' not found in plugin — resolved by name '$($metadata.clusterName)'" -Level "WARNING"
+          $targetClusterId = $targetCluster.id
+        }
+      }
+      # Last resort: single-cluster environment
+      if (-not $targetClusterId -and @($clusters).Count -eq 1) {
+        Write-Log "  Cluster ID '$($metadata.clusterId)' not found — using only available cluster '$($clusters[0].name)'" -Level "WARNING"
+        $targetClusterId = $clusters[0].id
+      }
+    }
+
+    if (-not $targetClusterId) {
+      throw "Cannot resolve target cluster. Metadata cluster '$($metadata.clusterName)' (ID: $($metadata.clusterId)) not found in plugin. Available clusters: $(($clusters | ForEach-Object { "$($_.name) ($($_.id))" }) -join ', '). Use -TargetClusterName to specify."
+    }
+
+    # Resolve storage container ID
+    $storageContainerId = $null
+    if ($TargetContainerName -and $targetClusterId) {
+      # User-specified container override
+      $containers = Get-VBAHVStorageContainers -ClusterId $targetClusterId
+      $targetContainer = $containers | Where-Object { $_.name -imatch [regex]::Escape($TargetContainerName) } | Select-Object -First 1
+      if ($targetContainer) {
+        $storageContainerId = $targetContainer.id
+        Write-Log "  Storage container (user-specified): $($targetContainer.name)" -Level "INFO"
+      }
+      else {
+        Write-Log "  Storage container '$TargetContainerName' not found on cluster — falling back to auto-detect" -Level "WARNING"
+      }
+    }
+
+    if (-not $storageContainerId -and -not $RestoreToOriginal -and $targetClusterId) {
+      # Auto-detect: try metadata disk container first, then query cluster
+      $metadataContainerId = $null
+      if ($metadata.disks) {
+        $diskWithContainer = @($metadata.disks | Where-Object { $_.storageContainerId }) | Select-Object -First 1
+        if ($diskWithContainer) {
+          $metadataContainerId = $diskWithContainer.storageContainerId
+          Write-Log "  Storage container (from backup metadata): $($diskWithContainer.storageContainerName)" -Level "INFO"
+        }
+      }
+
+      if ($metadataContainerId) {
+        $storageContainerId = $metadataContainerId
+      }
+      else {
+        # Fallback: first container on the target cluster
+        $containers = Get-VBAHVStorageContainers -ClusterId $targetClusterId
+        if (@($containers).Count -gt 0) {
+          $storageContainerId = $containers[0].id
+          Write-Log "  Storage container (cluster default): $($containers[0].name)" -Level "INFO"
+        }
+        else {
+          throw "No storage containers found on cluster '$targetClusterId'. Cannot restore VM disks."
+        }
+      }
+    }
+
+    # Step 3a: Resolve isolated network ID from VBAHV Plugin
+    $pluginNetworkId = $null
+    if ($targetClusterId -and $IsolatedNetwork) {
+      $pluginNetworks = Get-VBAHVNetworks -ClusterId $targetClusterId
+      Write-Log "  Plugin networks for cluster '$targetClusterId':" -Level "INFO"
+      foreach ($pn in $pluginNetworks) {
+        Write-Log "    - $($pn.name) (ID: $($pn.id))" -Level "INFO"
+      }
+
+      $matchedNetwork = $pluginNetworks | Where-Object { $_.name -eq $IsolatedNetwork.Name } | Select-Object -First 1
+      if ($matchedNetwork) {
+        $pluginNetworkId = $matchedNetwork.id
+        Write-Log "  --- Network Resolution Diagnostics ---" -Level "INFO"
+        Write-Log "  Prism network name   : $($IsolatedNetwork.Name)" -Level "INFO"
+        Write-Log "  Prism network UUID   : $($IsolatedNetwork.UUID)" -Level "INFO"
+        Write-Log "  Plugin network name  : $($matchedNetwork.name)" -Level "INFO"
+        Write-Log "  Plugin network ID    : $pluginNetworkId" -Level "INFO"
+        Write-Log "  IDs match            : $($pluginNetworkId -eq $IsolatedNetwork.UUID)" -Level "INFO"
+        Write-Log "  --- End Diagnostics ---" -Level "INFO"
+      }
+      else {
+        # Fallback: try matching by Prism UUID in case plugin uses same IDs
+        $matchedNetwork = $pluginNetworks | Where-Object { $_.id -eq $IsolatedNetwork.UUID } | Select-Object -First 1
+        if ($matchedNetwork) {
+          $pluginNetworkId = $matchedNetwork.id
+          Write-Log "  --- Network Resolution Diagnostics (UUID fallback) ---" -Level "INFO"
+          Write-Log "  Prism network name   : $($IsolatedNetwork.Name)" -Level "INFO"
+          Write-Log "  Prism network UUID   : $($IsolatedNetwork.UUID)" -Level "INFO"
+          Write-Log "  Plugin network name  : $($matchedNetwork.name)" -Level "INFO"
+          Write-Log "  Plugin network ID    : $pluginNetworkId" -Level "INFO"
+          Write-Log "  IDs match            : $($pluginNetworkId -eq $IsolatedNetwork.UUID)" -Level "INFO"
+          Write-Log "  --- End Diagnostics ---" -Level "INFO"
+        }
+        else {
+          $availableNames = ($pluginNetworks | ForEach-Object { "$($_.name) (ID: $($_.id))" }) -join ', '
+          Write-Log "  WARNING: Isolated network '$($IsolatedNetwork.Name)' not found in VBAHV plugin for cluster '$targetClusterId'. Available: $availableNames" -Level "WARNING"
+          Write-Log "  VM will be restored WITHOUT network adapters to avoid finalization failure" -Level "WARNING"
+        }
+      }
+    }
+
+    # Cross-validate: does this network exist on Prism Element (PE v2)?
+    # Veeam internally uses NutanixV2Client.CreateVmAsync which calls PE, not PC
+    if ($IsolatedNetwork) {
+      $peNetwork = Resolve-PENetworkUUID -NetworkName $IsolatedNetwork.Name -PrismCentralUUID $IsolatedNetwork.UUID
+      if ($peNetwork) {
+        Write-Log "  PE v2 network validated: $($peNetwork.Name) (UUID: $($peNetwork.UUID), matched by: $($peNetwork.MatchBy))" -Level "INFO"
+        if ($peNetwork.UUID -ne $pluginNetworkId) {
+          Write-Log "  WARNING: Plugin network ID '$pluginNetworkId' differs from PE UUID '$($peNetwork.UUID)'" -Level "WARNING"
+          Write-Log "  Veeam uses PE v2 API internally — this UUID mismatch may cause restore failure" -Level "WARNING"
+        }
+      }
+      else {
+        Write-Log "  CRITICAL: Isolated network '$($IsolatedNetwork.Name)' not found on Prism Element v2 API" -Level "ERROR"
+        Write-Log "  Veeam uses NutanixV2Client.CreateVmAsync internally — network must exist at PE level" -Level "ERROR"
+        Write-Log "  Create the isolated network directly on Prism Element, not just Prism Central" -Level "ERROR"
+      }
+    }
+
+    # Step 3b: Build networkAdapters array using metadata
+    # v9 schema: originalMacAddress + value { networkId, ipAddresses, macAddress }
+    $networkAdapterRemaps = @()
+    if ($pluginNetworkId) {
+      $sourceNICs = $metadata.networkAdapters
+      if ($sourceNICs -and @($sourceNICs).Count -gt 0) {
+        foreach ($nic in $sourceNICs) {
+          $remap = @{
+            originalMacAddress = if ($nic.macAddress) { $nic.macAddress } else { "" }
+            value              = @{
+              networkId   = $pluginNetworkId
+              ipAddresses = @()
+              macAddress  = $null
+            }
+          }
+          $networkAdapterRemaps += $remap
+          Write-Log "  NIC $($nic.macAddress): $($nic.networkName) -> $($IsolatedNetwork.Name)" -Level "INFO"
+        }
+      }
+      else {
+        Write-Log "  No source NICs in backup metadata — VM will be restored without network" -Level "WARNING"
+      }
+    }
+    else {
+      Write-Log "  Skipping NIC remap — no valid plugin network ID resolved" -Level "WARNING"
+    }
+
+    # Step 4: Build RestoreSettings body and POST /restorePoints/restore
+    # Required fields per v9 spec: restoreToOriginal, powerOnVmAfterRestore, restoreVmCategories
+    $restoreBody = @{
+      restorePointId        = $pluginRPId
+      targetVmName          = $recoveryName
+      restoreToOriginal     = [bool]$RestoreToOriginal
+      powerOnVmAfterRestore = $false
+      restoreVmCategories   = [bool]$RestoreVmCategories
+      reason                = "SureBackup automated verification - $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+    }
+
+    if ($targetClusterId) {
+      $restoreBody.targetVmClusterId = $targetClusterId
+    }
+
+    if ($storageContainerId) {
+      $restoreBody.storageContainerId = $storageContainerId
+    }
+
+    if ($networkAdapterRemaps.Count -gt 0) {
+      $restoreBody.networkAdapters = $networkAdapterRemaps
+    }
+
+    # Log serialized request body for spec compliance verification
+    $bodyJson = $restoreBody | ConvertTo-Json -Depth 20
+    Write-Log "  Restore request body:" -Level "INFO"
+    foreach ($line in ($bodyJson -split "`n")) {
+      Write-Log "    $line" -Level "INFO"
+    }
+
+    Write-Log "  Submitting full restore to VBAHV Plugin API..." -Level "INFO"
+    $restoreResult = Invoke-VBAHVPluginAPI -Method "POST" -Endpoint "restorePoints/restore" -Body $restoreBody -TimeoutSec 120
+
+    # Step 5: Poll async task via GET /sessions/{id}
+    # AsyncTask schema: { sessionId: string } — sessionId is the only documented field
+    $sessionId = $restoreResult.sessionId
+
+    if ($sessionId) {
+      Write-Log "  Restore session: $sessionId — polling for completion..." -Level "INFO"
+      $restoreTimeout = if ($RestoreTimeoutSec) { $RestoreTimeoutSec } else { 1800 }
+      $pollInterval = 15
+      $elapsed = 0
+
+      while ($elapsed -lt $restoreTimeout) {
+        Start-Sleep -Seconds $pollInterval
+        $elapsed += $pollInterval
+
+        try {
+          $sessionStatus = Invoke-VBAHVPluginAPI -Method "GET" -Endpoint "sessions/$sessionId"
+          $state = $sessionStatus.state
+
+          # SessionState enum: Unknown, Starting, Running, Finished, Cancelling, Cancelled
+          # SessionResult enum: Unknown, None, Success, Warning, Error
+          if ($state -eq "Finished") {
+            $result = $sessionStatus.result
+            if ($result -eq "Success" -or $result -eq "Warning") {
+              Write-Log "  Full restore completed in ${elapsed}s (result: $result)" -Level "SUCCESS"
+              break
+            }
+            else {
+              $errMsg = if ($sessionStatus.progressState.events) {
+                ($sessionStatus.progressState.events | Where-Object { $_.severity -eq "Error" } |
+                 Select-Object -First 1).message
+              } else { "result: $result" }
+              throw "Full restore session failed: $errMsg"
+            }
+          }
+          elseif ($state -eq "Cancelled") {
+            throw "Full restore session was cancelled"
+          }
+
+          if ($elapsed % 60 -eq 0) {
+            Write-Log "  Restore in progress... (${elapsed}s, state: $state)" -Level "INFO"
+          }
+        }
+        catch {
+          if ($_.Exception.Message -imatch "Full restore session (failed|was cancelled)") { throw }
+          Write-Log "  Session poll error (attempt will retry): $($_.Exception.Message)" -Level "WARNING"
+        }
+      }
+
+      if ($elapsed -ge $restoreTimeout) {
+        throw "Full restore timed out after ${restoreTimeout}s"
+      }
+    }
+    else {
+      throw "Restore API returned no sessionId — unexpected response format"
+    }
+
+    # Step 6: Find restored VM in Prism Central
+    $discoveryTimeout = 120
+    $discoveryInterval = 10
+    $elapsed = 0
+    $recoveredVM = $null
+
+    Write-Log "  Locating restored VM in Prism Central..." -Level "INFO"
+    while ($elapsed -lt $discoveryTimeout) {
+      Start-Sleep -Seconds $discoveryInterval
+      $elapsed += $discoveryInterval
+      try {
+        $recoveredVM = Get-PrismVMByName -Name $recoveryName
+        if ($recoveredVM) { break }
+      }
+      catch {
+        Write-Log "  VM discovery API error (${elapsed}s/${discoveryTimeout}s): $($_.Exception.Message)" -Level "WARNING"
+      }
+    }
+
+    if (-not $recoveredVM) {
+      throw "Restored VM '$recoveryName' not found in Prism Central after ${discoveryTimeout}s"
+    }
+
+    $vmUUID = if ($script:PrismApiVersion -eq "v4") { @($recoveredVM)[0].extId } else { @($recoveredVM)[0].metadata.uuid }
+    Write-Log "  Restored VM found: $vmUUID" -Level "SUCCESS"
+
+    # Step 7: Verify network isolation before power-on
+    $isolated = Assert-VMNetworkIsolation -VMUUID $vmUUID -IsolatedNetwork $IsolatedNetwork
+    if (-not $isolated) {
+      Write-Log "  ABORTING: VM '$recoveryName' has NIC(s) NOT on isolated network — cleaning up to prevent production exposure" -Level "ERROR"
+      Remove-PrismVM -UUID $vmUUID
+      throw "Network isolation verification failed for '$vmName' — restored VM had NIC(s) on non-isolated subnet"
+    }
+
+    # Step 8: Power on — VM verified on isolated network
+    Write-Log "  Powering on VM (verified on isolated network '$($IsolatedNetwork.Name)')..." -Level "INFO"
+    Set-PrismVMPowerState -UUID $vmUUID -State "ON"
+
+    $recoveryInfo = _NewRecoveryInfo -OriginalVMName $vmName -RecoveryVMName $recoveryName -RecoveryVMUUID $vmUUID -Status "Running" -RestoreMethod "FullRestore"
+    $script:RecoverySessions.Add($recoveryInfo)
+    return $recoveryInfo
+  }
+  catch {
+    Write-Log "Full restore failed for '$vmName': $($_.Exception.Message)" -Level "ERROR"
+
+    $recoveryInfo = _NewRecoveryInfo -OriginalVMName $vmName -RecoveryVMName $recoveryName -RecoveryVMUUID $vmUUID -Status "Failed" -ErrorMessage $_.Exception.Message -RestoreMethod "FullRestore"
+    $script:RecoverySessions.Add($recoveryInfo)
+    return $recoveryInfo
+  }
+}
+
+function Stop-AHVFullRestore {
+  <#
+  .SYNOPSIS
+    Clean up a full-restore VM (power off + delete from Prism) with retry logic
+  .DESCRIPTION
+    Full restore creates an independent VM. Cleanup = power off + Remove-PrismVM.
+    Retries up to 3 times with exponential backoff. On final failure, writes
+    orphan UUID to a file for manual cleanup.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$RecoveryInfo
+  )
+
+  $vmName = $RecoveryInfo.OriginalVMName
+  $vmUUID = $RecoveryInfo.RecoveryVMUUID
+  $maxRetries = 3
+
+  if (-not $vmUUID) {
+    # No UUID means restore never completed — try by name as fallback
+    if ($RecoveryInfo.RecoveryVMName) {
+      try {
+        $found = Get-PrismVMByName -Name $RecoveryInfo.RecoveryVMName
+        if ($found) {
+          $vmUUID = if ($script:PrismApiVersion -eq "v4") { @($found)[0].extId } else { @($found)[0].metadata.uuid }
+          Write-Log "  Found orphan VM by name: $($RecoveryInfo.RecoveryVMName) -> $vmUUID" -Level "WARNING"
+        }
+      }
+      catch { }
+    }
+    if (-not $vmUUID) {
+      $RecoveryInfo.Status = "CleanedUp"
+      return
+    }
+  }
+
+  # Retry power-off
+  $poweredOff = $false
+  for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+    try {
+      Write-Log "  Powering off full-restore VM: $($RecoveryInfo.RecoveryVMName) (attempt $attempt/$maxRetries)" -Level "INFO"
+      Set-PrismVMPowerState -UUID $vmUUID -State "OFF"
+      $poweredOff = Wait-PrismVMPowerState -UUID $vmUUID -State "OFF" -TimeoutSec 120
+      if ($poweredOff) { break }
+    }
+    catch {
+      if ($attempt -lt $maxRetries) {
+        $waitSec = [math]::Min([int]([math]::Pow(2, $attempt)), 15)
+        Start-Sleep -Seconds $waitSec
+      }
+    }
+  }
+
+  if (-not $poweredOff) {
+    Write-Log "  Power-off failed after $maxRetries attempts for '$vmName' (UUID: $vmUUID)" -Level "WARNING"
+  }
+
+  # Retry delete
+  $deleted = $false
+  for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+    try {
+      $deleted = Remove-PrismVM -UUID $vmUUID
+      if ($deleted) { break }
+    }
+    catch {
+      if ($attempt -lt $maxRetries) {
+        $waitSec = [math]::Min([int]([math]::Pow(2, $attempt)), 15)
+        Write-Log "  Delete retry $attempt/$maxRetries for '$vmName' in ${waitSec}s" -Level "WARNING"
+        Start-Sleep -Seconds $waitSec
+      }
+    }
+  }
+
+  if ($deleted) {
+    Write-Log "Cleaned up full-restore VM for '$vmName'" -Level "SUCCESS"
+    $RecoveryInfo.Status = "CleanedUp"
+  }
+  else {
+    Write-Log "CLEANUP FAILED for '$vmName' (UUID: $vmUUID) after $maxRetries retries — VM may be orphaned" -Level "ERROR"
+    Write-Log "Manual cleanup required: delete VM '$($RecoveryInfo.RecoveryVMName)' (UUID: $vmUUID) from Prism Central" -Level "ERROR"
+    $RecoveryInfo.Status = "CleanupFailed"
+
+    # Write orphan UUID to file for automated recovery
+    $orphanDir = if ($OutputPath -and (Test-Path $OutputPath)) { (Resolve-Path $OutputPath).Path } else { $PSScriptRoot }
+    $orphanFile = Join-Path $orphanDir "SureBackup_OrphanVMs.txt"
+    try {
+      "$vmUUID|$($RecoveryInfo.RecoveryVMName)|$(Get-Date -Format 'o')" | Out-File -FilePath $orphanFile -Append -Encoding UTF8
+    }
+    catch {
+      Write-Log "  Could not write orphan file '$orphanFile': $($_.Exception.Message) — record UUID manually: $vmUUID" -Level "WARNING"
+    }
+  }
+}
