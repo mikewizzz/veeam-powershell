@@ -26,8 +26,8 @@ function New-SvgGaugeChart {
   if ($Score -lt 0) { $Score = 0 }
   if ($Score -gt 100) { $Score = 100 }
 
-  if ($Score -ge 70) { $color = "#107C10" }
-  elseif ($Score -ge 40) { $color = "#F7630C" }
+  if ($Score -ge 70) { $color = "#0A7B2E" }
+  elseif ($Score -ge 40) { $color = "#B45309" }
   else { $color = "#D13438" }
 
   $cx = 110; $cy = 100; $r = 80
@@ -275,11 +275,11 @@ function New-SvgStackedBar {
 
   $svg = @"
     <svg viewBox="0 0 $Width 80" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Session status breakdown" style="max-width:${Width}px">
-      <rect x="$x1" y="10" width="$successW" height="$barH" rx="4" fill="#00B336" />
-      <rect x="$x2" y="10" width="$warningW" height="$barH" fill="#FF8C00" />
+      <rect x="$x1" y="10" width="$successW" height="$barH" rx="4" fill="#0A7B2E" />
+      <rect x="$x2" y="10" width="$warningW" height="$barH" fill="#B45309" />
       <rect x="$x3" y="10" width="$errorW" height="$barH" rx="4" fill="#D13438" />
-      <text x="$x1" y="65" fill="#00B336" font-size="11" font-weight="600" font-family="'Segoe UI',sans-serif">Success: $([int]$SuccessCount)</text>
-      <text x="$([Math]::Round($Width / 2))" y="65" text-anchor="middle" fill="#FF8C00" font-size="11" font-weight="600" font-family="'Segoe UI',sans-serif">Warning: $([int]$WarningCount)</text>
+      <text x="$x1" y="65" fill="#0A7B2E" font-size="11" font-weight="600" font-family="'Segoe UI',sans-serif">Success: $([int]$SuccessCount)</text>
+      <text x="$([Math]::Round($Width / 2))" y="65" text-anchor="middle" fill="#B45309" font-size="11" font-weight="600" font-family="'Segoe UI',sans-serif">Warning: $([int]$WarningCount)</text>
       <text x="$($Width - 10)" y="65" text-anchor="end" fill="#D13438" font-size="11" font-weight="600" font-family="'Segoe UI',sans-serif">Error: $([int]$ErrorCount)</text>
     </svg>
 "@

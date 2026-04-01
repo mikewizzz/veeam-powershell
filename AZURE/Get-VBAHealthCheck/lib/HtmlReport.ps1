@@ -65,6 +65,8 @@ function New-HtmlReport {
     $appName = _EscapeHtml "$($SystemData.ServerInfo.serverName)"
     $appRg = _EscapeHtml "$($SystemData.ServerInfo.resourceGroup)"
   }
+  $systemState = "N/A"
+  if ($null -ne $SystemData.Status) { $systemState = "$($SystemData.Status.state)" }
 
   # =============================
   # Gauge chart
@@ -140,15 +142,17 @@ function New-HtmlReport {
     }
 
     $protectionHtml = @"
-  <details class="section" open>
+  <details class="section" open id="section-protection">
     <summary class="section-title">Protection Coverage</summary>
     <div style="display:flex;align-items:flex-start;gap:32px;flex-wrap:wrap;margin-bottom:20px;">
       $donutChart
     </div>
+    <div class="table-wrap">
     <table>
-      <thead><tr><th>Resource Type</th><th>Total</th><th>Protected</th><th>Unprotected</th><th>Coverage</th></tr></thead>
+      <thead><tr><th scope="col">Resource Type</th><th scope="col">Total</th><th scope="col">Protected</th><th scope="col">Unprotected</th><th scope="col">Coverage</th></tr></thead>
       <tbody>$coverageRows</tbody>
     </table>
+    </div>
   </details>
 "@
   }
@@ -160,33 +164,37 @@ function New-HtmlReport {
   if ($null -ne $UnprotectedResources) {
     $unprotSections = ""
 
-    # Unprotected VMs
-    $unprotVMs = @($UnprotectedResources.VMs)
+    # Unprotected VMs — sorted by disk size descending (largest unprotected data first)
+    $unprotVMs = @($UnprotectedResources.VMs) | Sort-Object { [int]$_.totalSizeInGB } -Descending
     if ($unprotVMs.Count -gt 0) {
       $maxShow = [math]::Min($unprotVMs.Count, 25)
       $vmRows = ""
       for ($i = 0; $i -lt $maxShow; $i++) {
         $vm = $unprotVMs[$i]
         $vmName = _EscapeHtml "$($vm.name)"
+        $vmSku = _EscapeHtml "$($vm.vmSize)"
+        $vmDiskGB = "$($vm.totalSizeInGB)"
+        $vmOs = _EscapeHtml "$($vm.osType)"
         $vmRegion = _EscapeHtml "$($vm.regionName)"
-        $vmRg = _EscapeHtml "$($vm.resourceGroup)"
-        $vmSize = _EscapeHtml "$($vm.vmSize)"
-        $vmRows += "<tr><td>$vmName</td><td>$vmRegion</td><td>$vmRg</td><td>$vmSize</td></tr>`n"
+        $vmRg = _EscapeHtml "$($vm.resourceGroupName)"
+        $vmRows += "<tr><td>$vmName</td><td>$vmSku</td><td style='font-weight:600;'>$vmDiskGB</td><td>$vmOs</td><td>$vmRegion</td><td>$vmRg</td></tr>`n"
       }
       if ($unprotVMs.Count -gt $maxShow) {
-        $vmRows += "<tr><td colspan='4' style='font-style:italic;color:var(--ms-gray-90);'>... and $($unprotVMs.Count - $maxShow) more (see CSV export)</td></tr>`n"
+        $vmRows += "<tr><td colspan='6' style='font-style:italic;color:var(--ms-gray-90);'>... and $($unprotVMs.Count - $maxShow) more (see CSV export)</td></tr>`n"
       }
       $unprotSections += @"
     <h3 style="margin:16px 0 8px;font-size:15px;color:var(--ms-gray-130);">Unprotected Virtual Machines ($($unprotVMs.Count))</h3>
+    <div class="table-wrap">
     <table>
-      <thead><tr><th>VM Name</th><th>Region</th><th>Resource Group</th><th>Size</th></tr></thead>
+      <thead><tr><th scope="col">VM Name</th><th scope="col">VM SKU</th><th scope="col">Disk (GB)</th><th scope="col">OS</th><th scope="col">Region</th><th scope="col">Resource Group</th></tr></thead>
       <tbody>$vmRows</tbody>
     </table>
+    </div>
 "@
     }
 
-    # Unprotected SQL
-    $unprotSQL = @($UnprotectedResources.SQL)
+    # Unprotected SQL — sorted by size descending
+    $unprotSQL = @($UnprotectedResources.SQL) | Sort-Object { [int]$_.sizeInMb } -Descending
     if ($unprotSQL.Count -gt 0) {
       $sqlRows = ""
       $maxShow = [math]::Min($unprotSQL.Count, 25)
@@ -194,23 +202,28 @@ function New-HtmlReport {
         $db = $unprotSQL[$i]
         $dbName = _EscapeHtml "$($db.name)"
         $dbServer = _EscapeHtml "$($db.serverName)"
+        $dbSizeMB = [int]$db.sizeInMb
+        $dbSizeDisplay = if ($dbSizeMB -ge 1024) { "{0:N1} GB" -f ($dbSizeMB / 1024) } else { "$dbSizeMB MB" }
+        $dbType = _EscapeHtml "$($db.databaseType)"
         $dbRegion = _EscapeHtml "$($db.regionName)"
-        $sqlRows += "<tr><td>$dbName</td><td>$dbServer</td><td>$dbRegion</td></tr>`n"
+        $sqlRows += "<tr><td>$dbName</td><td>$dbServer</td><td style='font-weight:600;'>$dbSizeDisplay</td><td>$dbType</td><td>$dbRegion</td></tr>`n"
       }
       if ($unprotSQL.Count -gt $maxShow) {
-        $sqlRows += "<tr><td colspan='3' style='font-style:italic;color:var(--ms-gray-90);'>... and $($unprotSQL.Count - $maxShow) more (see CSV export)</td></tr>`n"
+        $sqlRows += "<tr><td colspan='5' style='font-style:italic;color:var(--ms-gray-90);'>... and $($unprotSQL.Count - $maxShow) more (see CSV export)</td></tr>`n"
       }
       $unprotSections += @"
     <h3 style="margin:16px 0 8px;font-size:15px;color:var(--ms-gray-130);">Unprotected SQL Databases ($($unprotSQL.Count))</h3>
+    <div class="table-wrap">
     <table>
-      <thead><tr><th>Database</th><th>Server</th><th>Region</th></tr></thead>
+      <thead><tr><th scope="col">Database</th><th scope="col">Server</th><th scope="col">Size</th><th scope="col">Type</th><th scope="col">Region</th></tr></thead>
       <tbody>$sqlRows</tbody>
     </table>
+    </div>
 "@
     }
 
-    # Unprotected File Shares
-    $unprotFS = @($UnprotectedResources.FileShares)
+    # Unprotected File Shares — sorted by size descending
+    $unprotFS = @($UnprotectedResources.FileShares) | Sort-Object { [double]$_.size } -Descending
     if ($unprotFS.Count -gt 0) {
       $fsRows = ""
       $maxShow = [math]::Min($unprotFS.Count, 25)
@@ -218,24 +231,29 @@ function New-HtmlReport {
         $fs = $unprotFS[$i]
         $fsName = _EscapeHtml "$($fs.name)"
         $fsAcct = _EscapeHtml "$($fs.storageAccountName)"
+        $fsSizeBytes = [double]$fs.size
+        $fsSizeDisplay = if ($fsSizeBytes -ge 1099511627776) { "{0:N1} TB" -f ($fsSizeBytes / 1099511627776) } elseif ($fsSizeBytes -ge 1073741824) { "{0:N1} GB" -f ($fsSizeBytes / 1073741824) } else { "{0:N0} MB" -f ($fsSizeBytes / 1048576) }
+        $fsTier = _EscapeHtml "$($fs.accessTier)"
         $fsRegion = _EscapeHtml "$($fs.regionName)"
-        $fsRows += "<tr><td>$fsName</td><td>$fsAcct</td><td>$fsRegion</td></tr>`n"
+        $fsRows += "<tr><td>$fsName</td><td>$fsAcct</td><td style='font-weight:600;'>$fsSizeDisplay</td><td>$fsTier</td><td>$fsRegion</td></tr>`n"
       }
       if ($unprotFS.Count -gt $maxShow) {
-        $fsRows += "<tr><td colspan='3' style='font-style:italic;color:var(--ms-gray-90);'>... and $($unprotFS.Count - $maxShow) more (see CSV export)</td></tr>`n"
+        $fsRows += "<tr><td colspan='5' style='font-style:italic;color:var(--ms-gray-90);'>... and $($unprotFS.Count - $maxShow) more (see CSV export)</td></tr>`n"
       }
       $unprotSections += @"
     <h3 style="margin:16px 0 8px;font-size:15px;color:var(--ms-gray-130);">Unprotected File Shares ($($unprotFS.Count))</h3>
+    <div class="table-wrap">
     <table>
-      <thead><tr><th>File Share</th><th>Storage Account</th><th>Region</th></tr></thead>
+      <thead><tr><th scope="col">File Share</th><th scope="col">Storage Account</th><th scope="col">Size</th><th scope="col">Access Tier</th><th scope="col">Region</th></tr></thead>
       <tbody>$fsRows</tbody>
     </table>
+    </div>
 "@
     }
 
     if ($unprotSections) {
       $unprotectedHtml = @"
-  <details class="section">
+  <details class="section" id="section-unprotected">
     <summary class="section-title">Unprotected Resources</summary>
     $unprotSections
   </details>
@@ -271,13 +289,15 @@ function New-HtmlReport {
     }
 
     $protectedItemsHtml = @"
-  <details class="section">
+  <details class="section" id="section-inventory">
     <summary class="section-title">Protected VM Inventory</summary>
     <p style="margin:16px 0 8px;font-size:13px;color:var(--ms-gray-90);">Sorted by last backup time (oldest first) to highlight stale backups. $(@($ProtectedItems.VMs).Count) total protected VMs.</p>
+    <div class="table-wrap">
     <table>
-      <thead><tr><th>VM Name</th><th>VM Size</th><th>Disk (GB)</th><th>OS</th><th>Region</th><th>Last Backup</th><th>Restore Points</th></tr></thead>
+      <thead><tr><th scope="col">VM Name</th><th scope="col">VM Size</th><th scope="col">Disk (GB)</th><th scope="col">OS</th><th scope="col">Region</th><th scope="col">Last Backup</th><th scope="col">Restore Points</th></tr></thead>
       <tbody>$piRows</tbody>
     </table>
+    </div>
   </details>
 "@
   }
@@ -288,7 +308,7 @@ function New-HtmlReport {
   $storageUsageHtml = ""
   if ($null -ne $StorageUsage) {
     $storageUsageHtml = @"
-  <details class="section">
+  <details class="section" id="section-storage">
     <summary class="section-title">Storage Usage</summary>
     <div class="kpi-grid" style="margin-top:16px;">
       <div class="kpi-card"><div class="kpi-label">Total Usage</div><div class="kpi-value" style="font-size:20px;">$($StorageUsage.totalUsage) GB</div></div>
@@ -319,8 +339,10 @@ function New-HtmlReport {
       foreach ($p in $pt.Items) {
         $pName = _EscapeHtml "$($p.name)"
         $pEnabled = if ($p.isEnabled) { "<span style='color:#00B336;'>Enabled</span>" } else { "<span style='color:#D13438;'>Disabled</span>" }
-        $snapColor = Get-HealthColor -Status (if($p.snapshotStatus -eq "Success"){"Healthy"}elseif($p.snapshotStatus -eq "Error"){"Critical"}elseif($p.snapshotStatus -eq "Warning"){"Warning"}else{"Info"})
-        $bkpColor = Get-HealthColor -Status (if($p.backupStatus -eq "Success"){"Healthy"}elseif($p.backupStatus -eq "Error"){"Critical"}elseif($p.backupStatus -eq "Warning"){"Warning"}else{"Info"})
+        $snapSeverity = switch ($p.snapshotStatus) { "Success" { "Healthy" } "Error" { "Critical" } "Warning" { "Warning" } default { "Info" } }
+        $bkpSeverity = switch ($p.backupStatus) { "Success" { "Healthy" } "Error" { "Critical" } "Warning" { "Warning" } default { "Info" } }
+        $snapColor = Get-HealthColor -Status $snapSeverity
+        $bkpColor = Get-HealthColor -Status $bkpSeverity
         $snapIcon = Get-StatusIcon -Status $p.snapshotStatus
         $bkpIcon = Get-StatusIcon -Status $p.backupStatus
         $escapedSnap = _EscapeHtml "$($p.snapshotStatus)"
@@ -333,12 +355,14 @@ function New-HtmlReport {
 
     if ($policyRows) {
       $policyHtml = @"
-  <details class="section" open>
+  <details class="section" open id="section-policy">
     <summary class="section-title">Policy Status</summary>
+    <div class="table-wrap">
     <table>
-      <thead><tr><th>Policy Name</th><th>Type</th><th>Status</th><th>Snapshot</th><th>Backup</th><th>Next Execution</th></tr></thead>
+      <thead><tr><th scope="col">Policy Name</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col">Snapshot</th><th scope="col">Backup</th><th scope="col">Next Execution</th></tr></thead>
       <tbody>$policyRows</tbody>
     </table>
+    </div>
   </details>
 "@
     }
@@ -363,7 +387,7 @@ function New-HtmlReport {
     $slaChart = New-SvgHorizontalBarChart -Items $slaItems -MaxBars 10
 
     $slaHtml = @"
-  <details class="section">
+  <details class="section" id="section-sla">
     <summary class="section-title">SLA Compliance</summary>
     $slaChart
   </details>
@@ -402,15 +426,17 @@ function New-HtmlReport {
     if ($failedRows) {
       $failedTable = @"
     <h3 style="margin:20px 0 8px;font-size:15px;color:var(--ms-gray-130);">Recent Failed Sessions</h3>
+    <div class="table-wrap">
     <table>
-      <thead><tr><th>Type</th><th>Policy</th><th>Start Time</th><th>Duration</th></tr></thead>
+      <thead><tr><th scope="col">Type</th><th scope="col">Policy</th><th scope="col">Start Time</th><th scope="col">Duration</th></tr></thead>
       <tbody>$failedRows</tbody>
     </table>
+    </div>
 "@
     }
 
     $sessionHtml = @"
-  <details class="section" open>
+  <details class="section" open id="section-sessions">
     <summary class="section-title">Session Health</summary>
     $stackedBar
     <div class="kpi-grid" style="margin-top:16px;">
@@ -444,12 +470,14 @@ function New-HtmlReport {
     }
 
     $repoHtml = @"
-  <details class="section" open>
+  <details class="section" open id="section-repos">
     <summary class="section-title">Repository Health</summary>
+    <div class="table-wrap">
     <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Region</th><th>Encryption</th><th>Immutability</th><th>Tier</th></tr></thead>
+      <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col">Region</th><th scope="col">Encryption</th><th scope="col">Immutability</th><th scope="col">Tier</th></tr></thead>
       <tbody>$repoRows</tbody>
     </table>
+    </div>
   </details>
 "@
   }
@@ -485,10 +513,12 @@ function New-HtmlReport {
     $workerTable = ""
     if ($workerRows) {
       $workerTable = @"
+    <div class="table-wrap">
     <table>
-      <thead><tr><th>Name</th><th>Status</th><th>Region</th><th>Instance Type</th><th>Profile</th></tr></thead>
+      <thead><tr><th scope="col">Name</th><th scope="col">Status</th><th scope="col">Region</th><th scope="col">Instance Type</th><th scope="col">Profile</th></tr></thead>
       <tbody>$workerRows</tbody>
     </table>
+    </div>
 "@
     }
 
@@ -518,7 +548,7 @@ function New-HtmlReport {
     }
 
     $workerHtml = @"
-  <details class="section">
+  <details class="section" id="section-workers">
     <summary class="section-title">Worker Health</summary>
     $workerKpis
     $bottleneckHtml
@@ -539,7 +569,7 @@ function New-HtmlReport {
     $cbLastTime = _EscapeHtml "$($cbSettings.lastBackupSessionStartTimeUtc)"
 
     $configBkpHtml = @"
-  <details class="section">
+  <details class="section" id="section-configbkp">
     <summary class="section-title">Configuration Backup</summary>
     <div class="kpi-grid">
       <div class="kpi-card"><div class="kpi-label">Status</div><div class="kpi-value" style="font-size:18px;">$cbEnabled</div></div>
@@ -557,7 +587,8 @@ function New-HtmlReport {
   $licenseHtml = ""
   if ($null -ne $LicenseData.License) {
     $lic = $LicenseData.License
-    $licType = _EscapeHtml "$(if ($lic.isFreeEdition) { 'Free Edition' } else { $lic.licenseType })"
+    $licTypeRaw = if ($lic.isFreeEdition) { "Free Edition" } else { "$($lic.licenseType)" }
+    $licType = _EscapeHtml $licTypeRaw
     $licCompany = _EscapeHtml "$($lic.company)"
     $licExpires = _EscapeHtml "$($lic.licenseExpires)"
     $licInstances = "$($lic.totalInstancesUses) / $($lic.instances)"
@@ -566,7 +597,7 @@ function New-HtmlReport {
     $licFs = "$($lic.fileShareInstancesUses)"
 
     $licenseHtml = @"
-  <details class="section">
+  <details class="section" id="section-license">
     <summary class="section-title">License Information</summary>
     <div class="kpi-grid">
       <div class="kpi-card"><div class="kpi-label">License Type</div><div class="kpi-value" style="font-size:18px;">$licType</div><div class="kpi-subtext">$licCompany</div></div>
@@ -610,13 +641,15 @@ function New-HtmlReport {
     }
 
     $configCheckHtml = @"
-  <details class="section" open>
+  <details class="section" open id="section-config">
     <summary class="section-title">Configuration Check</summary>
     <p style="margin-bottom:16px;">Overall Status: $overallBadge</p>
+    <div class="table-wrap">
     <table>
-      <thead><tr><th>Check</th><th>Status</th><th>Result</th></tr></thead>
+      <thead><tr><th scope="col">Check</th><th scope="col">Status</th><th scope="col">Result</th></tr></thead>
       <tbody>$checkRows</tbody>
     </table>
+    </div>
   </details>
 "@
   }
@@ -673,7 +706,7 @@ function New-HtmlReport {
     }
 
     $recsHtml = @"
-  <details class="section" open>
+  <details class="section" open id="section-recs">
     <summary class="section-title">Recommendations</summary>
     $immediateSection
     $shortTermSection
@@ -713,9 +746,9 @@ function New-HtmlReport {
   --ms-gray-90: #605E5C;
   --ms-gray-130: #323130;
   --ms-gray-160: #201F1E;
-  --veeam-green: #00B336;
-  --color-success: #107C10;
-  --color-warning: #F7630C;
+  --veeam-green: #0A7B2E;
+  --color-success: #0A7B2E;
+  --color-warning: #B45309;
   --color-danger: #D13438;
   --color-info: #0078D4;
   --header-dark: #1B1B2F;
@@ -726,14 +759,16 @@ function New-HtmlReport {
   --shadow-16: 0 6.4px 14.4px 0 rgba(0,0,0,.132), 0 1.2px 3.6px 0 rgba(0,0,0,.108);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 body { font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Roboto', 'Helvetica Neue', sans-serif; background: var(--ms-gray-10); color: var(--ms-gray-160); line-height: 1.6; font-size: 14px; -webkit-font-smoothing: antialiased; counter-reset: section-counter; }
 .container { max-width: 1440px; margin: 0 auto; padding: 0 32px 40px; }
 
-.header { background: linear-gradient(135deg, var(--header-dark) 0%, var(--header-mid) 50%, var(--header-deep) 100%); padding: 48px 32px 40px; margin-bottom: 32px; position: relative; overflow: hidden; }
+header.header, .header { background: linear-gradient(135deg, var(--header-dark) 0%, var(--header-mid) 50%, var(--header-deep) 100%); padding: 48px 32px 40px; margin-bottom: 32px; position: relative; overflow: hidden; }
 .header-orb { position: absolute; top: -50%; right: -10%; width: 400px; height: 400px; background: radial-gradient(circle, rgba(255,255,255,0.04) 0%, transparent 70%); border-radius: 50%; }
 .header-content { max-width: 1440px; margin: 0 auto; position: relative; z-index: 1; }
 .header-badge { display: inline-block; padding: 4px 14px; background: rgba(255,255,255,0.10); color: #FFFFFF; border: 1px solid rgba(255,255,255,0.20); border-radius: 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; backdrop-filter: blur(12px); margin-bottom: 16px; }
-.header-title { font-size: 36px; font-weight: 700; color: #FFFFFF; letter-spacing: -0.02em; margin-bottom: 6px; }
+h1.header-title, .header-title { font-size: 36px; font-weight: 700; color: #FFFFFF; letter-spacing: -0.02em; margin-bottom: 6px; }
 .header-subtitle { font-size: 16px; font-weight: 400; color: rgba(255,255,255,0.75); margin-bottom: 20px; }
 .header-meta { display: flex; flex-wrap: wrap; gap: 24px; }
 .header-meta span { font-size: 13px; color: rgba(255,255,255,0.6); }
@@ -744,8 +779,8 @@ body { font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Roboto', 'He
 .score-summary { display: flex; justify-content: center; gap: 32px; margin-top: 24px; font-size: 14px; }
 .score-stat { display: flex; align-items: center; gap: 8px; }
 .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
-.dot-green { background: #00B336; }
-.dot-orange { background: #FF8C00; }
+.dot-green { background: #0A7B2E; }
+.dot-orange { background: #B45309; }
 .dot-red { background: #D13438; }
 
 .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
@@ -758,19 +793,25 @@ details.section { background: white; margin-bottom: 24px; border-radius: 4px; bo
 details.section > summary { padding: 24px 32px; font-size: 18px; font-weight: 600; color: var(--ms-gray-160); cursor: pointer; list-style: none; border-bottom: 1px solid var(--ms-gray-30); counter-increment: section-counter; }
 details.section > summary::before { content: counter(section-counter, decimal-leading-zero) " "; color: var(--ms-blue); font-weight: 700; margin-right: 8px; }
 details.section > summary::-webkit-details-marker { display: none; }
+details.section > summary::after { content: '\276F'; float: right; color: var(--ms-gray-90); transition: transform 0.2s ease; }
+details.section[open] > summary::after { transform: rotate(90deg); }
 details.section[open] > summary { border-bottom: 1px solid var(--ms-gray-30); }
+summary:focus-visible { outline: 2px solid var(--ms-blue); outline-offset: 2px; border-radius: 4px; }
 details.section > :not(summary) { padding: 0 32px; }
 details.section > :last-child { padding-bottom: 24px; }
-details.section > table { margin: 0; }
-details.section > table td, details.section > table th { padding-left: 32px; }
-details.section > table td:last-child, details.section > table th:last-child { padding-right: 32px; }
+details.section table { margin: 0; }
+details.section .table-wrap { padding: 0 32px; }
+details.section > table td, details.section > table th, details.section .table-wrap td, details.section .table-wrap th { padding-left: 12px; }
+details.section > table td:last-child, details.section > table th:last-child, details.section .table-wrap td:last-child, details.section .table-wrap th:last-child { padding-right: 12px; }
 details.section > div, details.section > p, details.section > h3 { padding-left: 32px; padding-right: 32px; }
 
 table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 16px; }
 thead { background: var(--ms-gray-20); }
 th { padding: 10px 14px; text-align: left; font-weight: 600; color: var(--ms-gray-130); font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; border-bottom: 2px solid var(--ms-gray-50); }
 td { padding: 12px 14px; border-bottom: 1px solid var(--ms-gray-30); color: var(--ms-gray-160); }
-tbody tr:hover { background: var(--ms-gray-10); }
+tbody tr:nth-child(even) { background: var(--ms-gray-10); }
+tbody tr:hover { background: var(--ms-gray-20); }
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
 .info-card { background: var(--ms-gray-10); border-left: 4px solid var(--ms-blue); padding: 20px 24px; margin: 16px 0; border-radius: 2px; }
 .info-card-title { font-weight: 600; color: var(--ms-gray-130); margin-bottom: 8px; font-size: 14px; }
@@ -787,16 +828,31 @@ tbody tr:hover { background: var(--ms-gray-10); }
   .container { padding: 0 16px 20px; }
   .kpi-grid { grid-template-columns: 1fr 1fr; }
   .header-title { font-size: 24px; }
+  .toc-nav { flex-direction: column; gap: 4px; }
 }
+@media (max-width: 480px) {
+  .kpi-grid { grid-template-columns: 1fr; }
+  .score-summary { flex-direction: column; gap: 8px; align-items: center; }
+  .header-meta { flex-direction: column; gap: 8px; }
+  details.section > summary { padding: 16px 20px; font-size: 16px; }
+  details.section > :not(summary) { padding: 0 20px; }
+  details.section > table td, details.section > table th { padding-left: 20px; }
+  details.section > table td:last-child, details.section > table th:last-child { padding-right: 20px; }
+  details.section > div, details.section > p, details.section > h3 { padding-left: 20px; padding-right: 20px; }
+}
+.toc-nav { display: flex; flex-wrap: wrap; gap: 8px; padding: 20px 24px; background: white; border-radius: 4px; box-shadow: var(--shadow-4); margin-bottom: 24px; }
+.toc-nav a { font-size: 12px; color: var(--ms-blue); text-decoration: none; padding: 4px 10px; border-radius: 3px; background: var(--ms-gray-10); white-space: nowrap; }
+.toc-nav a:hover { background: var(--ms-gray-20); }
+.toc-nav a:focus-visible { outline: 2px solid var(--ms-blue); outline-offset: 1px; }
 </style>
 </head>
 <body>
 
-<div class="header">
+<header class="header">
   <div class="header-orb"></div>
   <div class="header-content">
     <div class="header-badge">VBA Appliance Health Assessment</div>
-    <div class="header-title">Veeam Backup for Azure</div>
+    <h1 class="header-title">Veeam Backup for Azure</h1>
     <div class="header-subtitle">Health Check &amp; Compliance Report</div>
     <div class="header-meta">
       <span><strong>Generated:</strong> $reportDate</span>
@@ -806,9 +862,9 @@ tbody tr:hover { background: var(--ms-gray-10); }
       <span><strong>Region:</strong> $appRegion</span>
     </div>
   </div>
-</div>
+</header>
 
-<div class="container">
+<main class="container">
 
   <div class="score-banner">
     $gaugeChart
@@ -824,7 +880,26 @@ tbody tr:hover { background: var(--ms-gray-10); }
     $categoryCards
   </div>
 
-  <details class="section" open>
+  <nav class="toc-nav" aria-label="Report sections">
+    <a href="#section-system">System</a>
+    <a href="#section-license">License</a>
+    <a href="#section-config">Configuration</a>
+    <a href="#section-protection">Protection</a>
+    <a href="#section-unprotected">Unprotected</a>
+    <a href="#section-inventory">Inventory</a>
+    <a href="#section-storage">Storage</a>
+    <a href="#section-policy">Policy</a>
+    <a href="#section-sla">SLA</a>
+    <a href="#section-sessions">Sessions</a>
+    <a href="#section-repos">Repositories</a>
+    <a href="#section-workers">Workers</a>
+    <a href="#section-configbkp">Config Backup</a>
+    <a href="#section-findings">Findings</a>
+    <a href="#section-recs">Recommendations</a>
+    <a href="#section-methodology">Methodology</a>
+  </nav>
+
+  <details class="section" open id="section-system">
     <summary class="section-title">System Information</summary>
     <div class="kpi-grid" style="margin-top:16px;">
       <div class="kpi-card"><div class="kpi-label">Server Version</div><div class="kpi-value" style="font-size:16px;">$serverVersion</div></div>
@@ -832,7 +907,7 @@ tbody tr:hover { background: var(--ms-gray-10); }
       <div class="kpi-card"><div class="kpi-label">FLR Version</div><div class="kpi-value" style="font-size:16px;">$flrVersion</div></div>
       <div class="kpi-card"><div class="kpi-label">Region</div><div class="kpi-value" style="font-size:16px;">$appRegion</div></div>
       <div class="kpi-card"><div class="kpi-label">Resource Group</div><div class="kpi-value" style="font-size:16px;">$appRg</div></div>
-      <div class="kpi-card"><div class="kpi-label">System State</div><div class="kpi-value" style="font-size:16px;">$(if($SystemData.Status){_EscapeHtml "$($SystemData.Status.state)"}else{"N/A"})</div></div>
+      <div class="kpi-card"><div class="kpi-label">System State</div><div class="kpi-value" style="font-size:16px;">$(_EscapeHtml "$systemState")</div></div>
     </div>
   </details>
 
@@ -860,17 +935,20 @@ tbody tr:hover { background: var(--ms-gray-10); }
 
   $configBkpHtml
 
-  <details class="section" open>
+  <details class="section" open id="section-findings">
     <summary class="section-title">All Findings</summary>
+    <div class="table-wrap">
     <table>
-      <thead><tr><th>Status</th><th>Category</th><th>Check</th><th>Detail</th><th>Recommendation</th></tr></thead>
+      <caption class="sr-only">All health check findings with status, category, and recommendations</caption>
+      <thead><tr><th scope="col">Status</th><th scope="col">Category</th><th scope="col">Check</th><th scope="col">Detail</th><th scope="col">Recommendation</th></tr></thead>
       <tbody>$findingsRows</tbody>
     </table>
+    </div>
   </details>
 
   $recsHtml
 
-  <details class="section">
+  <details class="section" id="section-methodology">
     <summary class="section-title">Methodology</summary>
     <div class="info-card" style="margin-top:16px;">
       <div class="info-card-title">Data Collection</div>
@@ -886,13 +964,13 @@ tbody tr:hover { background: var(--ms-gray-10); }
     </div>
   </details>
 
-  <div class="footer">
+  <footer class="footer">
     <p>Veeam Backup for Azure &mdash; Health Check &amp; Compliance Report</p>
     <p>Generated by Get-VBAHealthCheck &mdash; open-source community tool</p>
     <p>Data source: VBA appliance REST API v8.1</p>
-  </div>
+  </footer>
 
-</div>
+</main>
 </body>
 </html>
 "@

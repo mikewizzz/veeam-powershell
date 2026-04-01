@@ -31,8 +31,8 @@ function _EscapeHtml([string]$s) {
 function Get-HealthColor {
   param([string]$Status)
   switch ($Status) {
-    "Healthy"  { return "#00B336" }
-    "Warning"  { return "#FF8C00" }
+    "Healthy"  { return "#0A7B2E" }
+    "Warning"  { return "#B45309" }
     "Critical" { return "#D13438" }
     default    { return "#605E5C" }
   }
@@ -48,9 +48,9 @@ function Get-HealthColor {
 #>
 function Get-ScoreGrade {
   param([double]$Score)
-  if ($Score -ge 90) { return @{ Grade = "Excellent"; Color = "#00B336" } }
+  if ($Score -ge 90) { return @{ Grade = "Excellent"; Color = "#0A7B2E" } }
   if ($Score -ge 70) { return @{ Grade = "Good"; Color = "#0078D4" } }
-  if ($Score -ge 50) { return @{ Grade = "Needs Attention"; Color = "#FF8C00" } }
+  if ($Score -ge 50) { return @{ Grade = "Needs Attention"; Color = "#B45309" } }
   return @{ Grade = "Critical"; Color = "#D13438" }
 }
 
