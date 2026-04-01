@@ -1,12 +1,14 @@
 <#
 .SYNOPSIS
-  Get-VeeamM365Sizing.ps1 - Microsoft 365 sizing (users + dataset + growth) with optional
-  security posture signals and optional Exchange deep sizing (Archive + Recoverable Items).
+  Get-VeeamM365Sizing.ps1 - Microsoft 365 Data Footprint Assessment for Veeam Data Cloud.
 
-.DESCRIPTION (what this script does, in plain terms)
-  1) Pulls Microsoft 365 usage report CSVs via Microsoft Graph (Exchange, OneDrive, SharePoint)
+.DESCRIPTION
+  Assesses a Microsoft 365 tenant to provide user counts and data sizes across all
+  workloads protected by Veeam Data Cloud for Microsoft 365 (Foundation/Advanced/Premium).
+
+  1) Pulls usage report CSVs via Microsoft Graph (Exchange, OneDrive, SharePoint, Teams)
   2) Calculates dataset totals in BOTH decimal (GB/TB) and binary (GiB/TiB) units
-  3) Estimates a modeled "MBS" number (clearly labeled as a model, not a measured fact)
+  3) Observes historical growth trends from usage report time-series data
   4) Optionally pulls lightweight Entra/CA/Intune counts (security posture signals)
   5) Writes outputs to a timestamped folder and optionally zips the bundle
 
@@ -22,19 +24,19 @@ OPTIONAL (more accurate Exchange dataset; slower)
 AUTHENTICATION (2026 Modern Methods)
   - Session reuse: no re-login within token lifetime
   - Supports all Microsoft Graph auth patterns:
-    • Delegated (interactive) - default
-    • Certificate-based (recommended for production)
-    • Azure Managed Identity (zero credentials)
-    • Access Token (advanced scenarios)
-    • Client Secret (legacy, still supported)
+    . Delegated (interactive) - default
+    . Certificate-based (recommended for production)
+    . Azure Managed Identity (zero credentials)
+    . Access Token (advanced scenarios)
+    . Client Secret (legacy, still supported)
   - Device Code Flow for browser-less environments
   - Automatic scope validation and token refresh
 
-NOTES (critical truth)
-  - "MBS Estimate" is a MODEL. It is not a measured billable quantity from Microsoft.
+NOTES
   - Exchange Archive/RIF are not in the standard Graph usage reports; deep options query EXO.
-  - Group filtering is supported for Exchange + OneDrive only (SharePoint group filtering is not
-    reliably achievable from usage reports without expensive extra graph traversal).
+  - Group filtering is supported for Exchange, OneDrive, and Teams only (SharePoint is
+    not reliably filterable from usage reports without expensive graph traversal).
+  - Teams files are stored in SharePoint; storage is included in SharePoint totals.
 
 SECURITY
   - By default this script does NOT export per-user identifiers.
@@ -71,28 +73,10 @@ param(
   [switch]$IncludeArchive,
   [switch]$IncludeRecoverableItems,
 
-  # ===== MBS Capacity Estimation Parameters (MODELED) =====
-  # Microsoft Backup Storage (MBS) is billed BY CONSUMPTION (GB/TB), not per-user.
-  # These parameters project Azure storage capacity needed for Veeam Backup for Microsoft 365.
-  # 
-  # Why estimate MBS capacity?
-  # - Microsoft charges for actual backup storage consumed in Azure (consumption-based pricing)
-  # - Customers need to budget for Azure storage costs (not licensing costs)
-  # - Backup storage != source data size due to retention, versioning, and incremental changes
-  # 
-  # Formula: MBS Estimate = (Projected Dataset × Retention) + Monthly Change Rate
-  # 
-  [ValidateRange(0.0, 5.0)][double]$AnnualGrowthPct = 0.15,     # Projected annual data growth (15% default)
-  [ValidateRange(1.0, 10.0)][double]$RetentionMultiplier = 1.30,# Backup retention factor (1.30 = ~30% overhead for versioning)
-  [ValidateRange(0.0, 1.0)][double]$ChangeRateExchange = 0.015, # Daily change rate for Exchange (1.5% default)
-  [ValidateRange(0.0, 1.0)][double]$ChangeRateOneDrive = 0.004, # Daily change rate for OneDrive (0.4% default)
-  [ValidateRange(0.0, 1.0)][double]$ChangeRateSharePoint = 0.003,# Daily change rate for SharePoint (0.3% default)
-  [ValidateRange(0.0, 1.0)][double]$BufferPct = 0.10,           # Safety buffer for capacity planning (10% headroom)
-
   # ===== Output & UX =====
   [string]$OutFolder = ".\VeeamM365SizingOutput",
   [switch]$ExportJson,
-  [switch]$ZipBundle = $true,
+  [bool]$ZipBundle = $true,
   [switch]$MaskUserIds,                       # No effect unless exporting identifiers (kept for future-proofing)
   [switch]$SkipModuleInstall,                 # If set, missing modules will error with instructions
   [switch]$EnableTelemetry                    # Local log file in output folder
@@ -157,10 +141,10 @@ $TiB = [double]1024*1024*1024*1024
 .PARAMETER bytes
   Number of bytes to convert.
 #>
-function To-GB([double]$bytes)  { [math]::Round($bytes / $GB, 2) }
-function To-TB([double]$bytes)  { [math]::Round($bytes / $TB, 4) }
-function To-GiB([double]$bytes) { [math]::Round($bytes / $GiB, 2) }
-function To-TiB([double]$bytes) { [math]::Round($bytes / $TiB, 4) }
+function ConvertTo-GB([double]$bytes)  { [math]::Round($bytes / $GB, 2) }
+function ConvertTo-TB([double]$bytes)  { [math]::Round($bytes / $TB, 4) }
+function ConvertTo-GiB([double]$bytes) { [math]::Round($bytes / $GiB, 2) }
+function ConvertTo-TiB([double]$bytes) { [math]::Round($bytes / $TiB, 4) }
 
 # =============================
 # Helper Functions
@@ -172,9 +156,9 @@ function To-TiB([double]$bytes) { [math]::Round($bytes / $TiB, 4) }
 .PARAMETER s
   The string to escape.
 .EXAMPLE
-  Escape-ODataString "O'Brien" returns "O''Brien"
+  ConvertTo-SafeODataString "O'Brien" returns "O''Brien"
 #>
-function Escape-ODataString([string]$s) {
+function ConvertTo-SafeODataString([string]$s) {
   if ([string]::IsNullOrWhiteSpace($s)) { return $s }
   return $s.Replace("'", "''")
 }
@@ -187,7 +171,7 @@ function Escape-ODataString([string]$s) {
 .NOTES
   Only masks if -MaskUserIds switch is enabled. Returns first 12 chars of hash.
 #>
-function Mask-UPN([string]$upn) {
+function Protect-UPN([string]$upn) {
   if (-not $MaskUserIds -or [string]::IsNullOrWhiteSpace($upn)) { return $upn }
   $bytes = [Text.Encoding]::UTF8.GetBytes($upn)
   $sha   = [System.Security.Cryptography.SHA256]::Create()
@@ -499,7 +483,7 @@ Write-Log "Tenant: $OrgName ($OrgId), DefaultDomain: $DefaultDomain, Env: $envNa
 #>
 function Get-GroupUPNs([string]$GroupName, [bool]$Required = $false) {
   if ([string]::IsNullOrWhiteSpace($GroupName)) { return @() }
-  $safe = Escape-ODataString $GroupName
+  $safe = ConvertTo-SafeODataString $GroupName
   $g = Get-MgGroup -Filter "DisplayName eq '$safe'"
   if (-not $g) {
     if ($Required) { throw "Entra ID group '$GroupName' not found." }
@@ -532,7 +516,7 @@ $ExcludeUPNs = Get-GroupUPNs -GroupName $ExcludeADGroup -Required:$false
   Then applies inclusion filter (if ADGroup specified).
   Finally applies exclusion filter (if ExcludeADGroup specified).
 #>
-function Apply-UpnFilters([object[]]$Data, [string]$UpnField) {
+function Select-ByUpnFilter([object[]]$Data, [string]$UpnField) {
   # Remove deleted items first
   $Data = $Data | Where-Object { $_ -ne $null -and $_.'Is Deleted' -ne 'TRUE' }
   
@@ -564,7 +548,7 @@ function Apply-UpnFilters([object[]]$Data, [string]$UpnField) {
   Reports are saved to the run folder and imported as PowerShell objects.
 #>
 function Get-GraphReportCsv {
-  param([Parameter(Mandatory)][string]$ReportName,[int]$PeriodDays)
+  param([Parameter(Mandatory)][string]$ReportName,[Parameter(Mandatory)][ValidateSet(7,30,90,180)][int]$PeriodDays)
   $uri = "https://graph.microsoft.com/v1.0/reports/$ReportName(period='D$PeriodDays')"
   $tmp = Join-Path $runFolder "$ReportName.csv"
   Invoke-GraphDownloadCsv -Uri $uri -OutPath $tmp
@@ -583,7 +567,7 @@ function Get-GraphReportCsv {
   Extrapolates daily change rate to annual percentage.
   Returns 0.0 if insufficient data or invalid values.
 #>
-function Annualize-GrowthPct {
+function ConvertTo-AnnualGrowthPct {
   param([Parameter(Mandatory)][object[]]$csv,[Parameter(Mandatory)][string]$field)
   $rows = $csv | Sort-Object { [datetime]$_.'Report Date' } -Descending
   if (-not $rows -or $rows.Count -lt 2) { return 0.0 }
@@ -604,25 +588,38 @@ function Annualize-GrowthPct {
 Write-Host "Pulling Microsoft 365 usage reports (Graph)..." -ForegroundColor Green
 
 $exDetail   = Get-GraphReportCsv -ReportName "getMailboxUsageDetail"          -PeriodDays $Period
-$exCounts   = Get-GraphReportCsv -ReportName "getMailboxUsageMailboxCounts"  -PeriodDays $Period
+$exStorage  = Get-GraphReportCsv -ReportName "getMailboxUsageStorage"        -PeriodDays $Period
 $odDetail   = Get-GraphReportCsv -ReportName "getOneDriveUsageAccountDetail" -PeriodDays $Period
 $odStorage  = Get-GraphReportCsv -ReportName "getOneDriveUsageStorage"       -PeriodDays $Period
 $spDetail   = Get-GraphReportCsv -ReportName "getSharePointSiteUsageDetail"  -PeriodDays $Period
 $spStorage  = Get-GraphReportCsv -ReportName "getSharePointSiteUsageStorage" -PeriodDays $Period
+
+# Teams usage reports (no new Graph scopes needed; Reports.Read.All covers these)
+$teamsTeamDetail = Get-GraphReportCsv -ReportName "getTeamsTeamActivityDetail"        -PeriodDays $Period
+$teamsUserDetail = Get-GraphReportCsv -ReportName "getTeamsUserActivityUserDetail"    -PeriodDays $Period
 
 # Exchange: filter active, exclude shared from "user list" but keep shared count separately
 $exUsersAll = $exDetail | Where-Object { $_.'Is Deleted' -ne 'TRUE' -and $_.'Recipient Type' -ne 'Shared' }
 $exSharedAll = $exDetail | Where-Object { $_.'Is Deleted' -ne 'TRUE' -and $_.'Recipient Type' -eq 'Shared' }
 
 # Apply group filters (Exchange + OneDrive only)
-$exUsers   = Apply-UpnFilters $exUsersAll  'User Principal Name'
+$exUsers   = Select-ByUpnFilter $exUsersAll  'User Principal Name'
 $exShared  = $exSharedAll  # keep shared independent of group filtering (shared mailboxes aren't "users"; keep them visible)
 
 $odActiveAll = $odDetail | Where-Object { $_.'Is Deleted' -ne 'TRUE' }
-$odActive    = Apply-UpnFilters $odActiveAll 'Owner Principal Name'
+$odActive    = Select-ByUpnFilter $odActiveAll 'Owner Principal Name'
 
 # SharePoint: DO NOT apply group filtering (not reliable from usage report alone)
 $spActive = $spDetail | Where-Object { $_.'Is Deleted' -ne 'TRUE' }
+
+# Teams: filter active teams and users, apply group filtering to user data
+$teamsActive = $teamsTeamDetail | Where-Object { $_.'Is Deleted' -ne 'TRUE' }
+$teamsActiveCount = @($teamsActive).Count
+$teamsActiveChannels = [int](($teamsActive | Measure-Object -Property 'Active Channels' -Sum).Sum)
+
+$teamsUsersAll = $teamsUserDetail | Where-Object { $_.'Is Deleted' -ne 'TRUE' }
+$teamsUsers = Select-ByUpnFilter $teamsUsersAll 'User Principal Name'
+$teamsActiveUsers = @($teamsUsers).Count
 
 # Group filtering sanity check (avoid silent wrong results)
 if ($ADGroup) {
@@ -641,10 +638,11 @@ if ($ADGroup) {
   }
 }
 
-# Unique users to protect (union of Exchange users + OneDrive owners)
+# Unique users to protect (union of Exchange users + OneDrive owners + Teams users)
 $uniqueUPN = @()
 $uniqueUPN += @($exUsers.'User Principal Name')
 $uniqueUPN += @($odActive.'Owner Principal Name')
+$uniqueUPN += @($teamsUsers.'User Principal Name')
 $UsersToProtect = (@($uniqueUPN | Where-Object { $_ } | Sort-Object -Unique)).Count
 
 # Source bytes (Graph usage reports)
@@ -728,55 +726,34 @@ if ($IncludeArchive -or $IncludeRecoverableItems) {
   Disconnect-ExchangeOnline -Confirm:$false | Out-Null
 }
 
-# Growth (annualized, from usage history)
-$exGrowth = Annualize-GrowthPct -csv (Get-GraphReportCsv -ReportName "getMailboxUsageStorage" -PeriodDays $Period) -field 'Storage Used (Byte)'
-$odGrowth = Annualize-GrowthPct -csv $odStorage -field 'Storage Used (Byte)'
-$spGrowth = Annualize-GrowthPct -csv $spStorage -field 'Storage Used (Byte)'
+# Growth (annualized, observed from usage history)
+$exGrowth = ConvertTo-AnnualGrowthPct -csv $exStorage -field 'Storage Used (Byte)'
+$odGrowth = ConvertTo-AnnualGrowthPct -csv $odStorage -field 'Storage Used (Byte)'
+$spGrowth = ConvertTo-AnnualGrowthPct -csv $spStorage -field 'Storage Used (Byte)'
 
 # Convert totals (decimal + binary)
-$exGB  = To-GB  $exPrimaryBytes
-$odGB  = To-GB  $odBytes
-$spGB  = To-GB  $spBytes
+$exGB  = ConvertTo-GB $exPrimaryBytes
+$odGB  = ConvertTo-GB $odBytes
+$spGB  = ConvertTo-GB $spBytes
 $totalGB = [math]::Round($exGB + $odGB + $spGB, 2)
 
-$exGiB = To-GiB $exPrimaryBytes
-$odGiB = To-GiB $odBytes
-$spGiB = To-GiB $spBytes
+$exGiB = ConvertTo-GiB $exPrimaryBytes
+$odGiB = ConvertTo-GiB $odBytes
+$spGiB = ConvertTo-GiB $spBytes
 $totalGiB = [math]::Round($exGiB + $odGiB + $spGiB, 2)
 
 $totalTB  = [math]::Round($totalGB / 1000, 4)
 $totalTiB = [math]::Round($totalGiB / 1024, 4)
 
-# =============================
-# Microsoft Backup Storage (MBS) Capacity Estimation
-# =============================
-# IMPORTANT: This is a CAPACITY MODEL for Azure storage planning, not a licensing calculation.
-# Microsoft charges for Veeam Backup for Microsoft 365 by CONSUMPTION (GB/TB of backup storage used).
-# 
-# Why backup storage > source data:
-# - Retention policies keep multiple backup versions over time
-# - Incremental backups accumulate daily changes
-# - Deleted items remain in retention windows
-# 
-# This model helps customers:
-# 1. Budget Azure storage costs accurately
-# 2. Right-size MBS capacity allocation
-# 3. Avoid unexpected consumption overages
-#
-
-# Calculate daily data change rate (incremental backup size per day)
-$dailyChangeGB = ($exGB * $ChangeRateExchange) + ($odGB * $ChangeRateOneDrive) + ($spGB * $ChangeRateSharePoint)
-$monthChangeGB = [math]::Round($dailyChangeGB * 30, 2)  # 30 days of incremental changes
-
-# Project dataset growth over next year
-$projGB = [math]::Round($totalGB * (1 + $AnnualGrowthPct), 2)
-
-# Apply retention multiplier (accounts for keeping multiple backup generations)
-# Example: 1.30 multiplier = base data + 30% overhead for versions/retention
-$mbsEstimateGB = [math]::Round(($projGB * $RetentionMultiplier) + $monthChangeGB, 2)
-
-# Add safety buffer for capacity planning (recommended practice)
-$suggestedStartGB = [math]::Round($mbsEstimateGB * (1 + $BufferPct), 2)
+# Weighted average observed growth (for KPI card)
+$avgObservedGrowth = 0.0
+$totalWeightBytes = $exPrimaryBytes + $odBytes + $spBytes
+if ($totalWeightBytes -gt 0) {
+  $avgObservedGrowth = [math]::Round(
+    (($exGrowth * $exPrimaryBytes) + ($odGrowth * $odBytes) + ($spGrowth * $spBytes)) / $totalWeightBytes,
+    4
+  )
+}
 
 # =============================
 # Security Posture Signals (Full Mode Only)
@@ -864,12 +841,6 @@ $inputs = @(
   [pscustomobject]@{ Key="ExcludeADGroup"; Value=($ExcludeADGroup ?? "") },
   [pscustomobject]@{ Key="IncludeArchive"; Value=$IncludeArchive },
   [pscustomobject]@{ Key="IncludeRecoverableItems"; Value=$IncludeRecoverableItems },
-  [pscustomobject]@{ Key="AnnualGrowthPct_Model"; Value=$AnnualGrowthPct },
-  [pscustomobject]@{ Key="RetentionMultiplier_Model"; Value=$RetentionMultiplier },
-  [pscustomobject]@{ Key="ChangeRateExchange_Model"; Value=$ChangeRateExchange },
-  [pscustomobject]@{ Key="ChangeRateOneDrive_Model"; Value=$ChangeRateOneDrive },
-  [pscustomobject]@{ Key="ChangeRateSharePoint_Model"; Value=$ChangeRateSharePoint },
-  [pscustomobject]@{ Key="BufferPct_Heuristic"; Value=$BufferPct },
   [pscustomobject]@{ Key="SharePointGroupFiltering"; Value="Not supported from usage reports (by design)" }
 )
 $inputs | Export-Csv -NoTypeInformation -Path $outInputs
@@ -908,18 +879,14 @@ $summary = [pscustomobject]@{
   Exchange_AnnualGrowthPct  = $exGrowth
   OneDrive_AnnualGrowthPct  = $odGrowth
   SharePoint_AnnualGrowthPct= $spGrowth
+  WeightedAvg_AnnualGrowthPct = $avgObservedGrowth
 
-  # Modeled sizing
-  AnnualGrowthPct_Model     = $AnnualGrowthPct
-  RetentionMultiplier_Model = $RetentionMultiplier
-  MonthChangeGB_Model       = $monthChangeGB
-  MbsEstimateGB_Model       = $mbsEstimateGB
+  Teams_ActiveTeams         = $teamsActiveCount
+  Teams_ActiveUsers         = $teamsActiveUsers
+  Teams_ActiveChannels      = $teamsActiveChannels
 
-  SuggestedStartGB_Heuristic= $suggestedStartGB
-  BufferPct_Heuristic       = $BufferPct
-
-  IncludeArchiveGB_Measured = (To-GB $archBytes)
-  IncludeRecoverableGB_Measured = (To-GB $rifBytes)
+  IncludeArchiveGB_Measured = (ConvertTo-GB $archBytes)
+  IncludeRecoverableGB_Measured = (ConvertTo-GB $rifBytes)
 
   # Posture signals (Full only)
   Dir_UserCount             = $userCount
@@ -970,6 +937,16 @@ $wl = @(
     SourceGiB        = $spGiB
     AnnualGrowthPct  = $spGrowth
     Notes            = "SharePoint group filtering not supported from usage reports; totals are tenant-wide (or site-wide view)."
+  },
+  [pscustomobject]@{
+    Workload         = "Teams"
+    Objects          = $teamsActiveCount
+    SharedObjects    = $teamsActiveChannels
+    SourceBytes      = [int64]0
+    SourceGB         = 0
+    SourceGiB        = 0
+    AnnualGrowthPct  = $null
+    Notes            = "Teams files stored in SharePoint; storage included in SharePoint totals. Objects = active teams, Secondary = active channels."
   }
 )
 $wl | Export-Csv -NoTypeInformation -Path $outWorkload
@@ -1020,47 +997,43 @@ if ($ExportJson) {
 # Notes file (Measured vs Modeled)
 # =============================
 @"
-Veeam M365 Sizing Notes ($stamp)
+Veeam M365 Data Footprint Assessment Notes ($stamp)
 
 ========================================
-WHAT IS MBS (MICROSOFT BACKUP STORAGE)?
+DATA SOURCES
 ========================================
-Microsoft Backup Storage (MBS) is CONSUMPTION-BASED PRICING for Veeam Backup for Microsoft 365.
-- Microsoft charges by GB/TB of backup storage consumed in Azure (not per-user licensing)
-- Backup storage is larger than source data due to retention, versioning, and incremental changes
-- This assessment helps you budget Azure storage costs and right-size capacity allocation
-
-========================================
-MEASURED DATA (from Microsoft reports)
-========================================
-- Exchange / OneDrive / SharePoint dataset totals: Microsoft Graph Reports CSVs
+- Exchange / OneDrive / SharePoint / Teams: Microsoft Graph usage report CSVs ($Period-day period)
 - Exchange Archive and Recoverable Items: Measured directly from Exchange Online (if enabled)
-  Note: Archive/RIF are NOT included in Graph usage reports
+  Note: Archive/RIF are NOT included in standard Graph usage reports
+- Entra ID / Security Posture: Microsoft Graph entity counts (Full mode only)
 
 ========================================
-MBS CAPACITY ESTIMATION (MODELED)
+MEASUREMENT METHODOLOGY
 ========================================
-This is a CAPACITY PLANNING MODEL for Azure storage, not a measured billable quantity.
+- User counts: Unique active user principal names across Exchange, OneDrive, and Teams
+- Data sizes: Storage Used (Byte) from Microsoft Graph usage reports, converted to GB/GiB and TB/TiB
+- Growth rates: Observed historical trends from earliest to latest data points in the report period,
+  extrapolated to an annual rate. These are observations, not projections.
+- Teams: Active teams, active channels, and active users. Teams files are stored in SharePoint;
+  storage is included in SharePoint totals (no separate Teams storage metric).
 
-Formula:
-  ProjectedDatasetGB = TotalSourceGB × (1 + AnnualGrowthPct_Model)
-  MonthlyChangeGB    = 30 × (ExGB×ChangeRateExchange + OdGB×ChangeRateOneDrive + SpGB×ChangeRateSharePoint)
-  MbsEstimateGB      = (ProjectedDatasetGB × RetentionMultiplier_Model) + MonthlyChangeGB
-  SuggestedStartGB   = MbsEstimateGB × (1 + BufferPct_Heuristic)
+========================================
+SHAREPOINT / ONEDRIVE OVERLAP NOTE
+========================================
+The SharePoint usage report (getSharePointSiteUsageDetail) may include OneDrive personal sites,
+which could result in partial overlap between SharePoint and OneDrive totals. For precise
+separation, cross-reference site URLs containing "-my.sharepoint.com".
 
-Why these parameters matter:
-- AnnualGrowthPct: Your data grows over time; plan for future capacity needs
-- RetentionMultiplier: Backups keep multiple versions; storage > source data size
-- ChangeRate: Incremental backups accumulate daily changes
-- BufferPct: Safety headroom to avoid capacity shortfalls
+========================================
+GROUP FILTERING
+========================================
+- ADGroup / ExcludeADGroup filters apply to Exchange, OneDrive, and Teams users only.
+- SharePoint usage reports do not reliably support group membership filtering without
+  expensive graph traversal, so SharePoint totals are always tenant-wide by design.
 
-IMPORTANT: This model helps with CAPACITY PLANNING and COST BUDGETING for Azure storage consumption.
-
-GROUP FILTERING:
-- ADGroup / ExcludeADGroup filters apply to Exchange user mailboxes and OneDrive owners only.
-- SharePoint usage reports do not reliably support "group membership filtering" without expensive graph traversal, so SharePoint is tenant-wide in this script by design.
-
-OUTPUTS:
+========================================
+OUTPUTS
+========================================
 - Summary CSV: $outSummary
 - Workloads CSV: $outWorkload
 - Security CSV: $outSecurity
@@ -1086,7 +1059,7 @@ $html = @"
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Microsoft 365 Backup Sizing Assessment | Veeam</title>
+<title>Microsoft 365 Data Footprint Assessment | Veeam Data Cloud</title>
 <style>
 :root {
   --ms-blue: #0078D4;
@@ -1456,10 +1429,10 @@ tbody tr:last-child td {
 <div class="container">
   <div class="header">
     <h1 class="header-title">
-      Microsoft 365 Backup Sizing Assessment
+      Microsoft 365 Data Footprint Assessment
       <span class="badge">$(if($Full){"Full"}else{"Quick"})</span>
     </h1>
-    <div class="header-subtitle">Generated: $(Get-Date -Format "MMMM dd, yyyy 'at' HH:mm") UTC</div>
+    <div class="header-subtitle">Generated: $((Get-Date).ToUniversalTime().ToString("MMMM dd, yyyy 'at' HH:mm")) UTC</div>
   </div>
 
   <div class="tenant-info">
@@ -1502,14 +1475,14 @@ tbody tr:last-child td {
       <div class="kpi-subtext">$totalGB GB | $totalTiB TiB (binary)</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Projected Growth</div>
-      <div class="kpi-value">$(Format-Pct $AnnualGrowthPct)</div>
-      <div class="kpi-subtext">Annual growth rate (modeled)</div>
+      <div class="kpi-label">Observed Growth</div>
+      <div class="kpi-value">$(Format-Pct $avgObservedGrowth)</div>
+      <div class="kpi-subtext">Weighted annual rate from $Period-day trend</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Recommended MBS</div>
-      <div class="kpi-value">$suggestedStartGB GB</div>
-      <div class="kpi-subtext">Modeled estimate: $mbsEstimateGB GB + $(Format-Pct $BufferPct) buffer</div>
+      <div class="kpi-label">Active Teams</div>
+      <div class="kpi-value">$teamsActiveCount</div>
+      <div class="kpi-subtext">$teamsActiveUsers active Teams users</div>
     </div>
   </div>
 
@@ -1524,7 +1497,7 @@ tbody tr:last-child td {
             <th>Secondary</th>
             <th>Source (GB)</th>
             <th>Source (GiB)</th>
-            <th>Annual Growth</th>
+            <th>Observed Growth</th>
             <th>Notes</th>
           </tr>
         </thead>
@@ -1556,6 +1529,15 @@ tbody tr:last-child td {
             <td>$(Format-Pct $spGrowth)</td>
             <td>Tenant-wide (no group filtering)</td>
           </tr>
+          <tr>
+            <td><strong>Microsoft Teams</strong></td>
+            <td>$teamsActiveCount</td>
+            <td>$teamsActiveChannels channels</td>
+            <td>Incl. in SP</td>
+            <td>Incl. in SP</td>
+            <td>—</td>
+            <td>Files stored in SharePoint; count = active teams</td>
+          </tr>
         </tbody>
       </table>
     </div>
@@ -1566,34 +1548,22 @@ tbody tr:last-child td {
     <div class="info-card">
       <div class="info-card-title">📊 Measured Data</div>
       <div class="info-card-text">
-        Dataset totals are sourced from Microsoft Graph usage reports ($Period-day period). Exchange Archive and Recoverable Items are measured directly from Exchange Online when enabled, as they are not included in standard Graph reports.
+        Dataset totals and user counts are sourced from Microsoft Graph usage reports ($Period-day period). Exchange Archive and Recoverable Items are measured directly from Exchange Online when enabled, as they are not included in standard Graph reports. Teams files are stored in SharePoint; storage is included in SharePoint totals.
+      </div>
+      <div class="info-card-text">
+        Growth rates are calculated from the earliest and latest data points in the $Period-day usage reports, extrapolated to an annual rate. These are observed historical trends, not projections.
       </div>
     </div>
     <div class="info-card">
-      <div class="info-card-title">💰 Understanding MBS (Microsoft Backup Storage)</div>
+      <div class="info-card-title">⚠ SharePoint / OneDrive Overlap</div>
       <div class="info-card-text">
-        <strong>MBS is consumption-based pricing:</strong> Microsoft charges for Veeam Backup for Microsoft 365 by the GB/TB of backup storage actually consumed in Azure, not per-user licensing.
+        The SharePoint usage report may include OneDrive personal sites, which could result in partial overlap between SharePoint and OneDrive totals. For precise separation, cross-reference site URLs containing "-my.sharepoint.com".
       </div>
-      <div class="info-card-text">
-        <strong>Why backup storage ≠ source data:</strong> Backup storage is larger than source data due to retention policies (keeping multiple versions), incremental changes accumulating over time, and deleted items remaining within retention windows.
-      </div>
-    </div>
-    <div class="info-card">
-      <div class="info-card-title">📈 MBS Capacity Estimation (Modeled)</div>
-      <div class="info-card-text">
-        This assessment provides a <strong>capacity planning model</strong> to help you budget Azure storage costs and right-size your MBS allocation. The estimate incorporates projected growth, retention multipliers, daily change rates, and a safety buffer. These are sizing recommendations for planning purposes, not measured billable quantities.
-      </div>
-    </div>
-    <div class="code-block">
-      <span class="code-line">ProjectedDatasetGB = TotalSourceGB × (1 + AnnualGrowthPct)</span>
-      <span class="code-line">MonthlyChangeGB = 30 × (ExGB×ChangeRateExchange + OdGB×ChangeRateOneDrive + SpGB×ChangeRateSharePoint)</span>
-      <span class="code-line">MbsEstimateGB = (ProjectedDatasetGB × RetentionMultiplier) + MonthlyChangeGB</span>
-      <span class="code-line">RecommendedMBS = MbsEstimateGB × (1 + BufferPct)</span>
     </div>
   </div>
 
   <div class="section">
-    <h2 class="section-title">Sizing Parameters</h2>
+    <h2 class="section-title">Assessment Parameters</h2>
     <div class="table-container">
       <table>
         <thead>
@@ -1603,12 +1573,6 @@ tbody tr:last-child td {
           </tr>
         </thead>
         <tbody>
-          <tr><td>Annual Growth Rate (Modeled)</td><td>$(Format-Pct $AnnualGrowthPct)</td></tr>
-          <tr><td>Retention Multiplier (Modeled)</td><td>$RetentionMultiplier</td></tr>
-          <tr><td>Exchange Daily Change Rate (Modeled)</td><td>$(Format-Pct $ChangeRateExchange)</td></tr>
-          <tr><td>OneDrive Daily Change Rate (Modeled)</td><td>$(Format-Pct $ChangeRateOneDrive)</td></tr>
-          <tr><td>SharePoint Daily Change Rate (Modeled)</td><td>$(Format-Pct $ChangeRateSharePoint)</td></tr>
-          <tr><td>Capacity Buffer (Heuristic)</td><td>$(Format-Pct $BufferPct)</td></tr>
           <tr><td>Report Period</td><td>$Period days</td></tr>
           <tr><td>Include AD Group</td><td>$([string]::IsNullOrWhiteSpace($ADGroup) ? "None" : $ADGroup)</td></tr>
           <tr><td>Exclude AD Group</td><td>$([string]::IsNullOrWhiteSpace($ExcludeADGroup) ? "None" : $ExcludeADGroup)</td></tr>
@@ -1663,8 +1627,8 @@ $(if($Full){
   </div>
 
   <footer class="footer">
-    <div class="footer-text">Generated by Veeam M365 Sizing Tool | $(Get-Date -Format 'yyyy-MM-dd HH:mm')</div>
-    <div class="footer-text">Microsoft 365 Backup Assessment Report</div>
+    <div class="footer-text">Generated by Veeam M365 Assessment Tool | $(Get-Date -Format 'yyyy-MM-dd HH:mm')</div>
+    <div class="footer-text">Microsoft 365 Data Footprint Assessment for Veeam Data Cloud</div>
   </footer>
 </div>
 
@@ -1682,14 +1646,14 @@ if ($ZipBundle) {
   Compress-Archive -Path (Join-Path $runFolder "*") -DestinationPath $outZip -Force
 }
 
-Disconnect-MgGraph | Out-Null
+try { Disconnect-MgGraph | Out-Null } catch { Write-Log "Disconnect-MgGraph: $($_.Exception.Message)" }
 Write-Log "Completed run"
 
 # =============================
 # Final console output (simple)
 # =============================
 Write-Host ""
-Write-Host "Sizing complete." -ForegroundColor Green
+Write-Host "Assessment complete." -ForegroundColor Green
 Write-Host "Output folder : $runFolder"
 Write-Host "HTML report   : $outHtml"
 Write-Host "Summary CSV   : $outSummary"
